@@ -1258,7 +1258,7 @@ HTML_TEMPLATE = """
         let debateRunning = false;
         let pollInterval = null;
         let lastPostCount = 0;
-        let moderatorMessageSent = false;
+        let moderatorMessageSent = false;  // Флаг чтобы не показывать панель сразу после отправки
         
         fetch('/api/participants')
             .then(r => r.json())
@@ -1371,7 +1371,7 @@ HTML_TEMPLATE = """
                 const nameInput = document.getElementById(`name-${idx}`);
                 const keywordsInput = document.getElementById(`keywords-${idx}`);
                 if (nameInput) p.display_name = nameInput.value.trim();
-                if (keywordsInput) p.avatar_keywords = keywordsInput.value.trim();
+                if (keywordsInput) p.avatar_keywords = keywordsInput.value.trim();  // Оставляем пустым если не задано
             });
             
             const missingNames = participants.filter(p => !p.display_name);
@@ -1399,8 +1399,10 @@ HTML_TEMPLATE = """
             
             lastPostCount = 0;
             
+            // Отображаем тему в заголовке
             document.getElementById('topicDisplay').textContent = topic;
             
+            // Отображаем участников и их инструкции в одном блоке
             const participantsHtml = participants.map(p => {
                 const instruction = instructions[p.display_name];
                 let html = `<div style="margin-bottom:12px;"><strong>${p.display_name}</strong> <small>(${p.model})</small>`;
@@ -1412,12 +1414,14 @@ HTML_TEMPLATE = """
             }).join('');
             document.getElementById('participantsDisplay').innerHTML = participantsHtml;
             
+            // Отладочный вывод
             console.log('Отправляем участников:', participants.map(p => ({
                 name: p.display_name,
                 model: p.model,
                 is_moderator: p.is_moderator
             })));
             
+            // Собираем аватары из участников
             const avatars = {};
             participants.forEach(p => {
                 if (p.avatar_url) {
@@ -1432,7 +1436,7 @@ HTML_TEMPLATE = """
                     topic: topic,
                     instructions: instructions,
                     participants: participants,
-                    avatars: avatars
+                    avatars: avatars  // Отправляем загруженные аватары!
                 })
             })
             .then(r => r.json())
@@ -1459,14 +1463,16 @@ HTML_TEMPLATE = """
             document.getElementById('topicCard').style.display = 'block';
             document.getElementById('moderatorPanel').style.display = 'none';
             
+            // Показываем кнопку "Выход" обратно
             const exitBtn = document.querySelector('.footer .btn');
             if (exitBtn) exitBtn.style.display = 'inline-block';
             
+            // Сбрасываем заголовок и сайдбар
             document.getElementById('topicDisplay').textContent = '—';
             document.getElementById('participantsDisplay').innerHTML = '';
             
             lastPostCount = 0;
-            moderatorMessageSent = false;
+            moderatorMessageSent = false;  // Сбрасываем флаг
             
             if (pollInterval) {
                 clearInterval(pollInterval);
@@ -1543,10 +1549,14 @@ HTML_TEMPLATE = """
                     topicDisplay.textContent = data.topic;
                 }
                 
+                // Показываем панель модератора когда ждём его ответа
                 if (data.waiting_for_moderator) {
+                    // Не показываем панель сразу после отправки сообщения
                     if (!moderatorMessageSent) {
+                        // Показываем панель только если она ещё не видна
                         if (moderatorPanel.style.display !== 'block') {
                             moderatorPanel.style.display = 'block';
+                            // Устанавливаем фокус на поле ввода, если оно пустое
                             const moderatorInput = document.getElementById('moderatorInput');
                             if (moderatorInput && !moderatorInput.value.trim()) {
                                 moderatorInput.focus();
@@ -1561,7 +1571,7 @@ HTML_TEMPLATE = """
                     `;
                 } else {
                     moderatorPanel.style.display = 'none';
-                    moderatorMessageSent = false;
+                    moderatorMessageSent = false;  // Сбрасываем флаг когда не ждём модератора
                 }
                 
                 if (data.running && !data.waiting_for_moderator) {
@@ -1586,11 +1596,13 @@ HTML_TEMPLATE = """
                     document.getElementById('startBtn').disabled = false;
                     document.getElementById('newBtn').style.display = 'inline-block';
                     moderatorPanel.style.display = 'none';
+                    // Скрываем кнопку "Выход" после завершения
                     const exitBtn = document.querySelector('.footer .btn');
                     if (exitBtn) exitBtn.style.display = 'none';
                     clearInterval(pollInterval);
                 }
                 
+                // Добавляем новые посты
                 if (data.new_posts && data.new_posts.length > 0) {
                     data.new_posts.forEach(post => addPost(post));
                     lastPostCount = data.total_posts;
@@ -1603,9 +1615,9 @@ HTML_TEMPLATE = """
         
         function sendModeratorMessage() {
             const input = document.getElementById('moderatorInput');
-            const message = input.value;
+            const message = input.value;  // Не используем trim() чтобы разрешить пустые сообщения
             
-            moderatorMessageSent = true;
+            moderatorMessageSent = true;  // Устанавливаем флаг чтобы не показывать панель сразу
             
             fetch('/api/moderator/message', {
                 method: 'POST',
@@ -1621,26 +1633,29 @@ HTML_TEMPLATE = """
             .then(data => {
                 if (data.success) {
                     input.value = '';
+                    // Скрываем панель после успешной отправки
                     document.getElementById('moderatorPanel').style.display = 'none';
                 } else {
                     alert('Ошибка: ' + (data.error || 'неизвестная ошибка'));
-                    moderatorMessageSent = false;
+                    moderatorMessageSent = false;  // Сбрасываем флаг при ошибке
                 }
             })
             .catch(err => {
                 console.error('Ошибка отправки сообщения:', err);
                 alert('Ошибка отправки сообщения: ' + err.message);
-                moderatorMessageSent = false;
+                moderatorMessageSent = false;  // Сбрасываем флаг при ошибке
             });
         }
         
         function finishDebate() {
             if (confirm('Завершить дебаты и выйти?')) {
+                // Сначала завершаем дебаты
                 fetch('/api/moderator/finish', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
                         document.getElementById('moderatorPanel').style.display = 'none';
+                        // Затем сразу завершаем сервер без дополнительного подтверждения
                         shutdownServer(true);
                     }
                 })
@@ -1663,9 +1678,11 @@ HTML_TEMPLATE = """
                     pollInterval = null;
                 }
                 
+                // Скрываем элементы управления, но оставляем посты
                 document.getElementById('setupCard').style.display = 'none';
                 document.getElementById('topicCard').style.display = 'none';
                 
+                // Обновляем статус в сайдбаре
                 const statusDiv = document.getElementById('statusBar');
                 statusDiv.style.display = 'block';
                 statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Театр закрыт</div><div style="font-style:italic;">Сцена сохранена для просмотра</div>';
@@ -1684,6 +1701,7 @@ HTML_TEMPLATE = """
             }
         });
         
+        // Отображение даты в стиле NYT
         const now = new Date();
         const options = { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' };
         document.getElementById('headerDate').textContent = now.toLocaleDateString('ru-RU', options);
@@ -1761,14 +1779,14 @@ def start():
     topic = data.get("topic", "")
     instructions = data.get("instructions", {})
     participants_data = data.get("participants", [])
-    avatars = data.get("avatars", {})
+    avatars = data.get("avatars", {})  # Получаем загруженные аватары!
     
     if not topic:
         return jsonify({"success": False, "error": "Тема не указана"})
     
     debate_state["instructions"] = instructions
     debate_state["runtime_participants"] = participants_data
-    debate_state["avatars"] = avatars
+    debate_state["avatars"] = avatars  # Сохраняем загруженные аватары!
     debate_state["waiting_for_moderator"] = False
     debate_state["moderator_message"] = None
     debate_state["moderator_finished"] = False
@@ -1800,8 +1818,10 @@ def reset():
 
 @app.route('/api/status')
 def status():
+    # Получаем lastPostCount от клиента для оптимизации
     last_post_count = request.args.get('lastPostCount', 0, type=int)
     
+    # Отправляем только новые посты если есть
     if last_post_count > 0 and last_post_count < len(debate_state["posts"]):
         new_posts = debate_state["posts"][last_post_count:]
     else:
@@ -1826,6 +1846,7 @@ def moderator_message():
     data = request.json
     message = data.get("message", "")
     
+    # Разрешаем пустые сообщения - режиссёр может просто пропустить действие
     debate_state["moderator_message"] = message
     return jsonify({"success": True})
 
@@ -1840,10 +1861,12 @@ def moderator_finish():
 def shutdown():
     if UNLOAD_AFTER_DEBATE:
         runtime_participants = debate_state.get("runtime_participants", [])
+        # Выгружаем только AI модели, не "human"
         unique_models = set(p["model"] for p in runtime_participants if p["model"] != "human")
         for model in unique_models:
             unload_model(model)
     
+    # Сохраняем посты перед выключением
     debate_state["shutdown"] = True
     
     def do_shutdown():
