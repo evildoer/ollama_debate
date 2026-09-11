@@ -1237,7 +1237,7 @@ HTML_TEMPLATE = """
                     <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..."></textarea>
                     <div style="display:flex; gap:15px;">
                         <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
-                        <button class="btn btn-secondary" onclick="finishDebate()">Завершить спектакль</button>
+                        <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()">Завершить спектакль</button>
                     </div>
                     <div style="margin-top:10px; font-size:12px; font-style:italic;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки</div>
                 </div>
@@ -1575,13 +1575,20 @@ HTML_TEMPLATE = """
                             if (moderatorInput && !moderatorInput.value.trim()) {
                                 moderatorInput.focus();
                             }
+                            // Показываем кнопку "Завершить спектакль" только если текущий участник - модератор
+                            const finishBtn = document.getElementById('finishBtn');
+                            if (finishBtn && data.current_participant_is_moderator) {
+                                finishBtn.style.display = 'inline-block';
+                            } else if (finishBtn) {
+                                finishBtn.style.display = 'none';
+                            }
                         }
                     }
                     statusDiv.classList.add('active');
                     statusDiv.innerHTML = `
                         <div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div>
-                        <div>Ожидание реплики режиссёра</div>
-                        <div style="font-style:italic;font-size:12px;margin-top:8px;">Ваше действие или пропустите</div>
+                        <div>${data.current_participant}</div>
+                        <div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>
                     `;
                 } else {
                     moderatorPanel.style.display = 'none';
@@ -1855,6 +1862,15 @@ def status():
     else:
         new_posts = debate_state["posts"] if last_post_count == 0 else []
     
+    # Определяем, является ли текущий участник модератором
+    current_participant_is_moderator = False
+    if debate_state["waiting_for_moderator"] and debate_state["current_participant"]:
+        runtime_participants = debate_state.get("runtime_participants", [])
+        for p in runtime_participants:
+            if p["display_name"] == debate_state["current_participant"] and p.get("is_moderator", False):
+                current_participant_is_moderator = True
+                break
+    
     return jsonify({
         "running": debate_state["running"],
         "finished": debate_state["finished"],
@@ -1866,6 +1882,7 @@ def status():
         "current_action": debate_state["current_action"],
         "search_query": debate_state["search_query"],
         "waiting_for_moderator": debate_state.get("waiting_for_moderator", False),
+        "current_participant_is_moderator": current_participant_is_moderator,
     })
 
 @app.route('/api/moderator/message', methods=['POST'])
