@@ -820,33 +820,29 @@ def run_debate_thread(topic: str):
                         current_message = debate_state.get("moderator_message")
                         if current_message is not None:  # Разрешаем пустые сообщения
                             debate_state["waiting_for_moderator"] = False  # Сбрасываем флаг перед обработкой
-                            # Добавляем в историю ВСЕГДА (для контекста)
-                            conversation_history.append({
-                                "display_name": participant["display_name"],
-                                "content": current_message
-                            })
                             
                             # Показываем пост только если сообщение не пустое
                             if current_message.strip():
-                                avatar_url = debate_state["avatars"].get(participant["display_name"])
-                                post = {
-                                    "id": len(debate_state["posts"]) + 1,
-                                    "display_name": participant["display_name"],
-                                    "model_used": "human",
-                                    "avatar_url": avatar_url,
-                                    "content": current_message,
-                                    "content_html": markdown_to_html(current_message),
-                                    "round": round_num,
-                                    "timestamp": time.strftime("%H:%M"),
-                                    "search_count": 0,
-                                    "search_queries": []
-                                }
-                                debate_state["posts"].append(post)
+                                # Используем единый метод add_post для human участника
+                                post = session.add_post(
+                                    display_name=participant["display_name"],
+                                    model_used="human",
+                                    content=current_message,
+                                    round_num=round_num,
+                                    search_count=0,
+                                    search_queries=[]
+                                )
                                 print(f"🎬 {participant['display_name']}: {current_message[:50]}")
                                 # Отправляем событие WebSocket о новом посте
                                 socketio.emit('new_post', post)
                             else:
                                 print(f"🎬 {participant['display_name']} пропустил действие")
+                            
+                            # Добавляем в историю ВСЕГДА (для контекста)
+                            conversation_history.append({
+                                "display_name": participant["display_name"],
+                                "content": current_message
+                            })
                             
                             # Очищаем сообщение и продолжаем к следующему участнику
                             debate_state["moderator_message"] = None
