@@ -249,7 +249,7 @@ debate_state = {
     "finished": False,
     "avatars": {},
     "instructions": {},
-    "waiting_for_moderator": False,
+    "waiting_for_human": False,  # Ждём ввода от текущего human-участника (не обязательно модератора)
     "moderator_message": None,
     "moderator_finished": False,
     "runtime_participants": [],
@@ -541,7 +541,7 @@ class DebateSession:
         self.finished = False
         self.avatars = {}
         self.instructions = {}
-        self.waiting_for_moderator = False
+        self.waiting_for_human = False  # Ждём ввода от текущего human-участника (не обязательно модератора)
         self.moderator_message = None
         self.moderator_finished = False
         self.runtime_participants = []
@@ -560,7 +560,7 @@ class DebateSession:
         # Аватары и инструкции не сбрасываем - они сохраняются
         self.avatars = avatars
         self.instructions = instructions
-        self.waiting_for_moderator = False
+        self.waiting_for_human = False  # Сбрасываем флаг ожидания
         self.moderator_message = None
         self.moderator_finished = False
         self.runtime_participants = runtime_participants
@@ -680,9 +680,9 @@ class DebateSession:
         self.current_action = None
         time.sleep(0.2)
         
-        # Устанавливаем флаг ожидания
+        # Устанавливаем флаг ожидания ввода от human-участника
         self.current_action = "waiting"
-        self.waiting_for_moderator = True
+        self.waiting_for_human = True
         print(f"\\n⏳ Ожидание реплики от {participant['display_name']}...")
         
         # Ждём пока участник отправит сообщение или завершит дебаты
@@ -693,13 +693,13 @@ class DebateSession:
             if self.moderator_finished:
                 print(f"\\n✅ Спектакль завершён режиссёром")
                 self.finished = True
-                self.waiting_for_moderator = False
+                self.waiting_for_human = False
                 return True
             
             # Проверяем, есть ли сообщение от участника
             current_message = self.moderator_message
             if current_message is not None:  # Разрешаем пустые сообщения
-                self.waiting_for_moderator = False
+                self.waiting_for_human = False
                 
                 # Добавляем пост (в историю и в список постов)
                 self.add_post(
@@ -800,9 +800,9 @@ def run_debate_thread(topic: str):
                     debate_state["current_action"] = None
                     time.sleep(0.2)  # Задержка для обновления состояния на фронтенде
                     
-                    # Теперь устанавливаем флаг ожидания
+                    # Теперь устанавливаем флаг ожидания ввода от human-участника
                     debate_state["current_action"] = "waiting"
-                    debate_state["waiting_for_moderator"] = True
+                    debate_state["waiting_for_human"] = True
                     print(f"\n⏳ Ожидание реплики от {participant['display_name']}...")
                     
                     # Ждём пока участник отправит сообщение или завершит дебаты
@@ -813,13 +813,13 @@ def run_debate_thread(topic: str):
                         if debate_state.get("moderator_finished"):
                             print(f"\n✅ Спектакль завершён режиссёром")
                             debate_state["finished"] = True
-                            debate_state["waiting_for_moderator"] = False
+                            debate_state["waiting_for_human"] = False
                             break
                         
                         # Проверяем, есть ли сообщение от участника
                         current_message = debate_state.get("moderator_message")
                         if current_message is not None:  # Разрешаем пустые сообщения
-                            debate_state["waiting_for_moderator"] = False  # Сбрасываем флаг перед обработкой
+                            debate_state["waiting_for_human"] = False  # Сбрасываем флаг перед обработкой
                             
                             # Показываем пост только если сообщение не пустое
                             if current_message.strip():
@@ -1746,8 +1746,8 @@ HTML_TEMPLATE = """
                     topicDisplay.textContent = data.topic;
                 }
                 
-                // Показываем панель модератора когда ждём его ответа
-                if (data.waiting_for_moderator) {
+                // Показываем панель ввода когда ждём ответа от human-участника
+                if (data.waiting_for_human) {
                     // Показываем панель только если она ещё не видна
                     if (moderatorPanel.style.display !== 'block') {
                         moderatorPanel.style.display = 'block';
@@ -1777,7 +1777,7 @@ HTML_TEMPLATE = """
                     moderatorPanel.style.display = 'none';
                 }
                 
-                if (data.running && !data.waiting_for_moderator) {
+                if (data.running && !data.waiting_for_human) {
                     statusDiv.classList.add('active');
                     let actionText = '';
                     if (data.current_action === 'searching') {
@@ -1793,8 +1793,8 @@ HTML_TEMPLATE = """
                         <div style="font-style:italic;font-size:12px;margin-top:8px;">${actionText}</div>
                     `;
                     document.getElementById('newBtn').style.display = 'none';
-                } else if (data.running && data.waiting_for_moderator) {
-                    // Специальный статус когда ждём ответа от модератора (human)
+                } else if (data.running && data.waiting_for_human) {
+                    // Специальный статус когда ждём ответа от human-участника
                     statusDiv.classList.add('active');
                     statusDiv.innerHTML = `
                         <div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div>
@@ -2000,7 +2000,7 @@ def start():
     debate_state["instructions"] = instructions
     debate_state["runtime_participants"] = participants_data
     debate_state["avatars"] = avatars  # Сохраняем загруженные аватары!
-    debate_state["waiting_for_moderator"] = False
+    debate_state["waiting_for_human"] = False
     debate_state["moderator_message"] = None
     debate_state["moderator_finished"] = False
     
@@ -2024,7 +2024,7 @@ def reset():
     debate_state["avatars"] = {}
     debate_state["instructions"] = {}
     debate_state["runtime_participants"] = []
-    debate_state["waiting_for_moderator"] = False
+    debate_state["waiting_for_human"] = False
     debate_state["moderator_message"] = None
     debate_state["moderator_finished"] = False
     return jsonify({"success": True})
@@ -2033,7 +2033,7 @@ def reset():
 def status():
     # Определяем, является ли текущий участник модератором
     current_participant_is_moderator = False
-    if debate_state["waiting_for_moderator"] and debate_state["current_participant"]:
+    if debate_state["waiting_for_human"] and debate_state["current_participant"]:
         runtime_participants = debate_state.get("runtime_participants", [])
         for p in runtime_participants:
             if p["display_name"] == debate_state["current_participant"] and p.get("is_moderator", False):
@@ -2051,7 +2051,7 @@ def status():
         "current_participant": debate_state["current_participant"],
         "current_action": debate_state["current_action"],
         "search_query": debate_state["search_query"],
-        "waiting_for_moderator": debate_state.get("waiting_for_moderator", False),
+        "waiting_for_human": debate_state.get("waiting_for_human", False),
         "current_participant_is_moderator": current_participant_is_moderator,
     })
 
@@ -2074,7 +2074,7 @@ def handle_connect():
         "current_participant": debate_state["current_participant"],
         "current_action": debate_state["current_action"],
         "search_query": debate_state["search_query"],
-        "waiting_for_moderator": debate_state.get("waiting_for_moderator", False),
+        "waiting_for_human": debate_state.get("waiting_for_human", False),
         "current_participant_is_moderator": False,
     })
 
@@ -2087,7 +2087,7 @@ def handle_disconnect():
 def handle_request_status():
     """Клиент запросил обновление статуса"""
     current_participant_is_moderator = False
-    if debate_state["waiting_for_moderator"] and debate_state["current_participant"]:
+    if debate_state["waiting_for_human"] and debate_state["current_participant"]:
         runtime_participants = debate_state.get("runtime_participants", [])
         for p in runtime_participants:
             if p["display_name"] == debate_state["current_participant"] and p.get("is_moderator", False):
@@ -2101,7 +2101,7 @@ def handle_request_status():
         "current_participant": debate_state["current_participant"],
         "current_action": debate_state["current_action"],
         "search_query": debate_state["search_query"],
-        "waiting_for_moderator": debate_state.get("waiting_for_moderator", False),
+        "waiting_for_human": debate_state.get("waiting_for_human", False),
         "current_participant_is_moderator": current_participant_is_moderator,
     })
 
@@ -2119,7 +2119,7 @@ def moderator_message():
 def moderator_finish():
     """Модератор завершает дебаты"""
     debate_state["moderator_finished"] = True
-    debate_state["waiting_for_moderator"] = False
+    debate_state["waiting_for_human"] = False
     return jsonify({"success": True})
 
 @app.route('/api/shutdown', methods=['POST'])
