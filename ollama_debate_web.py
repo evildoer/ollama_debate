@@ -1591,7 +1591,7 @@ HTML_TEMPLATE = """
                     if (data.current_action === 'searching') {
                         actionText = `Ищет: "${data.search_query}"`;
                     } else if (data.current_action === 'waiting') {
-                        actionText = `Ожидание...`;
+                        actionText = `Готовит реплику...`;
                     } else {
                         actionText = `Говорит реплику...`;
                     }
@@ -1599,6 +1599,15 @@ HTML_TEMPLATE = """
                         <div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div>
                         <div>${data.current_participant}</div>
                         <div style="font-style:italic;font-size:12px;margin-top:8px;">${actionText}</div>
+                    `;
+                    document.getElementById('newBtn').style.display = 'none';
+                } else if (data.running && data.waiting_for_moderator) {
+                    // Специальный статус когда ждём ответа от модератора (human)
+                    statusDiv.classList.add('active');
+                    statusDiv.innerHTML = `
+                        <div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div>
+                        <div>${data.current_participant}</div>
+                        <div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>
                     `;
                     document.getElementById('newBtn').style.display = 'none';
                 } else if (data.finished) {
