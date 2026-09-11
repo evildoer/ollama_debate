@@ -398,10 +398,11 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
             # Принудительный поиск только если модель поддерживает tools
             if search_count < MIN_SEARCHES and not forced_search and MODELS_TOOLS_SUPPORT.get(model, False):
                 print(f"  🔍 Принудительный поиск...")
-                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "assistant", "content": content, "name": participant_name.lower().replace(" ", "_")})
                 messages.append({
                     "role": "user",
-                    "content": "Используй инструмент поиска для получения актуальной информации."
+                    "content": "Используй инструмент поиска для получения актуальной информации.",
+                    "name": "system"
                 })
                 forced_search = True
                 continue
@@ -414,7 +415,8 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
         messages.append({
             "role": "assistant",
             "content": content or "",
-            "tool_calls": tool_calls
+            "tool_calls": tool_calls,
+            "name": participant_name.lower().replace(" ", "_")
         })
         
         has_search = False
@@ -437,7 +439,8 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
                 messages.append({
                     "role": "tool",
                     "tool_name": "search_web",
-                    "content": result
+                    "content": result,
+                    "name": "search_web"
                 })
                 
                 debate_state["current_action"] = "thinking"
@@ -447,7 +450,8 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
                 messages.append({
                     "role": "tool",
                     "tool_name": func_name,
-                    "content": "[лимит поисков исчерпан]"
+                    "content": "[лимит поисков исчерпан]",
+                    "name": func_name
                 })
         
         if not has_search:
@@ -456,7 +460,8 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
     if not content or not content.strip():
         messages.append({
             "role": "user",
-            "content": "Дай свой финальный ответ на русском языке."
+            "content": "Дай свой финальный ответ на русском языке.",
+            "name": "system"
         })
         
         try:
