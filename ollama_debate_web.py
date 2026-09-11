@@ -198,8 +198,8 @@ def generate_avatar_for_participant(participant: dict) -> str:
         cached_url = AVATAR_URL_CACHE[avatar_keywords]
         print(f"🎨 Подготовка грима для: '{avatar_keywords}' (из кэша)")
         
-        # Создаём безопасное имя файла
-        base_name = re.sub(r'[^a-z0-9_]', '_', avatar_keywords.lower().replace(' ', '_'))
+        # Создаём безопасное имя файла, сохраняя кириллицу
+        base_name = re.sub(r'[^a-zа-яё0-9_]', '_', avatar_keywords.lower().replace(' ', '_'), flags=re.IGNORECASE)
         
         # Пробуем скачать по закэшированному URL
         filepath = download_image_with_checksum(cached_url, base_name)
@@ -225,8 +225,8 @@ def generate_avatar_for_participant(participant: dict) -> str:
         # Сохраняем первый URL в кэш
         AVATAR_URL_CACHE[avatar_keywords] = image_urls[0]
         
-        # Создаём безопасное имя файла: заменяем все не-ASCII символы на транслит или underscore
-        base_name = re.sub(r'[^a-z0-9_]', '_', avatar_keywords.lower().replace(' ', '_'))
+        # Создаём безопасное имя файла, сохраняя кириллицу
+        base_name = re.sub(r'[^a-zа-яё0-9_]', '_', avatar_keywords.lower().replace(' ', '_'), flags=re.IGNORECASE)
         
         filepath = download_image_with_checksum(image_urls[0], base_name)
         if filepath:
