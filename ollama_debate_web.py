@@ -1580,11 +1580,14 @@ HTML_TEMPLATE = """
                         if (moderatorInput && !moderatorInput.value.trim()) {
                             moderatorInput.focus();
                         }
-                        // Показываем кнопку "Завершить спектакль" только если текущий участник - модератор
-                        const finishBtn = document.getElementById('finishBtn');
-                        if (finishBtn && data.current_participant_is_moderator) {
+                    }
+                    // ВСЕГДА обновляем видимость кнопки "Завершить спектакль"
+                    // Показываем ТОЛЬКО если текущий участник - модератор
+                    const finishBtn = document.getElementById('finishBtn');
+                    if (finishBtn) {
+                        if (data.current_participant_is_moderator === true) {
                             finishBtn.style.display = 'inline-block';
-                        } else if (finishBtn) {
+                        } else {
                             finishBtn.style.display = 'none';
                         }
                     }
