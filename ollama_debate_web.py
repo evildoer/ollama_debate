@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Ollama AI Debate - Современный веб-интерфейс
-=============================================
+Ollama AI Debate - Современный веб-интерфейс с WebSocket
+=========================================================
 
 Установка:
-    pip install flask ddgs markdown
+    pip install flask flask-socketio ddgs markdown eventlet
 
 Запуск:
     python ollama_debate_web.py
@@ -22,6 +22,7 @@ import ssl
 import re
 from pathlib import Path
 from flask import Flask, render_template_string, jsonify, request, send_from_directory
+from flask_socketio import SocketIO, emit
 
 # Поиск в интернете
 try:
@@ -224,10 +225,12 @@ def markdown_to_html(text: str) -> str:
     return markdown.markdown(text, extensions=['nl2br'])
 
 # ============================================================
-# FLASK APP
+# FLASK APP + SOCKET.IO
 # ============================================================
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'debate-secret-key-change-in-production'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Отключаем логирование GET запросов к /api/status чтобы не засорять консоль
 import logging
@@ -839,6 +842,8 @@ def run_debate_thread(topic: str):
                                 }
                                 debate_state["posts"].append(post)
                                 print(f"🎬 {participant['display_name']}: {current_message[:50]}")
+                                # Отправляем событие WebSocket о новом посте
+                                socketio.emit('new_post', post)
                             else:
                                 print(f"🎬 {participant['display_name']} пропустил действие")
                             
@@ -962,6 +967,9 @@ def run_debate_thread(topic: str):
                         "display_name": participant["display_name"],
                         "content": response
                     })
+                    
+                    # Отправляем событие WebSocket о новом посте
+                    socketio.emit('new_post', post)
                     
                     debate_state["current_action"] = None
                     time.sleep(0.5)
@@ -2100,15 +2108,6 @@ def reset():
 
 @app.route('/api/status')
 def status():
-    # Получаем lastPostCount от клиента для оптимизации
-    last_post_count = request.args.get('lastPostCount', 0, type=int)
-    
-    # Отправляем только новые посты если есть
-    if last_post_count > 0 and last_post_count < len(debate_state["posts"]):
-        new_posts = debate_state["posts"][last_post_count:]
-    else:
-        new_posts = debate_state["posts"] if last_post_count == 0 else []
-    
     # Определяем, является ли текущий участник модератором
     current_participant_is_moderator = False
     if debate_state["waiting_for_moderator"] and debate_state["current_participant"]:
@@ -2118,12 +2117,63 @@ def status():
                 current_participant_is_moderator = True
                 break
     
+    # Отправляем полное состояние для WebSocket подключения
     return jsonify({
         "running": debate_state["running"],
         "finished": debate_state["finished"],
         "topic": debate_state["topic"],
-        "new_posts": new_posts,
+        "posts": debate_state["posts"],  # Все посты для начальной синхронизации
         "total_posts": len(debate_state["posts"]),
+        "current_round": debate_state["current_round"],
+        "current_participant": debate_state["current_participant"],
+        "current_action": debate_state["current_action"],
+        "search_query": debate_state["search_query"],
+        "waiting_for_moderator": debate_state.get("waiting_for_moderator", False),
+        "current_participant_is_moderator": current_participant_is_moderator,
+    })
+
+# ============================================================
+# WEBSOCKET СОБЫТИЯ
+# ============================================================
+
+@socketio.on('connect')
+def handle_connect():
+    """Клиент подключился - отправляем текущее состояние"""
+    print("🔌 Клиент подключился через WebSocket")
+    # Отправляем текущее состояние для синхронизации
+    emit('state_update', {
+        "running": debate_state["running"],
+        "finished": debate_state["finished"],
+        "topic": debate_state["topic"],
+        "posts": debate_state["posts"],
+        "total_posts": len(debate_state["posts"]),
+        "current_round": debate_state["current_round"],
+        "current_participant": debate_state["current_participant"],
+        "current_action": debate_state["current_action"],
+        "search_query": debate_state["search_query"],
+        "waiting_for_moderator": debate_state.get("waiting_for_moderator", False),
+        "current_participant_is_moderator": False,
+    })
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Клиент отключился"""
+    print("🔌 Клиент отключился от WebSocket")
+
+@socketio.on('request_status')
+def handle_request_status():
+    """Клиент запросил обновление статуса"""
+    current_participant_is_moderator = False
+    if debate_state["waiting_for_moderator"] and debate_state["current_participant"]:
+        runtime_participants = debate_state.get("runtime_participants", [])
+        for p in runtime_participants:
+            if p["display_name"] == debate_state["current_participant"] and p.get("is_moderator", False):
+                current_participant_is_moderator = True
+                break
+    
+    emit('status_update', {
+        "running": debate_state["running"],
+        "finished": debate_state["finished"],
         "current_round": debate_state["current_round"],
         "current_participant": debate_state["current_participant"],
         "current_action": debate_state["current_action"],
@@ -2195,4 +2245,4 @@ if __name__ == "__main__":
     print("=" * 50)
     
     threading.Timer(1.5, lambda: webbrowser.open('http://localhost:5000')).start()
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
