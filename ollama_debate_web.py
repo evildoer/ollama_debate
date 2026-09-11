@@ -547,6 +547,7 @@ def run_debate_thread(topic: str):
                 # Если это человек (модератор или любой другой human)
                 if participant["model"] == "human":
                     debate_state["current_action"] = "waiting"
+                    debate_state["waiting_for_moderator"] = True  # ВАЖНО: сообщаем фронтенду
                     print(f"\n⏳ Ожидание реплики от {participant['display_name']}...")
                     
                     # Ждём пока участник отправит сообщение или завершит дебаты
@@ -557,11 +558,13 @@ def run_debate_thread(topic: str):
                         if debate_state.get("moderator_finished"):
                             print(f"\n✅ Спектакль завершён режиссёром")
                             debate_state["finished"] = True
+                            debate_state["waiting_for_moderator"] = False
                             break
                         
                         # Проверяем, есть ли сообщение от участника
                         current_message = debate_state.get("moderator_message")
                         if current_message is not None:  # Разрешаем пустые сообщения
+                            debate_state["waiting_for_moderator"] = False  # Сбрасываем флаг перед обработкой
                             # Добавляем в историю ВСЕГДА (для контекста)
                             conversation_history.append({
                                 "display_name": participant["display_name"],
