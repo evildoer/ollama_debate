@@ -230,7 +230,7 @@ def markdown_to_html(text: str) -> str:
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'debate-secret-key-change-in-production'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Отключаем логирование GET запросов к /api/status чтобы не засорять консоль
 import logging
@@ -857,89 +857,15 @@ def run_debate_thread(topic: str):
                     if debate_state.get("moderator_finished"):
                         break
                 else:
-                    # Если это AI участник
+                    # Если это AI участник - используем метод класса session для генерации промпта и сообщений
                     debate_state["current_action"] = "thinking"
                     
-                    # Получаем список имён всех участников
-                    all_names = [p["display_name"] for p in runtime_participants]
-                    other_names = [name for name in all_names if name != participant["display_name"]]
+                    # Генерируем системный промпт через метод класса
+                    system_prompt = session.get_system_prompt(participant, 
+                                                              [p["display_name"] for p in runtime_participants])
                     
-                    system_prompt = (
-                        f"Ты — {participant['display_name']}. "
-                        f"ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ). "
-                        f"Ты участвуешь в сцене вместе с: {', '.join(other_names)}. "
-                        f"ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики. "
-                        f"Сюжет сцены: \"{topic}\". "
-                        f"ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем! "
-                        f"Учитывай всё что говорили другие персонажи и реагируй на их слова. "
-                        f"Отвечай на русском языке. "
-                        f"КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным. "
-                        f"Используй поиск в интернете для фактологических утверждений. "
-                        f"При поиске НЕ указывай годы."
-                    )
-                    
-                    custom_instruction = instructions.get(participant["display_name"], "")
-                    if custom_instruction:
-                        system_prompt += f" {custom_instruction}"
-                    
-                    if ENABLE_SEARCH:
-                        min_search_text = ""
-                        if MIN_SEARCHES > 0:
-                            min_search_text = f" Сделай минимум {MIN_SEARCHES} поиск(ов) перед ответом."
-                        
-                        system_prompt += (
-                            " Если есть сомнения в фактах или мнениях - используй поиск для уточнения. "
-                            "При поиске НЕ указывай год."
-                            + min_search_text
-                        )
-                    
-                    messages = [
-                        {"role": "system", "content": system_prompt, "name": "system"},
-                    ]
-                    
-                    # Добавляем историю разговора в понятном формате
-                    for post in conversation_history:
-                        speaker_name = post["display_name"]
-                        content = post["content"]
-                        
-                        if speaker_name == participant["display_name"]:
-                            # Это мои предыдущие реплики
-                            messages.append({
-                                "role": "assistant",
-                                "content": content,
-                                "name": speaker_name.lower().replace(" ", "_")
-                            })
-                        else:
-                            # Это реплики других участников
-                            messages.append({
-                                "role": "user",
-                                "content": f"{speaker_name} говорит: {content}",
-                                "name": speaker_name.lower().replace(" ", "_")
-                            })
-                    
-                    # Добавляем финальный запрос
-                    if round_num == 1 and len(conversation_history) == 0:
-                        messages.append({
-                            "role": "user", 
-                            "content": f"Как {participant['display_name']}, начни спектакль по сюжету \"{topic}\". Обращайся к другим персонажам по именам.",
-                            "name": participant["display_name"].lower().replace(" ", "_")
-                        })
-                    else:
-                        # Находим последнюю реплику
-                        last_post = conversation_history[-1] if conversation_history else None
-                        if last_post:
-                            last_speaker = last_post["display_name"]
-                            messages.append({
-                                "role": "user",
-                                "content": f"{last_speaker} только что сказал: \"{last_post['content']}\". Как {participant['display_name']}, ответь ему и другим персонажам, обращаясь по именам.",
-                                "name": participant["display_name"].lower().replace(" ", "_")
-                            })
-                        else:
-                            messages.append({
-                                "role": "user",
-                                "content": f"Как {participant['display_name']}, продолжай спектакль, обращаясь к другим персонажам по именам.",
-                                "name": participant["display_name"].lower().replace(" ", "_")
-                            })
+                    # Строим сообщения через метод класса
+                    messages = session.build_messages_for_ai(participant, round_num)
                     
                     response, search_count, search_queries = ask_model(
                         model=participant["model"],
