@@ -79,8 +79,8 @@ UNLOAD_AFTER_DEBATE = True
 
 # Оптимизация GPU
 OPTIONS = {
-    "num_ctx": 16384,    ## 49152
-    "num_predict": 1024, ## 8192
+    "num_ctx": 16384,
+    "num_predict": 1024,
     "num_thread": 0,
     "num_gpu": 999,
 }
@@ -614,17 +614,17 @@ class DebateSession:
         other_names = [name for name in all_names if name != participant["display_name"]]
         
         system_prompt = (
-            f"Ты — {participant['display_name']}. "
-            f"ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ). "
+            f'Ты — {participant["display_name"]}. '
+            f'ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ). '
             f"Ты участвуешь в сцене вместе с: {', '.join(other_names)}. "
-            f"ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики. "
-            f"Сюжет сцены: \\\"{self.topic}\\\". "
-            f"ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем! "
-            f"Учитывай всё что говорили другие персонажи и реагируй на их слова. "
-            f"Отвечай на русском языке. "
-            f"КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным. "
-            f"Используй поиск в интернете для фактологических утверждений. "
-            f"При поиске НЕ указывай годы."
+            f'ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики. '
+            f'Сюжет сцены: "{self.topic}". '
+            f'ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем! '
+            f'Учитывай всё что говорили другие персонажи и реагируй на их слова. '
+            f'Отвечай на русском языке. '
+            f'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным. '
+            f'Используй поиск в интернете для фактологических утверждений. '
+            f'При поиске НЕ указывай годы.'
         )
         
         # Добавляем кастомную инструкцию если есть
@@ -677,7 +677,7 @@ class DebateSession:
         if round_num == 1 and len(self.conversation_history) == 0:
             messages.append({
                 "role": "user", 
-                "content": f"Как {participant['display_name']}, начни спектакль по сюжету \\\"{self.topic}\\\". Обращайся к другим персонажам по именам.",
+                "content": f'Как {participant["display_name"]}, начни спектакль по сюжету "{self.topic}". Обращайся к другим персонажам по именам.',
                 "name": participant["display_name"].lower().replace(" ", "_")
             })
         else:
@@ -686,13 +686,13 @@ class DebateSession:
                 last_speaker = last_post["display_name"]
                 messages.append({
                     "role": "user",
-                    "content": f"{last_speaker} только что сказал: \\\"{last_post['content']}\\\". Как {participant['display_name']}, ответь ему и другим персонажам, обращаясь по именам.",
+                    "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant["display_name"]}, ответь ему и другим персонажам, обращаясь по именам.',
                     "name": participant["display_name"].lower().replace(" ", "_")
                 })
             else:
                 messages.append({
                     "role": "user",
-                    "content": f"Как {participant['display_name']}, продолжай спектакль, обращаясь к другим персонажам по именам.",
+                    "content": f'Как {participant["display_name"]}, продолжай спектакль, обращаясь к другим персонажам по именам.',
                     "name": participant["display_name"].lower().replace(" ", "_")
                 })
         
@@ -701,6 +701,7 @@ class DebateSession:
     def handle_human_turn(self, participant: dict, round_num: int) -> bool:
         """
         Обрабатывает ход человека. Возвращает True если дебаты завершены.
+        Этот метод не используется в основном цикле, но может быть вызван отдельно.
         """
         # Сбрасываем все флаги перед новым ожиданием
         self.moderator_message = None
@@ -710,7 +711,7 @@ class DebateSession:
         # Устанавливаем флаг ожидания ввода от human-участника
         self.current_action = "waiting"
         self.waiting_for_human = True
-        print(f"\\n⏳ Ожидание реплики от {participant['display_name']}...")
+        print(f"\n⏳ Ожидание реплики от {participant['display_name']}...")
         
         # Ждём пока участник отправит сообщение или завершит дебаты
         while True:
@@ -718,7 +719,7 @@ class DebateSession:
             
             # Проверяем, не завершил ли модератор дебаты
             if self.moderator_finished:
-                print(f"\\n✅ Спектакль завершён режиссёром")
+                print(f"\n✅ Спектакль завершён режиссёром")
                 self.finished = True
                 self.waiting_for_human = False
                 return True
