@@ -1573,23 +1573,22 @@ HTML_TEMPLATE = """
                 
                 // Показываем панель модератора когда ждём его ответа
                 if (data.waiting_for_moderator) {
-                    // Не показываем панель сразу после отправки сообщения
-                    if (!moderatorMessageSent) {
-                        // Показываем панель только если она ещё не видна
-                        if (moderatorPanel.style.display !== 'block') {
-                            moderatorPanel.style.display = 'block';
-                            // Устанавливаем фокус на поле ввода, если оно пустое
-                            const moderatorInput = document.getElementById('moderatorInput');
-                            if (moderatorInput && !moderatorInput.value.trim()) {
-                                moderatorInput.focus();
-                            }
-                            // Показываем кнопку "Завершить спектакль" только если текущий участник - модератор
-                            const finishBtn = document.getElementById('finishBtn');
-                            if (finishBtn && data.current_participant_is_moderator) {
-                                finishBtn.style.display = 'inline-block';
-                            } else if (finishBtn) {
-                                finishBtn.style.display = 'none';
-                            }
+                    // Сбрасываем флаг отправки при новом ожидании
+                    moderatorMessageSent = false;
+                    // Показываем панель только если она ещё не видна
+                    if (moderatorPanel.style.display !== 'block') {
+                        moderatorPanel.style.display = 'block';
+                        // Устанавливаем фокус на поле ввода, если оно пустое
+                        const moderatorInput = document.getElementById('moderatorInput');
+                        if (moderatorInput && !moderatorInput.value.trim()) {
+                            moderatorInput.focus();
+                        }
+                        // Показываем кнопку "Завершить спектакль" только если текущий участник - модератор
+                        const finishBtn = document.getElementById('finishBtn');
+                        if (finishBtn && data.current_participant_is_moderator) {
+                            finishBtn.style.display = 'inline-block';
+                        } else if (finishBtn) {
+                            finishBtn.style.display = 'none';
                         }
                     }
                     statusDiv.classList.add('active');
@@ -1600,7 +1599,6 @@ HTML_TEMPLATE = """
                     `;
                 } else {
                     moderatorPanel.style.display = 'none';
-                    moderatorMessageSent = false;  // Сбрасываем флаг когда не ждём модератора
                 }
                 
                 if (data.running && !data.waiting_for_moderator) {
