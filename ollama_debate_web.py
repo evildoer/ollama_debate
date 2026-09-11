@@ -265,23 +265,8 @@ import logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.WARNING)
 
-debate_state = {
-    "running": False,
-    "topic": "",
-    "posts": [],
-    "current_round": 0,
-    "current_participant": None,
-    "current_action": None,
-    "search_query": None,
-    "finished": False,
-    "avatars": {},
-    "instructions": {},
-    "waiting_for_human": False,  # Ждём ввода от текущего human-участника (не обязательно модератора)
-    "moderator_message": None,
-    "moderator_finished": False,
-    "runtime_participants": [],
-}
-
+# Единый источник правды о ходе спектакля - глобальный экземпляр DebateSession,
+# объявленный ниже после определения класса.
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_GENERATE_URL = "http://localhost:11434/api/generate"
 
@@ -461,8 +446,8 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
                 query = func_args.get("query", "")
                 max_results = func_args.get("max_results", 5)
                 
-                debate_state["current_action"] = "searching"
-                debate_state["search_query"] = query
+                session.current_action = "searching"
+                session.search_query = query
                 search_queries.append(query)
                 search_count += 1
                 
@@ -475,8 +460,8 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
                     "name": "search_web"
                 })
                 
-                debate_state["current_action"] = "thinking"
-                debate_state["search_query"] = None
+                session.current_action = "thinking"
+                session.search_query = None
                 has_search = True
             else:
                 messages.append({
@@ -542,7 +527,7 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         search_queries = []
     
     return {
-        "id": len(debate_state["posts"]) + 1,
+        "id": len(session.posts) + 1,
         "display_name": display_name,
         "model_used": model_used,
         "avatar_url": avatar_url,
@@ -592,6 +577,10 @@ class DebateSession:
         self.moderator_finished = False
         self.runtime_participants = runtime_participants
         self.conversation_history = []
+    
+    def clear(self):
+        """Полный сброс состояния (кнопка «Новый спектакль»)"""
+        self.__init__()
     
     def add_post(self, display_name: str, model_used: str, content: str, round_num: int,
                  search_count: int = 0, search_queries: list = None):
@@ -784,35 +773,25 @@ class DebateSession:
 session = DebateSession()
 
 def run_debate_thread(topic: str):
-    debate_state["running"] = True
-    debate_state["topic"] = topic
-    debate_state["posts"] = []
-    debate_state["finished"] = False
-    debate_state["current_round"] = 0
-    # Не сбрасываем аватары - они сохраняются между запусками
-    if "avatars" not in debate_state:
-        debate_state["avatars"] = {}
-    
-    runtime_participants = debate_state.get("runtime_participants", [])
+    # Состояние спектакля уже подготовлено в /api/start через session.reset()
+    runtime_participants = session.runtime_participants
     
     # НЕ ищем новые аватары при старте дебатов!
     # Используем только те, которые были явно загружены через кнопку "Найти аватар"
     print("\n🎭 Используем подготовленный грим и костюмы...")
     for participant in runtime_participants:
         display_name = participant.get("display_name", "")
-        if display_name and display_name in debate_state["avatars"]:
+        if display_name and display_name in session.avatars:
             print(f"  ✅ {display_name}: готов к выходу на подмостки")
         else:
             print(f"  ⚠️  {display_name}: грим не подготовлен (будет эмодзи)")
     
-    conversation_history = []
-    instructions = debate_state.get("instructions", {})
     round_num = 0
     
     try:
         while True:  # Бесконечный цикл, пока модератор не завершит
             round_num += 1
-            debate_state["current_round"] = round_num
+            session.current_round = round_num
             print(f"\n🎭 Акт {round_num}")
             
             # Проходим по ВСЕМ участникам в порядке их следования в списке
@@ -821,18 +800,18 @@ def run_debate_thread(topic: str):
             
             for participant in runtime_participants:
                 print(f"  🎭 На сцене: {participant['display_name']} (модель: {participant['model']})")
-                debate_state["current_participant"] = participant["display_name"]
+                session.current_participant = participant["display_name"]
                 
                 # Если это человек (любой human, не только модератор)
                 if participant["model"] == "human":
                     # Сбрасываем ВСЕ флаги перед новым ожиданием
-                    debate_state["moderator_message"] = None
-                    debate_state["current_action"] = None
+                    session.moderator_message = None
+                    session.current_action = None
                     time.sleep(0.2)  # Задержка для обновления состояния на фронтенде
                     
                     # Теперь устанавливаем флаг ожидания ввода от human-участника
-                    debate_state["current_action"] = "waiting"
-                    debate_state["waiting_for_human"] = True
+                    session.current_action = "waiting"
+                    session.waiting_for_human = True
                     print(f"\n⏳ Ожидание реплики от {participant['display_name']}...")
                     
                     # Ждём пока участник отправит сообщение или завершит дебаты
@@ -840,16 +819,16 @@ def run_debate_thread(topic: str):
                         time.sleep(0.5)
                         
                         # Проверяем, не завершил ли модератор дебаты
-                        if debate_state.get("moderator_finished"):
+                        if session.moderator_finished:
                             print(f"\n✅ Спектакль завершён режиссёром")
-                            debate_state["finished"] = True
-                            debate_state["waiting_for_human"] = False
+                            session.finished = True
+                            session.waiting_for_human = False
                             break
                         
                         # Проверяем, есть ли сообщение от участника
-                        current_message = debate_state.get("moderator_message")
+                        current_message = session.moderator_message
                         if current_message is not None:  # Разрешаем пустые сообщения
-                            debate_state["waiting_for_human"] = False  # Сбрасываем флаг перед обработкой
+                            session.waiting_for_human = False  # Сбрасываем флаг перед обработкой
                             
                             # Показываем пост только если сообщение не пустое
                             if current_message.strip():
@@ -868,26 +847,20 @@ def run_debate_thread(topic: str):
                             else:
                                 print(f"🎬 {participant['display_name']} пропустил действие")
                             
-                            # Добавляем в историю ВСЕГДА (для контекста)
-                            conversation_history.append({
-                                "display_name": participant["display_name"],
-                                "content": current_message
-                            })
-                            
                             # Очищаем сообщение и продолжаем к следующему участнику
-                            debate_state["moderator_message"] = None
-                            debate_state["current_action"] = None
+                            session.moderator_message = None
+                            session.current_action = None
                             
                             break
                     
                     # Если модератор завершил дебаты - выходим из главного цикла
-                    if debate_state.get("moderator_finished"):
+                    if session.moderator_finished:
                         break
                 else:
                     # Если это AI участник - используем метод класса session
-                    debate_state["current_action"] = "thinking"
+                    session.current_action = "thinking"
                     
-                    response, search_count, search_queries = session.handle_ai_turn(participant, round_num)
+                    session.handle_ai_turn(participant, round_num)
                     
                     # Получаем пост из истории сессии (последний добавленный)
                     post = session.posts[-1] if session.posts else None
@@ -895,19 +868,19 @@ def run_debate_thread(topic: str):
                         # Отправляем событие WebSocket о новом посте
                         socketio.emit('new_post', post)
                     
-                    debate_state["current_action"] = None
+                    session.current_action = None
                     time.sleep(0.5)
             
             # Если модератор завершил дебаты во время хода AI - выходим
-            if debate_state.get("moderator_finished"):
+            if session.moderator_finished:
                 break
         
-        debate_state["finished"] = True
+        session.finished = True
         
     finally:
-        debate_state["running"] = False
-        debate_state["current_participant"] = None
-        debate_state["current_action"] = None
+        session.running = False
+        session.current_participant = None
+        session.current_action = None
         
         if UNLOAD_AFTER_DEBATE:
             # Выгружаем только AI модели, не "human"
@@ -1815,9 +1788,12 @@ HTML_TEMPLATE = """
                     clearInterval(pollInterval);
                 }
                 
-                // Добавляем новые посты
+                // Добавляем новые посты и всегда синхронизируем счётчик
+                // (иначе после сброса истории он залипает на устаревшем значении)
                 if (data.new_posts && data.new_posts.length > 0) {
                     data.new_posts.forEach(post => addPost(post));
+                }
+                if (typeof data.total_posts === 'number') {
                     lastPostCount = data.total_posts;
                 }
             })
@@ -1986,7 +1962,7 @@ def refresh_avatar(keywords):
 
 @app.route('/api/start', methods=['POST'])
 def start():
-    if debate_state["running"]:
+    if session.running:
         return jsonify({"success": False, "error": "Уже запущено"})
     
     data = request.json
@@ -1998,12 +1974,8 @@ def start():
     if not topic:
         return jsonify({"success": False, "error": "Тема не указана"})
     
-    debate_state["instructions"] = instructions
-    debate_state["runtime_participants"] = participants_data
-    debate_state["avatars"] = avatars  # Сохраняем загруженные аватары!
-    debate_state["waiting_for_human"] = False
-    debate_state["moderator_message"] = None
-    debate_state["moderator_finished"] = False
+    # Единая точка инициализации состояния перед стартом дебатов
+    session.reset(topic, participants_data, avatars, instructions)
     
     print(f"🎭 Готовые персонажи: {avatars}")
     
@@ -2014,45 +1986,33 @@ def start():
 
 @app.route('/api/reset', methods=['POST'])
 def reset():
-    debate_state["running"] = False
-    debate_state["topic"] = ""
-    debate_state["posts"] = []
-    debate_state["current_round"] = 0
-    debate_state["current_participant"] = None
-    debate_state["current_action"] = None
-    debate_state["search_query"] = None
-    debate_state["finished"] = False
-    debate_state["avatars"] = {}
-    debate_state["instructions"] = {}
-    debate_state["runtime_participants"] = []
-    debate_state["waiting_for_human"] = False
-    debate_state["moderator_message"] = None
-    debate_state["moderator_finished"] = False
+    session.clear()
     return jsonify({"success": True})
 
 @app.route('/api/status')
 def status():
     # Определяем, является ли текущий участник модератором
     current_participant_is_moderator = False
-    if debate_state["waiting_for_human"] and debate_state["current_participant"]:
-        runtime_participants = debate_state.get("runtime_participants", [])
-        for p in runtime_participants:
-            if p["display_name"] == debate_state["current_participant"] and p.get("is_moderator", False):
+    if session.waiting_for_human and session.current_participant:
+        for p in session.runtime_participants:
+            if p["display_name"] == session.current_participant and p.get("is_moderator", False):
                 current_participant_is_moderator = True
                 break
     
-    # Отправляем полное состояние для WebSocket подключения
+    # Клиент передаёт, сколько постов у него уже есть, чтобы не пересылать всю историю
+    last_post_count = max(0, request.args.get("lastPostCount", 0, type=int))
+    
     return jsonify({
-        "running": debate_state["running"],
-        "finished": debate_state["finished"],
-        "topic": debate_state["topic"],
-        "posts": debate_state["posts"],  # Все посты для начальной синхронизации
-        "total_posts": len(debate_state["posts"]),
-        "current_round": debate_state["current_round"],
-        "current_participant": debate_state["current_participant"],
-        "current_action": debate_state["current_action"],
-        "search_query": debate_state["search_query"],
-        "waiting_for_human": debate_state.get("waiting_for_human", False),
+        "running": session.running,
+        "finished": session.finished,
+        "topic": session.topic,
+        "new_posts": session.posts[last_post_count:],
+        "total_posts": len(session.posts),
+        "current_round": session.current_round,
+        "current_participant": session.current_participant,
+        "current_action": session.current_action,
+        "search_query": session.search_query,
+        "waiting_for_human": session.waiting_for_human,
         "current_participant_is_moderator": current_participant_is_moderator,
     })
 
@@ -2066,16 +2026,16 @@ def handle_connect():
     print("🔌 Клиент подключился через WebSocket")
     # Отправляем текущее состояние для синхронизации
     emit('state_update', {
-        "running": debate_state["running"],
-        "finished": debate_state["finished"],
-        "topic": debate_state["topic"],
-        "posts": debate_state["posts"],
-        "total_posts": len(debate_state["posts"]),
-        "current_round": debate_state["current_round"],
-        "current_participant": debate_state["current_participant"],
-        "current_action": debate_state["current_action"],
-        "search_query": debate_state["search_query"],
-        "waiting_for_human": debate_state.get("waiting_for_human", False),
+        "running": session.running,
+        "finished": session.finished,
+        "topic": session.topic,
+        "posts": session.posts,
+        "total_posts": len(session.posts),
+        "current_round": session.current_round,
+        "current_participant": session.current_participant,
+        "current_action": session.current_action,
+        "search_query": session.search_query,
+        "waiting_for_human": session.waiting_for_human,
         "current_participant_is_moderator": False,
     })
 
@@ -2088,21 +2048,20 @@ def handle_disconnect():
 def handle_request_status():
     """Клиент запросил обновление статуса"""
     current_participant_is_moderator = False
-    if debate_state["waiting_for_human"] and debate_state["current_participant"]:
-        runtime_participants = debate_state.get("runtime_participants", [])
-        for p in runtime_participants:
-            if p["display_name"] == debate_state["current_participant"] and p.get("is_moderator", False):
+    if session.waiting_for_human and session.current_participant:
+        for p in session.runtime_participants:
+            if p["display_name"] == session.current_participant and p.get("is_moderator", False):
                 current_participant_is_moderator = True
                 break
     
     emit('status_update', {
-        "running": debate_state["running"],
-        "finished": debate_state["finished"],
-        "current_round": debate_state["current_round"],
-        "current_participant": debate_state["current_participant"],
-        "current_action": debate_state["current_action"],
-        "search_query": debate_state["search_query"],
-        "waiting_for_human": debate_state.get("waiting_for_human", False),
+        "running": session.running,
+        "finished": session.finished,
+        "current_round": session.current_round,
+        "current_participant": session.current_participant,
+        "current_action": session.current_action,
+        "search_query": session.search_query,
+        "waiting_for_human": session.waiting_for_human,
         "current_participant_is_moderator": current_participant_is_moderator,
     })
 
@@ -2113,27 +2072,23 @@ def moderator_message():
     message = data.get("message", "")
     
     # Разрешаем пустые сообщения - режиссёр может просто пропустить действие
-    debate_state["moderator_message"] = message
+    session.moderator_message = message
     return jsonify({"success": True})
 
 @app.route('/api/moderator/finish', methods=['POST'])
 def moderator_finish():
     """Модератор завершает дебаты"""
-    debate_state["moderator_finished"] = True
-    debate_state["waiting_for_human"] = False
+    session.moderator_finished = True
+    session.waiting_for_human = False
     return jsonify({"success": True})
 
 @app.route('/api/shutdown', methods=['POST'])
 def shutdown():
     if UNLOAD_AFTER_DEBATE:
-        runtime_participants = debate_state.get("runtime_participants", [])
         # Выгружаем только AI модели, не "human"
-        unique_models = set(p["model"] for p in runtime_participants if p["model"] != "human")
+        unique_models = set(p["model"] for p in session.runtime_participants if p["model"] != "human")
         for model in unique_models:
             unload_model(model)
-    
-    # Сохраняем посты перед выключением
-    debate_state["shutdown"] = True
     
     def do_shutdown():
         time.sleep(0.5)
