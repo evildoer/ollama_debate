@@ -4,7 +4,7 @@ Ollama AI Debate - Современный веб-интерфейс с WebSocket
 =========================================================
 
 Установка:
-    pip install flask flask-socketio ddgs markdown eventlet
+    pip install flask flask-socketio ddgs markdown
 
 Запуск:
     python ollama_debate_web.py
@@ -189,7 +189,8 @@ def generate_avatar_for_participant(participant: dict) -> str:
     
     display_name = participant["display_name"]
     avatar_keywords = participant.get("avatar_keywords", display_name)
-    base_name = avatar_keywords.lower().replace(' ', '_')
+    # Создаём безопасное имя файла: заменяем все не-ASCII символы на транслит или underscore
+    base_name = re.sub(r'[^a-z0-9_]', '_', avatar_keywords.lower().replace(' ', '_'))
     
     print(f"🎨 Подготовка грима для: '{avatar_keywords}'")
     image_urls_json = search_images(avatar_keywords, max_results=5)
