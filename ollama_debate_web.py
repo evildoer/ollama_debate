@@ -573,7 +573,7 @@ def run_debate_thread(topic: str):
                     )
                 
                 messages = [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt, "name": "system"},
                 ]
                 
                 # Добавляем историю разговора в понятном формате
@@ -585,20 +585,23 @@ def run_debate_thread(topic: str):
                         # Это мои предыдущие реплики
                         messages.append({
                             "role": "assistant",
-                            "content": content
+                            "content": content,
+                            "name": speaker_name.lower().replace(" ", "_")
                         })
                     else:
                         # Это реплики других участников
                         messages.append({
                             "role": "user",
-                            "content": f"{speaker_name} говорит: {content}"
+                            "content": f"{speaker_name} говорит: {content}",
+                            "name": speaker_name.lower().replace(" ", "_")
                         })
                 
                 # Добавляем финальный запрос
                 if round_num == 1 and len(conversation_history) == 0:
                     messages.append({
                         "role": "user", 
-                        "content": f"Как {participant['display_name']}, начни сцену по сюжету \"{topic}\". Обращайся к другим персонажам по именам."
+                        "content": f"Как {participant['display_name']}, начни сцену по сюжету \"{topic}\". Обращайся к другим персонажам по именам.",
+                        "name": participant["display_name"].lower().replace(" ", "_")
                     })
                 else:
                     # Находим последнюю реплику
@@ -607,12 +610,14 @@ def run_debate_thread(topic: str):
                         last_speaker = last_post["display_name"]
                         messages.append({
                             "role": "user",
-                            "content": f"{last_speaker} только что сказал: \"{last_post['content']}\". Как {participant['display_name']}, ответь ему и другим персонажам, обращаясь по именам."
+                            "content": f"{last_speaker} только что сказал: \"{last_post['content']}\". Как {participant['display_name']}, ответь ему и другим персонажам, обращаясь по именам.",
+                            "name": participant["display_name"].lower().replace(" ", "_")
                         })
                     else:
                         messages.append({
                             "role": "user",
-                            "content": f"Как {participant['display_name']}, продолжай сцену, обращаясь к другим персонажам по именам."
+                            "content": f"Как {participant['display_name']}, продолжай сцену, обращаясь к другим персонажам по именам.",
+                            "name": participant["display_name"].lower().replace(" ", "_")
                         })
                 
                 response, search_count, search_queries = ask_model(
