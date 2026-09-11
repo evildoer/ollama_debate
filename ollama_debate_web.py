@@ -544,10 +544,9 @@ def run_debate_thread(topic: str):
                 print(f"  🎭 На сцене: {participant['display_name']} (модель: {participant['model']})")
                 debate_state["current_participant"] = participant["display_name"]
                 
-                # Если это человек (модератор или любой другой human)
+                # Если это человек (любой human, не только модератор)
                 if participant["model"] == "human":
                     # Сбрасываем ВСЕ флаги перед новым ожиданием
-                    debate_state["waiting_for_moderator"] = False
                     debate_state["moderator_message"] = None
                     debate_state["current_action"] = None
                     time.sleep(0.2)  # Задержка для обновления состояния на фронтенде
@@ -1280,7 +1279,7 @@ HTML_TEMPLATE = """
         let debateRunning = false;
         let pollInterval = null;
         let lastPostCount = 0;
-        let moderatorMessageSent = false;  // Флаг чтобы не показывать панель сразу после отправки
+        // Флаг moderatorMessageSent больше не нужен - удалён как атавизм
         
         fetch('/api/participants')
             .then(r => r.json())
@@ -1494,7 +1493,7 @@ HTML_TEMPLATE = """
             document.getElementById('participantsDisplay').innerHTML = '';
             
             lastPostCount = 0;
-            moderatorMessageSent = false;  // Сбрасываем флаг
+            // moderatorMessageSent удалён как атавизм
             
             if (pollInterval) {
                 clearInterval(pollInterval);
@@ -1573,8 +1572,6 @@ HTML_TEMPLATE = """
                 
                 // Показываем панель модератора когда ждём его ответа
                 if (data.waiting_for_moderator) {
-                    // Сбрасываем флаг отправки при новом ожидании
-                    moderatorMessageSent = false;
                     // Показываем панель только если она ещё не видна
                     if (moderatorPanel.style.display !== 'block') {
                         moderatorPanel.style.display = 'block';
@@ -1653,8 +1650,6 @@ HTML_TEMPLATE = """
             const input = document.getElementById('moderatorInput');
             const message = input.value;  // Не используем trim() чтобы разрешить пустые сообщения
             
-            moderatorMessageSent = true;  // Устанавливаем флаг чтобы не показывать панель сразу
-            
             fetch('/api/moderator/message', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -1673,13 +1668,11 @@ HTML_TEMPLATE = """
                     document.getElementById('moderatorPanel').style.display = 'none';
                 } else {
                     alert('Ошибка: ' + (data.error || 'неизвестная ошибка'));
-                    moderatorMessageSent = false;  // Сбрасываем флаг при ошибке
                 }
             })
             .catch(err => {
                 console.error('Ошибка отправки сообщения:', err);
                 alert('Ошибка отправки сообщения: ' + err.message);
-                moderatorMessageSent = false;  // Сбрасываем флаг при ошибке
             });
         }
         
