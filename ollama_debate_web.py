@@ -602,12 +602,6 @@ def run_debate_thread(topic: str):
                             debate_state["moderator_message"] = None
                             debate_state["current_action"] = None
                             
-                            # Отправляем событие завершения хода, чтобы фронтенд обновился
-                            socketio.emit('turn_complete', {
-                                'next_speaker': participant['display_name'],
-                                'message_sent': bool(current_message.strip())
-                            })
-                            
                             break
                     
                     # Если модератор завершил дебаты - выходим из главного цикла
