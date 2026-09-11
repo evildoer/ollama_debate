@@ -546,6 +546,10 @@ def run_debate_thread(topic: str):
                 
                 # Если это человек (модератор или любой другой human)
                 if participant["model"] == "human":
+                    # Сбрасываем флаг и сообщение перед новым ожиданием, чтобы фронтенд корректно обновился
+                    debate_state["waiting_for_moderator"] = False
+                    debate_state["moderator_message"] = None
+                    time.sleep(0.1)  # Небольшая задержка для обновления состояния
                     debate_state["current_action"] = "waiting"
                     debate_state["waiting_for_moderator"] = True  # ВАЖНО: сообщаем фронтенду
                     print(f"\n⏳ Ожидание реплики от {participant['display_name']}...")
