@@ -88,6 +88,9 @@ OPTIONS = {
 # Кэш для хранения информации о поддержке tools моделями
 MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
 
+# Кэш для хранения URL аватаров по ключам (чтобы не искать повторно)
+AVATAR_URL_CACHE = {}  # {"avatar_keywords": "image_url"}
+
 # ============================================================
 # ПАПКА ДЛЯ АВАТАРОВ
 # ============================================================
@@ -189,9 +192,27 @@ def generate_avatar_for_participant(participant: dict) -> str:
     
     display_name = participant["display_name"]
     avatar_keywords = participant.get("avatar_keywords", display_name)
-    # Создаём безопасное имя файла: заменяем все не-ASCII символы на транслит или underscore
-    base_name = re.sub(r'[^a-z0-9_]', '_', avatar_keywords.lower().replace(' ', '_'))
     
+    # Проверяем кэш URL аватаров - если уже искали этот запрос, используем сохранённый URL
+    if avatar_keywords in AVATAR_URL_CACHE:
+        cached_url = AVATAR_URL_CACHE[avatar_keywords]
+        print(f"🎨 Подготовка грима для: '{avatar_keywords}' (из кэша)")
+        
+        # Создаём безопасное имя файла
+        base_name = re.sub(r'[^a-z0-9_]', '_', avatar_keywords.lower().replace(' ', '_'))
+        
+        # Пробуем скачать по закэшированному URL
+        filepath = download_image_with_checksum(cached_url, base_name)
+        if filepath:
+            filename = Path(filepath).name
+            print(f"  ✅ Грим готов: {filename}")
+            return f"/avatars/{filename}"
+        else:
+            # Если не удалось скачать, удаляем из кэша и пробуем поиск заново
+            del AVATAR_URL_CACHE[avatar_keywords]
+            print(f"  ⚠️  Не удалось скачать из кэша, пробую поиск заново...")
+    
+    # Если не в кэше или не удалось скачать - делаем поиск
     print(f"🎨 Подготовка грима для: '{avatar_keywords}'")
     image_urls_json = search_images(avatar_keywords, max_results=5)
     
@@ -201,6 +222,12 @@ def generate_avatar_for_participant(participant: dict) -> str:
         image_urls = []
     
     if image_urls:
+        # Сохраняем первый URL в кэш
+        AVATAR_URL_CACHE[avatar_keywords] = image_urls[0]
+        
+        # Создаём безопасное имя файла: заменяем все не-ASCII символы на транслит или underscore
+        base_name = re.sub(r'[^a-z0-9_]', '_', avatar_keywords.lower().replace(' ', '_'))
+        
         filepath = download_image_with_checksum(image_urls[0], base_name)
         if filepath:
             filename = Path(filepath).name
@@ -723,8 +750,8 @@ class DebateSession:
         
         return False
     
-    def handle_ai_turn(self, participant: dict, round_num: int):
-        """Обрабатывает ход AI участника"""
+    def handle_ai_turn(self, participant: dict, round_num: int) -> tuple:
+        """Обрабатывает ход AI участника. Возвращает (response, search_count, search_queries)"""
         self.current_action = "thinking"
         
         # Строим сообщения для модели
@@ -737,7 +764,7 @@ class DebateSession:
             participant_name=participant["display_name"]
         )
         
-        # Добавляем пост
+        # Добавляем пост через единый метод add_post
         self.add_post(
             display_name=participant["display_name"],
             model_used=participant["model"],
@@ -749,6 +776,8 @@ class DebateSession:
         
         self.current_action = None
         time.sleep(0.5)
+        
+        return response, search_count, search_queries
 
 # Глобальный экземпляр сессии
 session = DebateSession()
@@ -854,45 +883,16 @@ def run_debate_thread(topic: str):
                     if debate_state.get("moderator_finished"):
                         break
                 else:
-                    # Если это AI участник - используем метод класса session для генерации промпта и сообщений
+                    # Если это AI участник - используем метод класса session
                     debate_state["current_action"] = "thinking"
                     
-                    # Генерируем системный промпт через метод класса
-                    system_prompt = session.get_system_prompt(participant, 
-                                                              [p["display_name"] for p in runtime_participants])
+                    response, search_count, search_queries = session.handle_ai_turn(participant, round_num)
                     
-                    # Строим сообщения через метод класса
-                    messages = session.build_messages_for_ai(participant, round_num)
-                    
-                    response, search_count, search_queries = ask_model(
-                        model=participant["model"],
-                        messages=messages,
-                        participant_name=participant["display_name"]
-                    )
-                    
-                    avatar_url = debate_state["avatars"].get(participant["display_name"])
-                    
-                    post = {
-                        "id": len(debate_state["posts"]) + 1,
-                        "display_name": participant["display_name"],
-                        "model_used": participant["model"],
-                        "avatar_url": avatar_url,
-                        "content": response,
-                        "content_html": markdown_to_html(response),
-                        "round": round_num,
-                        "timestamp": time.strftime("%H:%M"),
-                        "search_count": search_count,
-                        "search_queries": search_queries
-                    }
-                    
-                    debate_state["posts"].append(post)
-                    conversation_history.append({
-                        "display_name": participant["display_name"],
-                        "content": response
-                    })
-                    
-                    # Отправляем событие WebSocket о новом посте
-                    socketio.emit('new_post', post)
+                    # Получаем пост из истории сессии (последний добавленный)
+                    post = session.posts[-1] if session.posts else None
+                    if post:
+                        # Отправляем событие WebSocket о новом посте
+                        socketio.emit('new_post', post)
                     
                     debate_state["current_action"] = None
                     time.sleep(0.5)
