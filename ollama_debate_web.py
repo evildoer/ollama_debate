@@ -504,6 +504,251 @@ def unload_model(model: str):
     except:
         pass
 
+def create_post(display_name: str, model_used: str, content: str, round_num: int, 
+                avatar_url: str = None, search_count: int = 0, search_queries: list = None) -> dict:
+    """Единая функция создания поста для любого участника (human или AI)"""
+    if search_queries is None:
+        search_queries = []
+    
+    return {
+        "id": len(debate_state["posts"]) + 1,
+        "display_name": display_name,
+        "model_used": model_used,
+        "avatar_url": avatar_url,
+        "content": content,
+        "content_html": markdown_to_html(content),
+        "round": round_num,
+        "timestamp": time.strftime("%H:%M"),
+        "search_count": search_count,
+        "search_queries": search_queries
+    }
+
+class DebateSession:
+    """Инкапсулирует состояние и логику дебатов"""
+    
+    def __init__(self):
+        self.running = False
+        self.topic = ""
+        self.posts = []
+        self.current_round = 0
+        self.current_participant = None
+        self.current_action = None
+        self.search_query = None
+        self.finished = False
+        self.avatars = {}
+        self.instructions = {}
+        self.waiting_for_moderator = False
+        self.moderator_message = None
+        self.moderator_finished = False
+        self.runtime_participants = []
+        self.conversation_history = []
+    
+    def reset(self, topic: str, runtime_participants: list, avatars: dict, instructions: dict):
+        """Сброс состояния для новых дебатов"""
+        self.running = True
+        self.topic = topic
+        self.posts = []
+        self.current_round = 0
+        self.current_participant = None
+        self.current_action = None
+        self.search_query = None
+        self.finished = False
+        # Аватары и инструкции не сбрасываем - они сохраняются
+        self.avatars = avatars
+        self.instructions = instructions
+        self.waiting_for_moderator = False
+        self.moderator_message = None
+        self.moderator_finished = False
+        self.runtime_participants = runtime_participants
+        self.conversation_history = []
+    
+    def add_post(self, display_name: str, model_used: str, content: str, round_num: int,
+                 search_count: int = 0, search_queries: list = None):
+        """Добавляет пост в историю и список постов"""
+        avatar_url = self.avatars.get(display_name)
+        post = create_post(display_name, model_used, content, round_num, 
+                          avatar_url, search_count, search_queries)
+        self.posts.append(post)
+        
+        if content.strip():  # Добавляем в историю только непустые сообщения
+            self.conversation_history.append({
+                "display_name": display_name,
+                "content": content
+            })
+        
+        return post
+    
+    def get_system_prompt(self, participant: dict, all_names: list) -> str:
+        """Генерирует системный промпт для участника"""
+        other_names = [name for name in all_names if name != participant["display_name"]]
+        
+        system_prompt = (
+            f"Ты — {participant['display_name']}. "
+            f"ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ). "
+            f"Ты участвуешь в сцене вместе с: {', '.join(other_names)}. "
+            f"ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики. "
+            f"Сюжет сцены: \\\"{self.topic}\\\". "
+            f"ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем! "
+            f"Учитывай всё что говорили другие персонажи и реагируй на их слова. "
+            f"Отвечай на русском языке. "
+            f"КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 реплик. Будь лаконичным. "
+            f"Используй поиск в интернете для фактологических утверждений. "
+            f"При поиске НЕ указывай годы."
+        )
+        
+        # Добавляем кастомную инструкцию если есть
+        custom_instruction = self.instructions.get(participant["display_name"], "")
+        if custom_instruction:
+            system_prompt += f" {custom_instruction}"
+        
+        # Добавляем инструкцию по поиску
+        if ENABLE_SEARCH:
+            min_search_text = ""
+            if MIN_SEARCHES > 0:
+                min_search_text = f" Сделай минимум {MIN_SEARCHES} поиск(ов) перед ответом."
+            
+            system_prompt += (
+                " Если есть сомнения в фактах или мнениях - используй поиск для уточнения. "
+                "При поиске НЕ указывай год."
+                + min_search_text
+            )
+        
+        return system_prompt
+    
+    def build_messages_for_ai(self, participant: dict, round_num: int) -> list:
+        """Строит список сообщений для AI модели"""
+        system_prompt = self.get_system_prompt(participant, 
+                                               [p["display_name"] for p in self.runtime_participants])
+        
+        messages = [
+            {"role": "system", "content": system_prompt, "name": "system"},
+        ]
+        
+        # Добавляем историю разговора
+        for post in self.conversation_history:
+            speaker_name = post["display_name"]
+            content = post["content"]
+            
+            if speaker_name == participant["display_name"]:
+                messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "name": speaker_name.lower().replace(" ", "_")
+                })
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": f"{speaker_name} говорит: {content}",
+                    "name": speaker_name.lower().replace(" ", "_")
+                })
+        
+        # Добавляем финальный запрос
+        if round_num == 1 and len(self.conversation_history) == 0:
+            messages.append({
+                "role": "user", 
+                "content": f"Как {participant['display_name']}, начни спектакль по сюжету \\\"{self.topic}\\\". Обращайся к другим персонажам по именам.",
+                "name": participant["display_name"].lower().replace(" ", "_")
+            })
+        else:
+            last_post = self.conversation_history[-1] if self.conversation_history else None
+            if last_post:
+                last_speaker = last_post["display_name"]
+                messages.append({
+                    "role": "user",
+                    "content": f"{last_speaker} только что сказал: \\\"{last_post['content']}\\\". Как {participant['display_name']}, ответь ему и другим персонажам, обращаясь по именам.",
+                    "name": participant["display_name"].lower().replace(" ", "_")
+                })
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": f"Как {participant['display_name']}, продолжай спектакль, обращаясь к другим персонажам по именам.",
+                    "name": participant["display_name"].lower().replace(" ", "_")
+                })
+        
+        return messages
+    
+    def handle_human_turn(self, participant: dict, round_num: int) -> bool:
+        """
+        Обрабатывает ход человека. Возвращает True если дебаты завершены.
+        """
+        # Сбрасываем все флаги перед новым ожиданием
+        self.moderator_message = None
+        self.current_action = None
+        time.sleep(0.2)
+        
+        # Устанавливаем флаг ожидания
+        self.current_action = "waiting"
+        self.waiting_for_moderator = True
+        print(f"\\n⏳ Ожидание реплики от {participant['display_name']}...")
+        
+        # Ждём пока участник отправит сообщение или завершит дебаты
+        while True:
+            time.sleep(0.5)
+            
+            # Проверяем, не завершил ли модератор дебаты
+            if self.moderator_finished:
+                print(f"\\n✅ Спектакль завершён режиссёром")
+                self.finished = True
+                self.waiting_for_moderator = False
+                return True
+            
+            # Проверяем, есть ли сообщение от участника
+            current_message = self.moderator_message
+            if current_message is not None:  # Разрешаем пустые сообщения
+                self.waiting_for_moderator = False
+                
+                # Добавляем пост (в историю и в список постов)
+                self.add_post(
+                    display_name=participant["display_name"],
+                    model_used="human",
+                    content=current_message,
+                    round_num=round_num,
+                    search_count=0,
+                    search_queries=[]
+                )
+                
+                if current_message.strip():
+                    print(f"🎬 {participant['display_name']}: {current_message[:50]}")
+                else:
+                    print(f"🎬 {participant['display_name']} пропустил действие")
+                
+                # Очищаем сообщение
+                self.moderator_message = None
+                self.current_action = None
+                return False
+        
+        return False
+    
+    def handle_ai_turn(self, participant: dict, round_num: int):
+        """Обрабатывает ход AI участника"""
+        self.current_action = "thinking"
+        
+        # Строим сообщения для модели
+        messages = self.build_messages_for_ai(participant, round_num)
+        
+        # Получаем ответ от модели
+        response, search_count, search_queries = ask_model(
+            model=participant["model"],
+            messages=messages,
+            participant_name=participant["display_name"]
+        )
+        
+        # Добавляем пост
+        self.add_post(
+            display_name=participant["display_name"],
+            model_used=participant["model"],
+            content=response,
+            round_num=round_num,
+            search_count=search_count,
+            search_queries=search_queries
+        )
+        
+        self.current_action = None
+        time.sleep(0.5)
+
+# Глобальный экземпляр сессии
+session = DebateSession()
+
 def run_debate_thread(topic: str):
     debate_state["running"] = True
     debate_state["topic"] = topic
