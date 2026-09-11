@@ -536,182 +536,182 @@ def run_debate_thread(topic: str):
             debate_state["current_round"] = round_num
             print(f"\n🎭 Акт {round_num}")
             
-            # Фильтруем только AI участников (не модератора)
-            ai_participants = [p for p in runtime_participants if not p.get("is_moderator")]
-            print(f"  🎭 Персонажи: {[p['display_name'] + ' (' + p['model'] + ')' for p in ai_participants]}")
+            # Проходим по ВСЕМ участникам в порядке их следования в списке
+            # is_moderator влияет только на право завершать дебаты, но не на очередность
+            print(f"  🎭 Персонажи: {[p['display_name'] + ' (' + p['model'] + ')' for p in runtime_participants]}")
             
-            for participant in ai_participants:
+            for participant in runtime_participants:
                 print(f"  🎭 На сцене: {participant['display_name']} (модель: {participant['model']})")
                 debate_state["current_participant"] = participant["display_name"]
-                debate_state["current_action"] = "thinking"
                 
-                # Получаем список имён всех участников
-                all_names = [p["display_name"] for p in runtime_participants]
-                other_names = [name for name in all_names if name != participant["display_name"]]
-                
-                system_prompt = (
-                    f"Ты — {participant['display_name']}. "
-                    f"ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ). "
-                    f"Ты участвуешь в сцене вместе с: {', '.join(other_names)}. "
-                    f"ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики. "
-                    f"Сюжет сцены: \"{topic}\". "
-                    f"ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем! "
-                    f"Учитывай всё что говорили другие персонажи и реагируй на их слова. "
-                    f"Отвечай на русском языке. "
-                    f"КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 реплик. Будь лаконичным. "
-                    f"Используй поиск в интернете для фактологических утверждений. "
-                    f"При поиске НЕ указывай годы."
-                )
-                
-                custom_instruction = instructions.get(participant["display_name"], "")
-                if custom_instruction:
-                    system_prompt += f" {custom_instruction}"
-                
-                if ENABLE_SEARCH:
-                    min_search_text = ""
-                    if MIN_SEARCHES > 0:
-                        min_search_text = f" Сделай минимум {MIN_SEARCHES} поиск(ов) перед ответом."
+                # Если это человек (модератор или любой другой human)
+                if participant["model"] == "human":
+                    debate_state["current_action"] = "waiting"
+                    print(f"\n⏳ Ожидание реплики от {participant['display_name']}...")
                     
-                    system_prompt += (
-                        " Если есть сомнения в фактах или мнениях - используй поиск для уточнения. "
-                        "При поиске НЕ указывай год."
-                        + min_search_text
-                    )
-                
-                messages = [
-                    {"role": "system", "content": system_prompt, "name": "system"},
-                ]
-                
-                # Добавляем историю разговора в понятном формате
-                for post in conversation_history:
-                    speaker_name = post["display_name"]
-                    content = post["content"]
+                    # Ждём пока участник отправит сообщение или завершит дебаты
+                    while True:
+                        time.sleep(0.5)
+                        
+                        # Проверяем, не завершил ли модератор дебаты
+                        if debate_state.get("moderator_finished"):
+                            print(f"\n✅ Сцена завершена режиссёром")
+                            debate_state["finished"] = True
+                            break
+                        
+                        # Проверяем, есть ли сообщение от участника
+                        current_message = debate_state.get("moderator_message")
+                        if current_message is not None:  # Разрешаем пустые сообщения
+                            # Добавляем в историю ВСЕГДА (для контекста)
+                            conversation_history.append({
+                                "display_name": participant["display_name"],
+                                "content": current_message
+                            })
+                            
+                            # Показываем пост только если сообщение не пустое
+                            if current_message.strip():
+                                avatar_url = debate_state["avatars"].get(participant["display_name"])
+                                post = {
+                                    "id": len(debate_state["posts"]) + 1,
+                                    "display_name": participant["display_name"],
+                                    "model_used": "human",
+                                    "avatar_url": avatar_url,
+                                    "content": current_message,
+                                    "content_html": markdown_to_html(current_message),
+                                    "round": round_num,
+                                    "timestamp": time.strftime("%H:%M"),
+                                    "search_count": 0,
+                                    "search_queries": []
+                                }
+                                debate_state["posts"].append(post)
+                                print(f"🎬 {participant['display_name']}: {current_message[:50]}")
+                            else:
+                                print(f"🎬 {participant['display_name']} пропустил действие")
+                            
+                            # Очищаем сообщение и продолжаем к следующему участнику
+                            debate_state["moderator_message"] = None
+                            debate_state["current_action"] = None
+                            break
                     
-                    if speaker_name == participant["display_name"]:
-                        # Это мои предыдущие реплики
-                        messages.append({
-                            "role": "assistant",
-                            "content": content,
-                            "name": speaker_name.lower().replace(" ", "_")
-                        })
-                    else:
-                        # Это реплики других участников
-                        messages.append({
-                            "role": "user",
-                            "content": f"{speaker_name} говорит: {content}",
-                            "name": speaker_name.lower().replace(" ", "_")
-                        })
-                
-                # Добавляем финальный запрос
-                if round_num == 1 and len(conversation_history) == 0:
-                    messages.append({
-                        "role": "user", 
-                        "content": f"Как {participant['display_name']}, начни сцену по сюжету \"{topic}\". Обращайся к другим персонажам по именам.",
-                        "name": participant["display_name"].lower().replace(" ", "_")
-                    })
-                else:
-                    # Находим последнюю реплику
-                    last_post = conversation_history[-1] if conversation_history else None
-                    if last_post:
-                        last_speaker = last_post["display_name"]
-                        messages.append({
-                            "role": "user",
-                            "content": f"{last_speaker} только что сказал: \"{last_post['content']}\". Как {participant['display_name']}, ответь ему и другим персонажам, обращаясь по именам.",
-                            "name": participant["display_name"].lower().replace(" ", "_")
-                        })
-                    else:
-                        messages.append({
-                            "role": "user",
-                            "content": f"Как {participant['display_name']}, продолжай сцену, обращаясь к другим персонажам по именам.",
-                            "name": participant["display_name"].lower().replace(" ", "_")
-                        })
-                
-                response, search_count, search_queries = ask_model(
-                    model=participant["model"],
-                    messages=messages,
-                    participant_name=participant["display_name"]
-                )
-                
-                avatar_url = debate_state["avatars"].get(participant["display_name"])
-                
-                post = {
-                    "id": len(debate_state["posts"]) + 1,
-                    "display_name": participant["display_name"],
-                    "model_used": participant["model"],
-                    "avatar_url": avatar_url,
-                    "content": response,
-                    "content_html": markdown_to_html(response),
-                    "round": round_num,
-                    "timestamp": time.strftime("%H:%M"),
-                    "search_count": search_count,
-                    "search_queries": search_queries
-                }
-                
-                debate_state["posts"].append(post)
-                conversation_history.append({
-                    "display_name": participant["display_name"],
-                    "content": response
-                })
-                
-                debate_state["current_action"] = None
-                time.sleep(0.5)
-            
-            # Ожидаем ввод модератора
-            debate_state["waiting_for_moderator"] = True
-            debate_state["current_participant"] = "Модератор"
-            debate_state["current_action"] = "waiting"
-            print(f"\n⏳ Ожидание реплики режиссёра...")
-            
-            # Ждём пока модератор отправит сообщение или завершит
-            while debate_state.get("waiting_for_moderator"):
-                time.sleep(0.5)
-                
-                # Проверяем, не завершил ли модератор дебаты
-                if debate_state.get("moderator_finished"):
-                    print(f"\n✅ Сцена завершена режиссёром")
-                    debate_state["finished"] = True
-                    break
-                
-                # Проверяем, есть ли сообщение от модератора
-                moderator_message = debate_state.get("moderator_message")
-                if moderator_message is not None:  # Разрешаем пустые сообщения
-                    # Находим модератора в списке участников
-                    moderator = next((p for p in runtime_participants if p.get("is_moderator")), None)
-                    if moderator:
-                        # Получаем аватар модератора (может быть None)
-                        avatar_url = debate_state["avatars"].get(moderator["display_name"])
-                        
-                        # Добавляем в историю ВСЕГДА (для контекста)
-                        conversation_history.append({
-                            "display_name": moderator["display_name"],
-                            "content": moderator_message
-                        })
-                        
-                        # Показываем пост только если сообщение не пустое
-                        if moderator_message.strip():
-                            post = {
-                                "id": len(debate_state["posts"]) + 1,
-                                "display_name": moderator["display_name"],
-                                "model_used": "human",
-                                "avatar_url": avatar_url,
-                                "content": moderator_message,
-                                "content_html": markdown_to_html(moderator_message),
-                                "round": round_num,
-                                "timestamp": time.strftime("%H:%M"),
-                                "search_count": 0,
-                                "search_queries": []
-                            }
-                            debate_state["posts"].append(post)
-                            print(f"🎬 Режиссёр: {moderator_message[:50]}")
-                        else:
-                            print(f"🎬 Режиссёр пропустил действие")
-                        
-                        # Очищаем сообщение и продолжаем
-                        debate_state["moderator_message"] = None
-                        debate_state["waiting_for_moderator"] = False
+                    # Если модератор завершил дебаты - выходим из главного цикла
+                    if debate_state.get("moderator_finished"):
                         break
+                else:
+                    # Если это AI участник
+                    debate_state["current_action"] = "thinking"
+                    
+                    # Получаем список имён всех участников
+                    all_names = [p["display_name"] for p in runtime_participants]
+                    other_names = [name for name in all_names if name != participant["display_name"]]
+                    
+                    system_prompt = (
+                        f"Ты — {participant['display_name']}. "
+                        f"ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ). "
+                        f"Ты участвуешь в сцене вместе с: {', '.join(other_names)}. "
+                        f"ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики. "
+                        f"Сюжет сцены: \"{topic}\". "
+                        f"ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем! "
+                        f"Учитывай всё что говорили другие персонажи и реагируй на их слова. "
+                        f"Отвечай на русском языке. "
+                        f"КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 реплик. Будь лаконичным. "
+                        f"Используй поиск в интернете для фактологических утверждений. "
+                        f"При поиске НЕ указывай годы."
+                    )
+                    
+                    custom_instruction = instructions.get(participant["display_name"], "")
+                    if custom_instruction:
+                        system_prompt += f" {custom_instruction}"
+                    
+                    if ENABLE_SEARCH:
+                        min_search_text = ""
+                        if MIN_SEARCHES > 0:
+                            min_search_text = f" Сделай минимум {MIN_SEARCHES} поиск(ов) перед ответом."
+                        
+                        system_prompt += (
+                            " Если есть сомнения в фактах или мнениях - используй поиск для уточнения. "
+                            "При поиске НЕ указывай год."
+                            + min_search_text
+                        )
+                    
+                    messages = [
+                        {"role": "system", "content": system_prompt, "name": "system"},
+                    ]
+                    
+                    # Добавляем историю разговора в понятном формате
+                    for post in conversation_history:
+                        speaker_name = post["display_name"]
+                        content = post["content"]
+                        
+                        if speaker_name == participant["display_name"]:
+                            # Это мои предыдущие реплики
+                            messages.append({
+                                "role": "assistant",
+                                "content": content,
+                                "name": speaker_name.lower().replace(" ", "_")
+                            })
+                        else:
+                            # Это реплики других участников
+                            messages.append({
+                                "role": "user",
+                                "content": f"{speaker_name} говорит: {content}",
+                                "name": speaker_name.lower().replace(" ", "_")
+                            })
+                    
+                    # Добавляем финальный запрос
+                    if round_num == 1 and len(conversation_history) == 0:
+                        messages.append({
+                            "role": "user", 
+                            "content": f"Как {participant['display_name']}, начни сцену по сюжету \"{topic}\". Обращайся к другим персонажам по именам.",
+                            "name": participant["display_name"].lower().replace(" ", "_")
+                        })
+                    else:
+                        # Находим последнюю реплику
+                        last_post = conversation_history[-1] if conversation_history else None
+                        if last_post:
+                            last_speaker = last_post["display_name"]
+                            messages.append({
+                                "role": "user",
+                                "content": f"{last_speaker} только что сказал: \"{last_post['content']}\". Как {participant['display_name']}, ответь ему и другим персонажам, обращаясь по именам.",
+                                "name": participant["display_name"].lower().replace(" ", "_")
+                            })
+                        else:
+                            messages.append({
+                                "role": "user",
+                                "content": f"Как {participant['display_name']}, продолжай сцену, обращаясь к другим персонажам по именам.",
+                                "name": participant["display_name"].lower().replace(" ", "_")
+                            })
+                    
+                    response, search_count, search_queries = ask_model(
+                        model=participant["model"],
+                        messages=messages,
+                        participant_name=participant["display_name"]
+                    )
+                    
+                    avatar_url = debate_state["avatars"].get(participant["display_name"])
+                    
+                    post = {
+                        "id": len(debate_state["posts"]) + 1,
+                        "display_name": participant["display_name"],
+                        "model_used": participant["model"],
+                        "avatar_url": avatar_url,
+                        "content": response,
+                        "content_html": markdown_to_html(response),
+                        "round": round_num,
+                        "timestamp": time.strftime("%H:%M"),
+                        "search_count": search_count,
+                        "search_queries": search_queries
+                    }
+                    
+                    debate_state["posts"].append(post)
+                    conversation_history.append({
+                        "display_name": participant["display_name"],
+                        "content": response
+                    })
+                    
+                    debate_state["current_action"] = None
+                    time.sleep(0.5)
             
-            # Если модератор завершил дебаты - выходим из цикла
+            # Если модератор завершил дебаты во время хода AI - выходим
             if debate_state.get("moderator_finished"):
                 break
         
