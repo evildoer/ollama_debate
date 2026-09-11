@@ -522,7 +522,7 @@ def run_debate_thread(topic: str):
     for participant in runtime_participants:
         display_name = participant.get("display_name", "")
         if display_name and display_name in debate_state["avatars"]:
-            print(f"  ✅ {display_name}: готов к выходу на сцену")
+            print(f"  ✅ {display_name}: готов к выходу на подмостки")
         else:
             print(f"  ⚠️  {display_name}: грим не подготовлен (будет эмодзи)")
     
@@ -555,7 +555,7 @@ def run_debate_thread(topic: str):
                         
                         # Проверяем, не завершил ли модератор дебаты
                         if debate_state.get("moderator_finished"):
-                            print(f"\n✅ Сцена завершена режиссёром")
+                            print(f"\n✅ Спектакль завершён режиссёром")
                             debate_state["finished"] = True
                             break
                         
@@ -661,7 +661,7 @@ def run_debate_thread(topic: str):
                     if round_num == 1 and len(conversation_history) == 0:
                         messages.append({
                             "role": "user", 
-                            "content": f"Как {participant['display_name']}, начни сцену по сюжету \"{topic}\". Обращайся к другим персонажам по именам.",
+                            "content": f"Как {participant['display_name']}, начни спектакль по сюжету \"{topic}\". Обращайся к другим персонажам по именам.",
                             "name": participant["display_name"].lower().replace(" ", "_")
                         })
                     else:
@@ -677,7 +677,7 @@ def run_debate_thread(topic: str):
                         else:
                             messages.append({
                                 "role": "user",
-                                "content": f"Как {participant['display_name']}, продолжай сцену, обращаясь к другим персонажам по именам.",
+                                "content": f"Как {participant['display_name']}, продолжай спектакль, обращаясь к другим персонажам по именам.",
                                 "name": participant["display_name"].lower().replace(" ", "_")
                             })
                     
@@ -1208,7 +1208,7 @@ HTML_TEMPLATE = """
         <div class="header">
             <div class="header-date" id="headerDate"></div>
             <h1>AI Театр</h1>
-            <div class="header-subtitle">Сцена нейросетей • Акт I</div>
+            <div class="header-subtitle">Спектакль нейросетей • Акт I</div>
             <div class="header-topic" id="topicDisplay">—</div>
         </div>                
                 <div class="card" id="setupCard">
@@ -1221,8 +1221,8 @@ HTML_TEMPLATE = """
                     <div class="input-group">
                         <textarea id="topicInput" rows="3" placeholder="Опишите сюжет сцены..."></textarea>
                     </div>
-                    <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать сцену</button>
-                    <button class="btn btn-secondary" id="newBtn" onclick="resetDebate()" style="display:none;">🎭 Новая сцена</button>
+                    <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
+                    <button class="btn btn-secondary" id="newBtn" onclick="resetDebate()" style="display:none;">🎭 Новый спектакль</button>
                     <div style="margin-top:10px;font-size:12px;color:#666;">Ctrl+Enter для отправки</div>
                 </div>
                 
@@ -1234,13 +1234,13 @@ HTML_TEMPLATE = """
                     <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..."></textarea>
                     <div style="display:flex; gap:15px;">
                         <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
-                        <button class="btn btn-secondary" onclick="finishDebate()">Завершить сцену</button>
+                        <button class="btn btn-secondary" onclick="finishDebate()">Завершить спектакль</button>
                     </div>
                     <div style="margin-top:10px; font-size:12px; font-style:italic;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки</div>
                 </div>
                 
                 <div class="footer">
-                    <button class="btn btn-secondary" onclick="shutdownServer(false)">Выход</button>
+                    <button class="btn btn-secondary" onclick="shutdownServer(false)">Покинуть театр</button>
                 </div>
             </div>
         </div>
@@ -1669,7 +1669,7 @@ HTML_TEMPLATE = """
                         // Обновляем статус сразу
                         const statusDiv = document.getElementById('statusBar');
                         statusDiv.style.display = 'block';
-                        statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Сцена завершена</div><div style="font-style:italic;">Режиссёр завершил представление</div>';
+                        statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Спектакль завершён</div><div style="font-style:italic;">Режиссёр завершил представление</div>';
                         document.getElementById('statusPlaceholder').style.display = 'none';
                         // Затем сразу завершаем сервер без дополнительного подтверждения
                         shutdownServer(true);
@@ -1701,7 +1701,7 @@ HTML_TEMPLATE = """
                 // Обновляем статус в сайдбаре
                 const statusDiv = document.getElementById('statusBar');
                 statusDiv.style.display = 'block';
-                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Театр закрыт</div><div style="font-style:italic;">Сцена сохранена для просмотра</div>';
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Театр закрыт</div><div style="font-style:italic;">Спектакль сохранён для просмотра</div>';
             }
         }
         
@@ -1898,7 +1898,7 @@ def shutdown():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("🎭 AI Театр - Сцена нейросетей")
+    print("🎭 AI Театр - Спектакль нейросетей")
     print("=" * 50)
     print(f"Персонажей:  {len(PARTICIPANTS)}")
     for i, p in enumerate(PARTICIPANTS, 1):
