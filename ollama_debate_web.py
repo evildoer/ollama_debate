@@ -1666,6 +1666,11 @@ HTML_TEMPLATE = """
                 .then(data => {
                     if (data.success) {
                         document.getElementById('moderatorPanel').style.display = 'none';
+                        // Обновляем статус сразу
+                        const statusDiv = document.getElementById('statusBar');
+                        statusDiv.style.display = 'block';
+                        statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Сцена завершена</div><div style="font-style:italic;">Режиссёр завершил представление</div>';
+                        document.getElementById('statusPlaceholder').style.display = 'none';
                         // Затем сразу завершаем сервер без дополнительного подтверждения
                         shutdownServer(true);
                     }
