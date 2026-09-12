@@ -13,30 +13,56 @@ Ollama AI Debate - Современный веб-интерфейс с WebSocket
 import urllib.request
 import urllib.error
 import json
+import logging
 import time
 import threading
 import webbrowser
 import os
+import sys
 import hashlib
 import ssl
 import re
 import random
+import traceback
 from pathlib import Path
 from urllib.parse import quote
 from flask import Flask, render_template_string, jsonify, request, send_from_directory
 from flask_socketio import SocketIO, emit
 
-# Попытка импорта tiktoken для точного подсчёта токенов
+# Логи с эмодзи не должны ронять программу: при перенаправлении вывода
+# или на консоли с кодировкой cp1251/ascii печать падает с UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+# Кэш BPE-файлов tiktoken держим рядом с проектом. По умолчанию tiktoken
+# складывает их во временную папку системы, а её могут очистить - тогда при
+# следующем запуске он снова полезет в сеть.
+os.environ.setdefault(
+    "TIKTOKEN_CACHE_DIR",
+    str(Path(__file__).resolve().parent / ".tiktoken_cache")
+)
+
+# Подсчёт токенов через tiktoken, если он есть и смог инициализироваться.
+TIKTOKEN_AVAILABLE = False
+TIKTOKEN_ENCODER = None
 try:
     import tiktoken
-    TIKTOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
-    TIKTOKEN_AVAILABLE = True
-    print("✅ tiktoken доступен - точный подсчёт токенов")
 except ImportError:
-    TIKTOKEN_AVAILABLE = False
-    TIKTOKEN_ENCODER = None
     print("⚠️  tiktoken не установлен - используется приближённый подсчёт")
     print("   Установите: pip install tiktoken")
+else:
+    try:
+        # get_encoding() при пустом кэше идёт в сеть за файлом BPE,
+        # поэтому ловим любое исключение, а не только ImportError.
+        TIKTOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+        TIKTOKEN_AVAILABLE = True
+        print("✅ tiktoken доступен - точный подсчёт токенов")
+    except Exception as e:
+        print(f"⚠️  tiktoken не удалось инициализировать ({e})")
+        print("   Используется приближённый подсчёт токенов")
 
 # Поиск в интернете
 try:
@@ -90,6 +116,11 @@ ENABLE_SEARCH = True
 MIN_SEARCHES = 0
 ENABLE_AVATAR_GENERATION = True
 UNLOAD_AFTER_DEBATE = True
+# Держать в памяти только текущего говорящего: иначе Ollama ~5 минут после
+# ответа не выгружает модель, и к третьему персонажу в памяти оказываются
+# все сразу (у моделей ниже это ~7 + 7 + 6 ГБ + контекст).
+UNLOAD_OTHER_MODELS = True
+MODELS_CACHE_TTL = 5  # секунд: на столько кэшируется список моделей Ollama
 
 # Оптимизация GPU
 OPTIONS = {
@@ -104,6 +135,9 @@ CONTEXT_SAFETY_MARGIN = 500  # токенов
 
 # Кэш для хранения информации о поддержке tools моделями
 MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
+
+# Кэш списка скачанных моделей Ollama: {"at": monotonic, "models": {имя: размер}, "error": str}
+_OLLAMA_MODELS_CACHE = {"at": 0.0, "models": {}, "error": None}
 
 # Кэш для хранения URL аватаров по ключам (чтобы не искать повторно)
 AVATAR_URL_CACHE = {}  # {"avatar_keywords": "image_url"}
@@ -168,15 +202,8 @@ PROFESSIONS = [
     "фермер", "рыбак", "охотник", "путешественник", "исследователь"
 ]
 
-def get_random_name(gender: str = "male") -> str:
-    """Возвращает случайное русское имя по полу"""
-    if gender == "female":
-        return random.choice(FEMALE_NAMES)
-    return random.choice(MALE_NAMES)
-
-def get_random_emoji() -> str:
-    """Возвращает случайную эмодзи для аватара"""
-    return random.choice(AVATAR_EMOJIS)
+# Имена, эмодзи и профессии раздаются в /api/participants - без повторов внутри
+# одного ответа.
 
 # ============================================================
 # ПАПКА ДЛЯ АВАТАРОВ
@@ -191,60 +218,88 @@ def setup_avatar_dir():
 def compute_file_checksum(filepath: Path) -> str:
     return hashlib.md5(filepath.read_bytes()).hexdigest()[:8]
 
-def compute_data_checksum( bytes) -> str:
+def compute_data_checksum(data: bytes) -> str:
     return hashlib.md5(data).hexdigest()[:8]
+
+def sanitize_avatar_name(keywords: str) -> str:
+    """Имя файла аватара: кириллица сохраняется, остальные символы заменяются на '_'."""
+    return re.sub(r'[^a-zа-яё0-9_]', '_', keywords.lower().replace(' ', '_'), flags=re.IGNORECASE)
+
+def proxy_modes() -> list:
+    """Порядок сетевых попыток: сначала через прокси (если включён), затем напрямую."""
+    return [PROXY, None] if PROXY else [None]
 
 # ============================================================
 # ПОИСК И СКАЧИВАНИЕ ИЗОБРАЖЕНИЙ
 # ============================================================
 
+def ddgs_search(kind: str, method: str, query: str, max_results: int = 5) -> tuple:
+    """
+    Ищет через ddgs: 3 попытки через прокси (если включён), затем 3 попытки напрямую.
+    Возвращает (results, last_error).
+    """
+    last_error = None
+    
+    for proxy in proxy_modes():
+        mode = f"через прокси {proxy}" if proxy else "без прокси"
+        if proxy is None and PROXY:
+            print(f"  🔄 {kind}: прокси не помог, пробую без прокси...")
+        
+        for attempt in range(3):
+            try:
+                ddgs_kwargs = {"proxy": proxy} if proxy else {}
+                with DDGS(**ddgs_kwargs) as ddgs:
+                    results = list(getattr(ddgs, method)(
+                        query,
+                        safesearch="off",
+                        max_results=max_results
+                    ))
+                
+                if proxy is None and PROXY:
+                    print(f"  ✅ {kind} без прокси успешен!")
+                return results, None
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    print(f"  ⚠️  {kind} ({mode}): попытка {attempt + 1} не удалась: {e}, пробую ещё раз...")
+                    time.sleep(2)
+                else:
+                    print(f"  ⚠️  {kind} ({mode}): ошибка после 3 попыток: {e}")
+    
+    return [], last_error
+
 def search_images(query: str, max_results: int = 5) -> str:
     if not SEARCH_AVAILABLE:
         return json.dumps([])
     
-    # Пробуем несколько раз с задержкой
-    for attempt in range(3):
-        try:
-            ddgs_kwargs = {}
-            if PROXY:
-                ddgs_kwargs["proxy"] = PROXY
-            
-            with DDGS(**ddgs_kwargs) as ddgs:
-                results = list(ddgs.images(
-                    query,
-                    safesearch="off",
-                    max_results=max_results
-                ))
-            
-            image_urls = [r.get('image', '') for r in results if r.get('image')]
-            if image_urls:
-                return json.dumps(image_urls)
-        except Exception as e:
-            if attempt < 2:
-                print(f"  ⚠️  Попытка {attempt + 1} не удалась: {e}, пробую ещё раз...")
-                time.sleep(2)
-            else:
-                print(f"  ⚠️  Ошибка поиска изображений после 3 попыток: {e}")
+    results, _ = ddgs_search("Поиск изображений", "images", query, max_results)
+    image_urls = [r.get('image', '') for r in results if r.get('image')]
+    return json.dumps(image_urls)
+
+def _save_avatar_image(image_data: bytes, base_name: str) -> str:
+    """Сохраняет картинку в /avatars, переиспользуя файл с той же контрольной суммой."""
+    checksum = compute_data_checksum(image_data)
     
-    # Fallback: если прокси включён и все попытки не удались, пробуем без прокси
-    if PROXY:
-        print(f"  🔄 Пробую поиск изображений без прокси...")
-        try:
-            with DDGS() as ddgs:
-                results = list(ddgs.images(
-                    query,
-                    safesearch="off",
-                    max_results=max_results
-                ))
-            
-            image_urls = [r.get('image', '') for r in results if r.get('image')]
-            if image_urls:
-                print(f"  ✅ Поиск изображений без прокси успешен!")
-                return json.dumps(image_urls)
-        except Exception as e:
-            print(f"  ⚠️  Поиск изображений без прокси тоже не удался: {e}")
+    for existing_file in AVATAR_DIR.glob(f"{base_name}*.jpg"):
+        if compute_file_checksum(existing_file) == checksum:
+            return str(existing_file)
     
-    return json.dumps([])
+    filepath = AVATAR_DIR / f"{base_name}_{checksum}.jpg"
+    filepath.write_bytes(image_data)
+    return str(filepath)
+
+def _build_image_opener(proxy_url):
+    """Opener для картинок: без проверки SSL, через прокси или напрямую."""
+    ssl_context = ssl.create_default_context()
+    ssl_context.check_hostname = False
+    ssl_context.verify_mode = ssl.CERT_NONE
+    
+    # Пустой ProxyHandler({}) означает "игнорировать прокси из переменных окружения"
+    proxy_handler = (
+        urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+        if proxy_url else urllib.request.ProxyHandler({})
+    )
+    return urllib.request.build_opener(proxy_handler, urllib.request.HTTPSHandler(context=ssl_context))
 
 def download_image_with_checksum(url: str, base_name: str) -> str:
     setup_avatar_dir()
@@ -252,75 +307,36 @@ def download_image_with_checksum(url: str, base_name: str) -> str:
     # Кодируем URL для поддержки не-ASCII символов (кириллица и т.д.)
     encoded_url = quote(url, safe=':/?&=#%@!~')
     
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+        'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+    
     max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
-            }
-            
-            req = urllib.request.Request(encoded_url, headers=headers)
-            
-            # Отключаем проверку SSL
-            ssl_context = ssl.create_default_context()
-            ssl_context.check_hostname = False
-            ssl_context.verify_mode = ssl.CERT_NONE
-            
-            with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
-                image_data = response.read()
-            
-            checksum = compute_data_checksum(image_data)
-            
-            for existing_file in AVATAR_DIR.glob(f"{base_name}*.jpg"):
-                existing_checksum = compute_file_checksum(existing_file)
-                if existing_checksum == checksum:
-                    return str(existing_file)
-            
-            filename = f"{base_name}_{checksum}.jpg"
-            filepath = AVATAR_DIR / filename
-            filepath.write_bytes(image_data)
-            
-            return str(filepath)
-            
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"  ⚠️  Попытка {attempt + 1} скачать не удалась: {e}, пробую ещё раз...")
-                time.sleep(3)
-            else:
-                print(f"  ⚠️  Не удалось скачать изображение после 3 попыток: {e}")
+    for proxy in proxy_modes():
+        mode = f"через прокси {proxy}" if proxy else "без прокси"
+        if proxy is None and PROXY:
+            print(f"  🔄 Прокси не помог, пробую скачать без прокси...")
+        
+        opener = _build_image_opener(proxy)
+        for attempt in range(max_retries):
+            try:
+                req = urllib.request.Request(encoded_url, headers=headers)
+                with opener.open(req, timeout=60) as response:
+                    image_data = response.read()
                 
-                # Fallback: пробуем без прокси
-                if PROXY:
-                    print(f"  🔄 Пробую скачать без прокси...")
-                    try:
-                        # Создаём opener без прокси
-                        proxy_handler = urllib.request.ProxyHandler({})
-                        opener = urllib.request.build_opener(proxy_handler)
-                        
-                        req = urllib.request.Request(encoded_url, headers=headers)
-                        with opener.open(req, timeout=60) as response:
-                            image_data = response.read()
-                        
-                        checksum = compute_data_checksum(image_data)
-                        
-                        for existing_file in AVATAR_DIR.glob(f"{base_name}*.jpg"):
-                            existing_checksum = compute_file_checksum(existing_file)
-                            if existing_checksum == checksum:
-                                print(f"  ✅ Скачивание без прокси успешно!")
-                                return str(existing_file)
-                        
-                        filename = f"{base_name}_{checksum}.jpg"
-                        filepath = AVATAR_DIR / filename
-                        filepath.write_bytes(image_data)
-                        
-                        print(f"  ✅ Скачивание без прокси успешно!")
-                        return str(filepath)
-                    except Exception as e2:
-                        print(f"  ⚠️  Скачивание без прокси тоже не удалось: {e2}")
+                filepath = _save_avatar_image(image_data, base_name)
+                if proxy is None and PROXY:
+                    print(f"  ✅ Скачивание без прокси успешно!")
+                return filepath
                 
-                return ""
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"  ⚠️  Попытка {attempt + 1} скачать ({mode}) не удалась: {e}, пробую ещё раз...")
+                    time.sleep(3)
+                else:
+                    print(f"  ⚠️  Не удалось скачать изображение ({mode}) после {max_retries} попыток: {e}")
     
     return ""
 
@@ -337,7 +353,7 @@ def generate_avatar_for_participant(participant: dict) -> str:
         print(f"🎨 Подготовка грима для: '{avatar_keywords}' (из кэша)")
         
         # Создаём безопасное имя файла, сохраняя кириллицу
-        base_name = re.sub(r'[^a-zа-яё0-9_]', '_', avatar_keywords.lower().replace(' ', '_'), flags=re.IGNORECASE)
+        base_name = sanitize_avatar_name(avatar_keywords)
         
         # Пробуем скачать по закэшированному URL
         filepath = download_image_with_checksum(cached_url, base_name)
@@ -364,7 +380,7 @@ def generate_avatar_for_participant(participant: dict) -> str:
         AVATAR_URL_CACHE[avatar_keywords] = image_urls[0]
         
         # Создаём безопасное имя файла, сохраняя кириллицу
-        base_name = re.sub(r'[^a-zа-яё0-9_]', '_', avatar_keywords.lower().replace(' ', '_'), flags=re.IGNORECASE)
+        base_name = sanitize_avatar_name(avatar_keywords)
         
         filepath = download_image_with_checksum(image_urls[0], base_name)
         if filepath:
@@ -399,7 +415,6 @@ app.config['SECRET_KEY'] = 'debate-secret-key-change-in-production'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Отключаем логирование GET запросов к /api/status чтобы не засорять консоль
-import logging
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.WARNING)
 
@@ -409,6 +424,8 @@ OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_SHOW_URL = f"{OLLAMA_BASE_URL}/api/show"
+OLLAMA_TAGS_URL = f"{OLLAMA_BASE_URL}/api/tags"
+OLLAMA_PS_URL = f"{OLLAMA_BASE_URL}/api/ps"
 
 def estimate_tokens(text: str) -> int:
     """
@@ -419,8 +436,11 @@ def estimate_tokens(text: str) -> int:
         # Точный подсчёт через tiktoken
         return len(TIKTOKEN_ENCODER.encode(text))
     else:
-        # Fallback: приближённая оценка (~4 символа на токен для кириллицы)
-        return max(1, len(text) // 4)
+        # Fallback: приближённая оценка. Кириллица в cl100k режется примерно по 2
+        # символа на токен, латиница и пунктуация - по 4. Лучше переоценить:
+        # заниженный подсчёт ведёт к переполнению контекста модели.
+        cyrillic = sum(1 for ch in text if "а" <= ch.lower() <= "я" or ch in "ёЁ")
+        return max(1, cyrillic // 2 + (len(text) - cyrillic) // 4)
 
 def trim_history_by_tokens(messages: list, system_prompt_tokens: int) -> list:
     """
@@ -428,7 +448,10 @@ def trim_history_by_tokens(messages: list, system_prompt_tokens: int) -> list:
     Возвращает обрезанный список сообщений.
     """
     # Вычисляем доступное пространство для истории
-    available_tokens = OPTIONS["num_ctx"] - OPTIONS["num_predict"] - CONTEXT_SAFETY_MARGIN - system_prompt_tokens
+    available_tokens = max(
+        0,
+        OPTIONS["num_ctx"] - OPTIONS["num_predict"] - CONTEXT_SAFETY_MARGIN - system_prompt_tokens
+    )
     
     # Подсчитываем токены в каждом сообщении
     messages_with_tokens = []
@@ -484,6 +507,139 @@ def check_model_tools_support(model: str) -> bool:
     except Exception as e:
         print(f"  ⚠️  Ошибка проверки capabilities: {e}")
         return False
+
+# ============================================================
+# ПРОВЕРКА, ЧТО МОДЕЛИ ИЗ PARTICIPANTS УСТАНОВЛЕНЫ В OLLAMA
+# ============================================================
+
+def model_is_installed(model: str, available: set) -> bool:
+    """
+    «r1» считается установленной, если в Ollama есть «r1:latest».
+    Точное совпадение тоже принимается («q1:q4_K_M» -> «q1:q4_K_M»).
+    """
+    if not model:
+        return False
+    if model in available:
+        return True
+    
+    base = model.split(":")[0]
+    return any(name == base or name.startswith(base + ":") for name in available)
+
+def fetch_ollama_models(force: bool = False, timeout: int = 5) -> tuple:
+    """
+    Спрашивает у Ollama список СКАЧАННЫХ моделей (/api/tags) - это просто файлы
+    на диске, ничего не загружается в память.
+    Возвращает ({имя: размер_в_байтах}, текст ошибки). Результат ненадолго
+    кэшируется, чтобы перезагрузка страницы не дёргала Ollama каждый раз.
+    """
+    global _OLLAMA_MODELS_CACHE
+    
+    if not force and time.monotonic() - _OLLAMA_MODELS_CACHE["at"] < MODELS_CACHE_TTL:
+        return _OLLAMA_MODELS_CACHE["models"], _OLLAMA_MODELS_CACHE["error"]
+    
+    models, error = {}, None
+    try:
+        with urllib.request.urlopen(OLLAMA_TAGS_URL, timeout=timeout) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        for m in data.get("models", []):
+            name = m.get("name") or m.get("model") or ""
+            if name:
+                models[name] = m.get("size") or 0
+    except Exception as e:
+        error = f"Ollama недоступен по адресу {OLLAMA_BASE_URL} ({e})"
+    
+    _OLLAMA_MODELS_CACHE = {"at": time.monotonic(), "models": models, "error": error}
+    return models, error
+
+def fetch_loaded_models(timeout: int = 5) -> tuple:
+    """
+    Спрашивает у Ollama, какие модели СЕЙЧАС в памяти (/api/ps).
+    Возвращает (список имён, текст ошибки).
+    """
+    try:
+        with urllib.request.urlopen(OLLAMA_PS_URL, timeout=timeout) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        names = [(m.get("name") or m.get("model") or "") for m in data.get("models", [])]
+        return [n for n in names if n], None
+    except Exception as e:
+        return [], str(e)
+
+def unload_other_show_models(current_model: str, show_models: set):
+    """
+    Перед ходом current_model выгружает из памяти остальные модели спектакля.
+    Чужие модели (не из этого спектакля) не трогаем.
+    """
+    if not UNLOAD_OTHER_MODELS:
+        return
+    
+    loaded, error = fetch_loaded_models()
+    if error:
+        return
+    
+    for loaded_name in loaded:
+        if model_is_installed(current_model, {loaded_name}):
+            continue
+        if any(model_is_installed(m, {loaded_name}) for m in show_models):
+            print(f"  🧹 Выгружаю из памяти: {loaded_name}")
+            unload_model(loaded_name)
+
+def check_models_available(models: list, force: bool = False) -> dict:
+    """
+    Проверяет, что все нужные модели есть в Ollama.
+    Возвращает {"ok": bool, "missing": [...], "error": str | None}.
+    """
+    required = [m for m in models if m and m != "human"]
+    if not required:
+        return {"ok": True, "missing": [], "error": None}
+    
+    available, error = fetch_ollama_models(force=force)
+    if error:
+        return {"ok": False, "missing": required, "error": error}
+    
+    missing = [m for m in required if not model_is_installed(m, available)]
+    return {"ok": not missing, "missing": missing, "error": None}
+
+def report_models_status(models: list):
+    """Печатает при старте, все ли нужные модели есть в Ollama."""
+    status = check_models_available(models, force=True)
+    if status["error"]:
+        print(f"  ⚠️  {models_problem_message(status)}")
+        print("     Приложение запустится, но начать спектакль не получится.")
+    elif status["missing"]:
+        print(f"  ❌ Нет моделей: {', '.join(status['missing'])}")
+        print(f"     {models_problem_message(status)}")
+    else:
+        print("  ✅ Все модели на месте")
+    
+    # Сколько это заняло бы памяти, если загрузить всё сразу
+    available, _ = fetch_ollama_models()
+    sizes = {}
+    for required in models:
+        for name, size in available.items():
+            if required != "human" and model_is_installed(required, {name}):
+                sizes[required] = size
+                break
+    if sizes:
+        parts = " + ".join(f"{m} {s / 1e9:.1f}" for m, s in sizes.items())
+        total = sum(sizes.values()) / 1e9
+        print(f"  📦 На диске: {parts} = {total:.1f} ГБ (в памяти держится только текущий говорящий)")
+    
+    loaded, _ = fetch_loaded_models()
+    if loaded:
+        print(f"  📦 Сейчас в памяти: {', '.join(loaded)}")
+
+def models_problem_message(status: dict) -> str:
+    """Человекочитаемое объяснение, почему спектакль нельзя начать."""
+    if status.get("error"):
+        return f"{status['error']}. Проверьте, что Ollama запущена."
+    
+    missing = status.get("missing") or []
+    if missing:
+        pulls = " ; ".join(f"ollama pull {m}" for m in missing)
+        return f"В Ollama нет моделей: {', '.join(missing)}. Скачайте их: {pulls}"
+    
+    return ""
+
 
 def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None) -> tuple:
     """
@@ -548,7 +704,7 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
             result = json.loads(response.read().decode('utf-8'))
             if "message" in result:
                 msg = result["message"]
-                return msg.get("content", ""), msg.get("tool_calls", [])
+                return msg.get("content", "") or "", msg.get("tool_calls") or []
             return "", []
     except urllib.error.HTTPError as e:
         error_body = e.read().decode('utf-8') if e.fp else "Нет деталей ошибки"
@@ -565,51 +721,22 @@ def search_web(query: str, max_results: int = 5) -> str:
     
     print(f"  🔍 Поиск: '{query}'")
     
-    try:
-        ddgs_kwargs = {}
-        if PROXY:
-            ddgs_kwargs["proxy"] = PROXY
-        
-        with DDGS(**ddgs_kwargs) as ddgs:
-            results = list(ddgs.text(query, safesearch="off", max_results=max_results))
-        
-        if not results:
-            return f"По запросу '{query}' ничего не найдено."
-        
-        output = f"Результаты поиска:\n\n"
-        for i, result in enumerate(results, 1):
-            title = result.get('title', 'Без названия')
-            body = result.get('body', 'Без описания')
-            href = result.get('href', '')
-            output += f"{i}. {title}\n   {body}\n   {href}\n\n"
-        
-        return output.strip()
-    except Exception as e:
-        print(f"  ⚠️  Ошибка поиска: {e}")
-        
-        # Fallback: если прокси включён, пробуем без прокси
-        if PROXY:
-            print(f"  🔄 Пробую поиск без прокси...")
-            try:
-                with DDGS() as ddgs:
-                    results = list(ddgs.text(query, safesearch="off", max_results=max_results))
-                
-                if not results:
-                    return f"По запросу '{query}' ничего не найдено."
-                
-                output = f"Результаты поиска:\n\n"
-                for i, result in enumerate(results, 1):
-                    title = result.get('title', 'Без названия')
-                    body = result.get('body', 'Без описания')
-                    href = result.get('href', '')
-                    output += f"{i}. {title}\n   {body}\n   {href}\n\n"
-                
-                print(f"  ✅ Поиск без прокси успешен!")
-                return output.strip()
-            except Exception as e2:
-                print(f"  ⚠️  Поиск без прокси тоже не удался: {e2}")
-        
-        return f"Ошибка поиска: {e}"
+    results, last_error = ddgs_search("Поиск", "text", query, max_results)
+    
+    if not results:
+        if last_error:
+            print(f"  ⚠️  Ошибка поиска: {last_error}")
+            return f"Ошибка поиска: {last_error}"
+        return f"По запросу '{query}' ничего не найдено."
+    
+    output = "Результаты поиска:\n\n"
+    for i, result in enumerate(results, 1):
+        title = result.get('title', 'Без названия')
+        body = result.get('body', 'Без описания')
+        href = result.get('href', '')
+        output += f"{i}. {title}\n   {body}\n   {href}\n\n"
+    
+    return output.strip()
 
 def ask_model(model: str, messages: list, participant_name: str) -> tuple:
     search_queries = []
@@ -629,6 +756,7 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
         current_tool_choice = "any" if force_tool_use else None
         
         content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice)
+        tool_calls = tool_calls or []
         
         # Сбрасываем флаг после использования
         if force_tool_use:
@@ -662,13 +790,26 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
         
         has_search = False
         for tc in tool_calls:
-            func = tc.get("function", {})
+            func = tc.get("function", {}) or {}
             func_name = func.get("name", "")
+            
+            # В большинстве случаев arguments - словарь, но некоторые сборки
+            # Ollama отдают его JSON-строкой, а иногда и не тем типом вообще.
             func_args = func.get("arguments", {})
+            if isinstance(func_args, str):
+                try:
+                    func_args = json.loads(func_args)
+                except json.JSONDecodeError:
+                    func_args = {}
+            if not isinstance(func_args, dict):
+                func_args = {}
             
             if func_name == "search_web" and search_count < max_searches:
-                query = func_args.get("query", "")
-                max_results = func_args.get("max_results", 5)
+                query = str(func_args.get("query", "") or "")
+                try:
+                    max_results = int(func_args.get("max_results", 5))
+                except (TypeError, ValueError):
+                    max_results = 5
                 
                 session.current_action = "searching"
                 session.search_query = query
@@ -830,6 +971,23 @@ class DebateSession:
         
         return post
     
+    def current_participant_is_moderator(self) -> bool:
+        """Ждёт ли сейчас хода режиссёр (участник с is_moderator)."""
+        if not (self.waiting_for_human and self.current_participant):
+            return False
+        
+        return any(
+            p["display_name"] == self.current_participant and p.get("is_moderator", False)
+            for p in self.runtime_participants
+        )
+    
+    def moderator_messages(self) -> list:
+        """Указания режиссёра из истории (пустые отбрасываются)."""
+        return [
+            post["content"] for post in self.conversation_history
+            if post.get("is_moderator", False) and post["content"].strip()
+        ]
+    
     def get_system_prompt(self, participant: dict, all_names: list) -> str:
         """Генерирует системный промпт для участника с заменой плейсхолдеров"""
         other_names = [name for name in all_names if name != participant["display_name"]]
@@ -879,11 +1037,8 @@ class DebateSession:
                 + min_search_text
             )
         
-        # Добавляем указания модератора из истории (фильтруем пустые)
-        moderator_messages = [
-            post["content"] for post in self.conversation_history 
-            if post.get("is_moderator", False) and post["content"].strip()
-        ]
+        # Добавляем указания режиссёра из истории (фильтруем пустые)
+        moderator_messages = self.moderator_messages()
         if moderator_messages:
             system_prompt += "\n\nУКАЗАНИЯ ОТ РУКОВОДСТВА (обязательны к исполнению):\n"
             for msg in moderator_messages:
@@ -1014,6 +1169,16 @@ session = DebateSession()
 def run_debate_thread(topic: str):
     runtime_participants = session.runtime_participants
     
+    if not runtime_participants:
+        # Без участников цикл ниже крутился бы вечно и съедал ядро процессора
+        print("❌ Нет участников - спектакль невозможен")
+        session.finished = True
+        session.running = False
+        return
+    
+    # Модели этого спектакля: их выгружаем по окончании и держим по одной в памяти
+    show_models = {p["model"] for p in runtime_participants if p.get("model") != "human"}
+    
     print("\n🎭 Используем подготовленный грим и костюмы...")
     for participant in runtime_participants:
         display_name = participant.get("display_name", "")
@@ -1080,6 +1245,9 @@ def run_debate_thread(topic: str):
                     if session.moderator_finished:
                         break
                 else:
+                    # В памяти оставляем только того, кто сейчас говорит
+                    unload_other_show_models(participant["model"], show_models)
+                    
                     session.current_action = "thinking"
                     
                     session.handle_ai_turn(participant, round_num)
@@ -1093,17 +1261,21 @@ def run_debate_thread(topic: str):
             
             if session.moderator_finished:
                 break
-        
-        session.finished = True
-        
+    except Exception as e:
+        # Не даём потоку умереть тихо: иначе интерфейс навсегда остаётся
+        # в состоянии "идёт спектакль", а кнопки перестают реагировать.
+        print(f"❌ Спектакль прерван из-за ошибки: {e}")
+        traceback.print_exc()
     finally:
+        # Всегда завершаем спектакль явно, при любом выходе из цикла - в том
+        # числе при ошибке, чтобы клиент разблокировал кнопки.
+        session.finished = True
         session.running = False
         session.current_participant = None
         session.current_action = None
         
         if UNLOAD_AFTER_DEBATE:
-            unique_models = set(p["model"] for p in runtime_participants if p["model"] != "human")
-            for model in unique_models:
+            for model in show_models:
                 unload_model(model)
 
 # ============================================================
@@ -1201,6 +1373,7 @@ HTML_TEMPLATE = """
                     <div class="input-group">
                         <textarea id="topicInput" rows="3" placeholder="Опишите сюжет сцены..."></textarea>
                     </div>
+                    <div id="modelsWarning" style="display:none;margin-bottom:20px;padding:15px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
                     <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
                     <button class="btn btn-secondary" id="newBtn" onclick="resetDebate()" style="display:none;">🎭 Новый спектакль</button>
                     <div style="margin-top:10px;font-size:12px;color:#666;">Ctrl+Enter для отправки</div>
@@ -1294,7 +1467,7 @@ HTML_TEMPLATE = """
         // Загружаем участников и статичные инструкции
         fetch('/api/participants')
             .then(r => r.json())
-            .then(data => { participants = data.participants; renderParticipantsSetup(); });
+            .then(data => { participants = data.participants; renderParticipantsSetup(); renderModelsWarning(data.models_status); });
         
         fetch('/api/static_instructions')
             .then(r => r.json())
@@ -1322,6 +1495,23 @@ HTML_TEMPLATE = """
         function removeStaticInstruction(idx) {
             staticInstructions.splice(idx, 1);
             renderStaticInstructions();
+        }
+        
+        function renderModelsWarning(status) {
+            const box = document.getElementById('modelsWarning');
+            if (!box) return;
+            const missing = status && status.missing ? status.missing : [];
+            if (!status || (status.ok && missing.length === 0)) {
+                box.style.display = 'none';
+                box.innerHTML = '';
+                return;
+            }
+            box.innerHTML = `⚠️ ${
+                status.error
+                    ? `${status.error}. Проверьте, что Ollama запущена.`
+                    : `В Ollama нет моделей: <b>${missing.join(', ')}</b>. Скачайте: <code>${missing.map(m => 'ollama pull ' + m).join(' ; ')}</code>`
+            }`;
+            box.style.display = 'block';
         }
         
         function renderParticipantsSetup() {
@@ -1419,9 +1609,27 @@ HTML_TEMPLATE = """
                 if (data.success) {
                     pollInterval = setInterval(updatePosts, 3000);
                     updateSidebarParticipants(); // Обновляем сайдбар при старте
+                } else {
+                    // Откатываем интерфейс и объясняем причину, а не оставляем его заблокированным
+                    showStartError(data.error || 'неизвестная ошибка');
                 }
             })
-            .catch(err => { console.error('Ошибка запуска:', err); alert('Ошибка: ' + err.message); });
+            .catch(err => { console.error('Ошибка запуска:', err); showStartError(err.message); });
+        }
+        
+        function showStartError(message) {
+            debateRunning = false;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('setupCard').style.display = 'block';
+            document.getElementById('topicCard').style.display = 'block';
+            document.getElementById('staticInstructionsCard').style.display = 'block';
+            document.getElementById('posts').innerHTML = '';
+            document.getElementById('newBtn').style.display = 'none';
+            renderParticipantsSetup();
+            
+            const box = document.getElementById('modelsWarning');
+            if (box) { box.innerHTML = `⚠️ Не удалось начать спектакль: ${message}`; box.style.display = 'block'; }
+            alert('Не удалось начать спектакль: ' + message);
         }
         
         function resetDebate() {
@@ -1850,11 +2058,15 @@ def get_participants():
             "is_moderator": p.get("is_moderator", False)
         })
     
-    return jsonify({"participants": participants_data})
+    return jsonify({
+        "participants": participants_data,
+        # Сразу сообщаем интерфейсу, если нужных моделей нет в Ollama
+        "models_status": check_models_available([p["model"] for p in PARTICIPANTS])
+    })
 
 @app.route('/api/avatar/<keywords>')
 def get_avatar(keywords):
-    base_name = keywords.lower().replace(' ', '_')
+    base_name = sanitize_avatar_name(keywords)
     for avatar_file in AVATAR_DIR.glob(f"{base_name}*.jpg"):
         return jsonify({"avatar_url": f"/avatars/{avatar_file.name}"})
     return jsonify({"avatar_url": None})
@@ -1871,12 +2083,14 @@ def refresh_avatar(keywords):
         if not PARTICIPANTS:
             return jsonify({"error": "Нет моделей"}), 400
         
-        template = PARTICIPANTS[0]
+        # generate_avatar_for_participant() работает только с именем и ключевыми словами
         participant = {
-            "model": template["model"],
             "display_name": keywords,
             "avatar_keywords": keywords
         }
+        
+        # Кнопка «Найти аватар» должна искать заново, а не отдавать закэшированную ссылку
+        AVATAR_URL_CACHE.pop(keywords, None)
         
         avatar_url = generate_avatar_for_participant(participant)
         
@@ -1892,12 +2106,16 @@ def start():
     if session.running:
         return jsonify({"success": False, "error": "Уже запущено"})
     
-    data = request.json
-    topic = data.get("topic", "")
-    instructions = data.get("instructions", {})
-    participants_data = data.get("participants", [])
-    avatars = data.get("avatars", {})
-    static_instructions = data.get("static_instructions", [])
+    data = request.get_json(silent=True) or {}
+    topic = data.get("topic", "") or ""
+    instructions = data.get("instructions", {}) or {}
+    participants_data = data.get("participants", []) or []
+    avatars = data.get("avatars", {}) or {}
+    static_instructions = data.get("static_instructions", []) or []
+    
+    if not isinstance(participants_data, list):
+        participants_data = []
+    participants_data = [p for p in participants_data if isinstance(p, dict)]
     
     # Собираем эмодзи из участников
     avatar_emojis = {}
@@ -1908,6 +2126,18 @@ def start():
     
     if not topic:
         return jsonify({"success": False, "error": "Тема не указана"})
+    
+    if not participants_data:
+        return jsonify({"success": False, "error": "Не выбрано ни одного участника"})
+    
+    # Живая проверка перед стартом: модели могли удалить, а Ollama - перезапустить
+    models_status = check_models_available(
+        [p.get("model", "") for p in participants_data], force=True
+    )
+    if not models_status["ok"]:
+        problem = models_problem_message(models_status)
+        print(f"⛔ Спектакль не начат: {problem}")
+        return jsonify({"success": False, "error": problem})
     
     session.reset(topic, participants_data, avatars, instructions, avatar_emojis, static_instructions)
     
@@ -1927,13 +2157,6 @@ def reset():
 
 @app.route('/api/status')
 def status():
-    current_participant_is_moderator = False
-    if session.waiting_for_human and session.current_participant:
-        for p in session.runtime_participants:
-            if p["display_name"] == session.current_participant and p.get("is_moderator", False):
-                current_participant_is_moderator = True
-                break
-    
     last_post_count = max(0, request.args.get("lastPostCount", 0, type=int))
     
     return jsonify({
@@ -1947,13 +2170,15 @@ def status():
         "current_action": session.current_action,
         "search_query": session.search_query,
         "waiting_for_human": session.waiting_for_human,
-        "current_participant_is_moderator": current_participant_is_moderator,
+        "current_participant_is_moderator": session.current_participant_is_moderator(),
     })
 
 # ============================================================
 # WEBSOCKET СОБЫТИЯ
 # ============================================================
 
+# WebSocket-слой оставлен для внешних клиентов: сама страница обновляется
+# через polling (/api/status?lastPostCount=...), а не через эти события.
 @socketio.on('connect')
 def handle_connect():
     print("🔌 Клиент подключился через WebSocket")
@@ -1968,7 +2193,7 @@ def handle_connect():
         "current_action": session.current_action,
         "search_query": session.search_query,
         "waiting_for_human": session.waiting_for_human,
-        "current_participant_is_moderator": False,
+        "current_participant_is_moderator": session.current_participant_is_moderator(),
     })
 
 @socketio.on('disconnect')
@@ -1977,13 +2202,6 @@ def handle_disconnect():
 
 @socketio.on('request_status')
 def handle_request_status():
-    current_participant_is_moderator = False
-    if session.waiting_for_human and session.current_participant:
-        for p in session.runtime_participants:
-            if p["display_name"] == session.current_participant and p.get("is_moderator", False):
-                current_participant_is_moderator = True
-                break
-    
     emit('status_update', {
         "running": session.running,
         "finished": session.finished,
@@ -1992,14 +2210,13 @@ def handle_request_status():
         "current_action": session.current_action,
         "search_query": session.search_query,
         "waiting_for_human": session.waiting_for_human,
-        "current_participant_is_moderator": current_participant_is_moderator,
+        "current_participant_is_moderator": session.current_participant_is_moderator(),
     })
 
 @app.route('/api/moderator/message', methods=['POST'])
 def moderator_message():
-    data = request.json
-    message = data.get("message", "")
-    session.moderator_message = message
+    data = request.get_json(silent=True) or {}
+    session.moderator_message = data.get("message", "") or ""
     return jsonify({"success": True})
 
 @app.route('/api/moderator/finish', methods=['POST'])
@@ -2011,10 +2228,7 @@ def moderator_finish():
 @app.route('/api/moderator/instructions', methods=['GET'])
 def get_moderator_instructions():
     """Возвращает текущие static_instructions, moderator_messages и индивидуальные инструкции участников"""
-    moderator_messages = [
-        post["content"] for post in session.conversation_history 
-        if post.get("is_moderator", False) and post["content"].strip()
-    ]
+    moderator_messages = session.moderator_messages()
     
     # Собираем индивидуальные инструкции участников
     participant_instructions = []
@@ -2036,17 +2250,17 @@ def get_moderator_instructions():
 @app.route('/api/moderator/instructions', methods=['POST'])
 def update_moderator_instructions():
     """Обновляет static_instructions, moderator_messages и индивидуальные инструкции участников"""
-    data = request.json
+    data = request.get_json(silent=True) or {}
     
     # Обновляем static_instructions если переданы
-    if "static_instructions" in data:
-        session.static_instructions = data["static_instructions"]
+    if isinstance(data.get("static_instructions"), list):
+        session.static_instructions = [str(instr) for instr in data["static_instructions"]]
         print(f"📝 Обновлены статичные инструкции: {len(session.static_instructions)} пунктов")
         for i, instr in enumerate(session.static_instructions, 1):
             print(f"   {i}. {instr}")
     
     # Обновляем moderator_messages если переданы
-    if "moderator_messages" in data:
+    if isinstance(data.get("moderator_messages"), list):
         new_messages = data["moderator_messages"]
         
         # Удаляем старые moderator_messages из истории
@@ -2057,21 +2271,23 @@ def update_moderator_instructions():
         
         # Добавляем новые moderator_messages
         for msg in new_messages:
-            if msg.strip():  # Только непустые сообщения
+            text = str(msg).strip() if msg is not None else ""
+            if text:  # Только непустые сообщения
                 session.conversation_history.append({
                     "display_name": "Руководство",
-                    "content": msg,
+                    "content": text,
                     "is_moderator": True
                 })
         
         print(f"📝 Обновлены руководства: {len(new_messages)} пунктов")
     
     # Обновляем индивидуальные инструкции участников если переданы
-    if "participant_instructions" in data:
-        participant_instructions = data["participant_instructions"]
-        for p_instr in participant_instructions:
-            name = p_instr.get("name", "")
-            instruction = p_instr.get("instruction", "")
+    if isinstance(data.get("participant_instructions"), list):
+        for p_instr in data["participant_instructions"]:
+            if not isinstance(p_instr, dict):
+                continue
+            name = str(p_instr.get("name", "") or "")
+            instruction = str(p_instr.get("instruction", "") or "")
             if name:
                 session.instructions[name] = instruction
                 if instruction.strip():
@@ -2107,6 +2323,9 @@ if __name__ == "__main__":
     for i, p in enumerate(PARTICIPANTS, 1):
         is_mod = " (режиссёр)" if p.get("is_moderator") else ""
         print(f"  Персонаж {i}: модель {p['model']}{is_mod}")
+    
+    # Проверяем, что модели реально скачаны: иначе спектакль упадёт уже на сцене
+    report_models_status([p["model"] for p in PARTICIPANTS])
     print(f"  ℹ️  Поддержка инструментов определяется автоматически при первом запросе")
     print(f"Размышления: {'ВКЛ' if ENABLE_THINKING else 'ВЫКЛ'}")
     print(f"Поиск в инет: {'ВКЛ' if ENABLE_SEARCH else 'ВЫКЛ'}")
@@ -2122,4 +2341,7 @@ if __name__ == "__main__":
     print("=" * 50)
     
     threading.Timer(1.5, lambda: webbrowser.open('http://localhost:5000')).start()
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    # allow_unsafe_werkzeug: без него flask-socketio падает с RuntimeError
+    # "The Werkzeug web server is not designed to run in production", если stdin
+    # не подключён к терминалу (перенаправленный вывод, запуск из IDE/службы).
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)

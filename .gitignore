@@ -73,3 +73,6 @@ Thumbs.db
 *.Z
 *.lz
 *.lzo
+
+# tiktoken cache
+.tiktoken_cache/
