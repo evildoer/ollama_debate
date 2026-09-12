@@ -87,6 +87,9 @@ OPTIONS = {
     "num_gpu": 999,
 }
 
+# Безопасный запас токенов (не используем весь контекст)
+CONTEXT_SAFETY_MARGIN = 500  # токенов
+
 # Кэш для хранения информации о поддержке tools моделями
 MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
 
@@ -328,6 +331,73 @@ def markdown_to_html(text: str) -> str:
         return text
     
     return markdown.markdown(text, extensions=['nl2br'])
+
+# Попытка импорта tiktoken для точного подсчёта токенов
+try:
+    import tiktoken
+    # Используем cl100k_base (GPT-4, GPT-3.5) - наиболее универсальный
+    TIKTOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+    TIKTOKEN_AVAILABLE = True
+    print("✅ tiktoken доступен - точный подсчёт токенов")
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    TIKTOKEN_ENCODER = None
+    print("⚠️  tiktoken не установлен - используется приближённый подсчёт")
+    print("   Установите: pip install tiktoken")
+
+def estimate_tokens(text: str) -> int:
+    """
+    Подсчёт количества токенов в тексте.
+    Если tiktoken доступен - точный подсчёт, иначе приближённая оценка.
+    """
+    if TIKTOKEN_AVAILABLE and TIKTOKEN_ENCODER:
+        # Точный подсчёт через tiktoken
+        return len(TIKTOKEN_ENCODER.encode(text))
+    else:
+        # Fallback: приближённая оценка (~4 символа на токен для кириллицы)
+        return max(1, len(text) // 4)
+
+def trim_history_by_tokens(messages: list, system_prompt_tokens: int) -> list:
+    """
+    Обрезает историю сообщений на основе подсчёта токенов.
+    Возвращает обрезанный список сообщений.
+    """
+    # Вычисляем доступное пространство для истории
+    available_tokens = OPTIONS["num_ctx"] - OPTIONS["num_predict"] - CONTEXT_SAFETY_MARGIN - system_prompt_tokens
+    
+    # Подсчитываем токены в каждом сообщении
+    messages_with_tokens = []
+    for msg in messages:
+        content = msg.get("content", "")
+        tokens = estimate_tokens(content)
+        messages_with_tokens.append((msg, tokens))
+    
+    # Подсчитываем общие токены
+    total_tokens = sum(tokens for _, tokens in messages_with_tokens)
+    
+    # Если вписываемся - возвращаем всё
+    if total_tokens <= available_tokens:
+        print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}) ✅")
+        return messages
+    
+    # Обрезаем старые сообщения, пока не влезем
+    print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}) ⚠️ Обрезка...")
+    
+    trimmed_messages = []
+    current_tokens = 0
+    
+    # Идём с конца (новые сообщения важнее)
+    for msg, tokens in reversed(messages_with_tokens):
+        if current_tokens + tokens <= available_tokens:
+            trimmed_messages.insert(0, msg)
+            current_tokens += tokens
+        else:
+            break
+    
+    removed_count = len(messages) - len(trimmed_messages)
+    print(f"  ✂️  Удалено {removed_count} сообщений, осталось {len(trimmed_messages)} ({current_tokens} токенов)")
+    
+    return trimmed_messages
 
 # ============================================================
 # FLASK APP + SOCKET.IO
@@ -791,29 +861,38 @@ class DebateSession:
             {"role": "system", "content": system_prompt, "name": "system"},
         ]
         
-        # В истории диалога пропускаем реплики модератора (они уже в системном промпте)
-        for post in self.conversation_history:
+        # Фильтруем реплики модератора (они уже в системном промпте)
+        non_moderator_history = [
+            post for post in self.conversation_history 
+            if not post.get("is_moderator", False)
+        ]
+        
+        # Преобразуем в формат сообщений
+        history_messages = []
+        for post in non_moderator_history:
             speaker_name = post["display_name"]
             content = post["content"]
-            is_moderator = post.get("is_moderator", False)
             speaker_name_normalized = speaker_name.lower().replace(" ", "_")
             
-            # Пропускаем реплики модератора — они уже в системном промпте
-            if is_moderator:
-                continue
-            
             if speaker_name == participant_name:
-                messages.append({
+                history_messages.append({
                     "role": "assistant",
                     "content": content,
                     "name": speaker_name_normalized
                 })
             else:
-                messages.append({
+                history_messages.append({
                     "role": "user",
                     "content": f"{speaker_name} говорит: {content}",
                     "name": speaker_name_normalized
                 })
+        
+        # Умная обрезка истории на основе подсчёта токенов
+        system_prompt_tokens = estimate_tokens(system_prompt)
+        trimmed_history = trim_history_by_tokens(history_messages, system_prompt_tokens)
+        
+        # Добавляем обрезанную историю в messages
+        messages.extend(trimmed_history)
         
         if round_num == 1 and len([p for p in self.conversation_history if not p.get("is_moderator", False)]) == 0:
             messages.append({
@@ -1072,11 +1151,33 @@ HTML_TEMPLATE = """
                 <div id="moderatorPanel" style="display:none; margin-top:30px; padding:20px; border:2px solid #000000;">
                     <h3 style="margin:0 0 15px 0; font-size:20px; text-transform:uppercase; letter-spacing:2px;">Ваша реплика, режиссёр</h3>
                     <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..."></textarea>
-                    <div style="display:flex; gap:15px;">
+                    <div style="display:flex; gap:15px; margin-bottom:20px;">
                         <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
                         <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()">Завершить спектакль</button>
                     </div>
-                    <div style="margin-top:10px; font-size:12px; font-style:italic;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки</div>
+                    <div style="margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки</div>
+                    
+                    <!-- Панель редактирования инструкций и руководств -->
+                    <div style="border-top:1px solid #000; padding-top:20px; margin-top:20px;">
+                        <h4 style="margin:0 0 10px 0; font-size:16px; text-transform:uppercase; letter-spacing:1px;">📋 Управление инструкциями</h4>
+                        <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Редактировать инструкции и руководства</button>
+                        
+                        <div id="instructionsEditor" style="display:none;">
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Статичные инструкции (для всех участников):</label>
+                                <div id="staticInstructionsEditor"></div>
+                                <button class="btn btn-secondary" onclick="addStaticInstructionEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить инструкцию</button>
+                            </div>
+                            
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Руководства (указания модератора):</label>
+                                <div id="moderatorMessagesEditor"></div>
+                                <button class="btn btn-secondary" onclick="addModeratorMessageEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить руководство</button>
+                            </div>
+                            
+                            <button class="btn btn-primary" onclick="saveInstructions()" style="margin-top:10px;">💾 Применить изменения</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="footer">
                     <button class="btn btn-secondary" onclick="shutdownServer(false)">Покинуть театр</button>
@@ -1331,6 +1432,120 @@ HTML_TEMPLATE = """
             fetch('/api/moderator/message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input.value}) })
             .then(r => r.json()).then(data => { if (data.success) { input.value = ''; document.getElementById('moderatorPanel').style.display = 'none'; } else alert('Ошибка: ' + (data.error || 'неизвестная')); })
             .catch(err => { console.error('Ошибка:', err); alert('Ошибка: ' + err.message); });
+        }
+        
+        // Функции для редактирования инструкций и руководств
+        function toggleInstructionsEditor() {
+            const editor = document.getElementById('instructionsEditor');
+            if (editor.style.display === 'none') {
+                editor.style.display = 'block';
+                loadInstructionsForEdit();
+            } else {
+                editor.style.display = 'none';
+            }
+        }
+        
+        function loadInstructionsForEdit() {
+            fetch('/api/moderator/instructions')
+            .then(r => r.json())
+            .then(data => {
+                renderStaticInstructionsEditor(data.static_instructions);
+                renderModeratorMessagesEditor(data.moderator_messages);
+            })
+            .catch(err => console.error('Ошибка загрузки инструкций:', err));
+        }
+        
+        function renderStaticInstructionsEditor(instructions) {
+            const container = document.getElementById('staticInstructionsEditor');
+            container.innerHTML = instructions.map((instr, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${instr}</textarea>
+                    <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function renderModeratorMessagesEditor(messages) {
+            const container = document.getElementById('moderatorMessagesEditor');
+            container.innerHTML = messages.map((msg, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${msg}</textarea>
+                    <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function addStaticInstructionEditor() {
+            const container = document.getElementById('staticInstructionsEditor');
+            const idx = container.children.length;
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новая инструкция..."></textarea>
+                <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function addModeratorMessageEditor() {
+            const container = document.getElementById('moderatorMessagesEditor');
+            const idx = container.children.length;
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое руководство..."></textarea>
+                <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function removeStaticInstructionEditor(idx) {
+            const el = document.getElementById(`static-instr-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
+        function removeModeratorMessageEditor(idx) {
+            const el = document.getElementById(`mod-msg-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
+        function saveInstructions() {
+            // Собираем static_instructions
+            const staticInstructions = [];
+            const staticContainer = document.getElementById('staticInstructionsEditor');
+            staticContainer.querySelectorAll('textarea').forEach(ta => {
+                if (ta.value.trim()) staticInstructions.push(ta.value.trim());
+            });
+            
+            // Собираем moderator_messages
+            const moderatorMessages = [];
+            const modContainer = document.getElementById('moderatorMessagesEditor');
+            modContainer.querySelectorAll('textarea').forEach(ta => {
+                if (ta.value.trim()) moderatorMessages.push(ta.value.trim());
+            });
+            
+            // Отправляем на сервер
+            fetch('/api/moderator/instructions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    static_instructions: staticInstructions,
+                    moderator_messages: moderatorMessages
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert('✅ Инструкции обновлены!');
+                    document.getElementById('instructionsEditor').style.display = 'none';
+                } else {
+                    alert('❌ Ошибка: ' + (data.error || 'неизвестная'));
+                }
+            })
+            .catch(err => {
+                console.error('Ошибка сохранения:', err);
+                alert('❌ Ошибка сохранения: ' + err.message);
+            });
         }
         
         function finishDebate() {
@@ -1629,6 +1844,51 @@ def moderator_message():
 def moderator_finish():
     session.moderator_finished = True
     session.waiting_for_human = False
+    return jsonify({"success": True})
+
+@app.route('/api/moderator/instructions', methods=['GET'])
+def get_moderator_instructions():
+    """Возвращает текущие static_instructions и moderator_messages"""
+    moderator_messages = [
+        post["content"] for post in session.conversation_history 
+        if post.get("is_moderator", False)
+    ]
+    return jsonify({
+        "static_instructions": session.static_instructions or DEFAULT_STATIC_INSTRUCTIONS,
+        "moderator_messages": moderator_messages
+    })
+
+@app.route('/api/moderator/instructions', methods=['POST'])
+def update_moderator_instructions():
+    """Обновляет static_instructions и/или moderator_messages"""
+    data = request.json
+    
+    # Обновляем static_instructions если переданы
+    if "static_instructions" in data:
+        session.static_instructions = data["static_instructions"]
+        print(f"📝 Обновлены статичные инструкции: {len(session.static_instructions)} пунктов")
+    
+    # Обновляем moderator_messages если переданы
+    if "moderator_messages" in data:
+        new_messages = data["moderator_messages"]
+        
+        # Удаляем старые moderator_messages из истории
+        session.conversation_history = [
+            post for post in session.conversation_history 
+            if not post.get("is_moderator", False)
+        ]
+        
+        # Добавляем новые moderator_messages
+        for msg in new_messages:
+            if msg.strip():  # Только непустые сообщения
+                session.conversation_history.append({
+                    "display_name": "Руководство",
+                    "content": msg,
+                    "is_moderator": True
+                })
+        
+        print(f"📝 Обновлены руководства: {len(new_messages)} пунктов")
+    
     return jsonify({"success": True})
 
 @app.route('/api/shutdown', methods=['POST'])

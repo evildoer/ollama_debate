@@ -1,7 +1,8 @@
 flask
-## werkzeug
+werkzeug
 ddgs
 markdown
 ## deep-translator
 flask-socketio
-python-socketio
+## python-socketio
+tiktoken
