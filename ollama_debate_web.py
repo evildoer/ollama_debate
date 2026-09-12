@@ -797,21 +797,26 @@ class DebateSession:
         ]
         
         # Настраиваемые статичные инструкции (из self.static_instructions)
-        static_parts = self.static_instructions if self.static_instructions else [
-            'ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ).',
-            'ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики.',
-            'ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем!',
-            'Учитывай всё что говорили другие персонажи и реагируй на их слова.',
-            'Отвечай на русском языке.',
-            'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
-            'Используй поиск в интернете для фактологических утверждений.',
-            'При поиске НЕ указывай годы.'
-        ]
+        # Проверяем не только наличие, но и длину списка
+        if self.static_instructions and len(self.static_instructions) > 0:
+            static_parts = self.static_instructions
+            print(f"  📋 Используем пользовательские инструкции для {participant['display_name']}: {len(static_parts)} пунктов")
+        else:
+            static_parts = [
+                'ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ).',
+                'ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики.',
+                'ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем!',
+                'Учитывай всё что говорили другие персонажи и реагируй на их слова.',
+                'Отвечай на русском языке.',
+                'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
+                'Используй поиск в интернете для фактологических утверждений.',
+                'При поиске НЕ указывай годы.'
+            ]
+            print(f"  📋 Используем дефолтные инструкции для {participant['display_name']}")
         
         # Объединяем все части
         all_parts = dynamic_parts + static_parts
-        system_prompt = ' '.join(all_parts)
-        
+        system_prompt = ' '.join(all_parts)        
         # Добавляем индивидуальную инструкцию участника
         custom_instruction = self.instructions.get(participant["display_name"], "")
         if custom_instruction:
@@ -1652,18 +1657,27 @@ def get_participants():
         # Случайно выбираем пол
         gender = random.choice(["male", "female"])
         
-        # Выбираем уникальное имя
-        if gender == "male" and available_male_names:
-            name = random.choice(available_male_names)
-            available_male_names.remove(name)
-        elif available_female_names:
-            name = random.choice(available_female_names)
-            available_female_names.remove(name)
-        elif available_male_names:
-            name = random.choice(available_male_names)
-            available_male_names.remove(name)
-        else:
-            name = "Участник"
+        # Выбираем уникальное имя с правильной логикой
+        if gender == "male":
+            if available_male_names:
+                name = random.choice(available_male_names)
+                available_male_names.remove(name)
+            elif available_female_names:
+                # Если мужских имён нет, берём женское
+                name = random.choice(available_female_names)
+                available_female_names.remove(name)
+            else:
+                name = "Участник"
+        else:  # gender == "female"
+            if available_female_names:
+                name = random.choice(available_female_names)
+                available_female_names.remove(name)
+            elif available_male_names:
+                # Если женских имён нет, берём мужское
+                name = random.choice(available_male_names)
+                available_male_names.remove(name)
+            else:
+                name = "Участник"
         
         # Выбираем уникальную эмодзи
         if available_emojis:
@@ -1848,25 +1862,40 @@ def moderator_finish():
 
 @app.route('/api/moderator/instructions', methods=['GET'])
 def get_moderator_instructions():
-    """Возвращает текущие static_instructions и moderator_messages"""
+    """Возвращает текущие static_instructions, moderator_messages и индивидуальные инструкции участников"""
     moderator_messages = [
         post["content"] for post in session.conversation_history 
         if post.get("is_moderator", False)
     ]
+    
+    # Собираем индивидуальные инструкции участников
+    participant_instructions = []
+    for participant in session.runtime_participants:
+        if participant.get("model") != "human":  # Только AI участники
+            name = participant.get("display_name", "")
+            instruction = session.instructions.get(name, "")
+            participant_instructions.append({
+                "name": name,
+                "instruction": instruction
+            })
+    
     return jsonify({
         "static_instructions": session.static_instructions or DEFAULT_STATIC_INSTRUCTIONS,
-        "moderator_messages": moderator_messages
+        "moderator_messages": moderator_messages,
+        "participant_instructions": participant_instructions
     })
 
 @app.route('/api/moderator/instructions', methods=['POST'])
 def update_moderator_instructions():
-    """Обновляет static_instructions и/или moderator_messages"""
+    """Обновляет static_instructions, moderator_messages и индивидуальные инструкции участников"""
     data = request.json
     
     # Обновляем static_instructions если переданы
     if "static_instructions" in data:
         session.static_instructions = data["static_instructions"]
         print(f"📝 Обновлены статичные инструкции: {len(session.static_instructions)} пунктов")
+        for i, instr in enumerate(session.static_instructions, 1):
+            print(f"   {i}. {instr}")
     
     # Обновляем moderator_messages если переданы
     if "moderator_messages" in data:
@@ -1888,6 +1917,19 @@ def update_moderator_instructions():
                 })
         
         print(f"📝 Обновлены руководства: {len(new_messages)} пунктов")
+    
+    # Обновляем индивидуальные инструкции участников если переданы
+    if "participant_instructions" in data:
+        participant_instructions = data["participant_instructions"]
+        for p_instr in participant_instructions:
+            name = p_instr.get("name", "")
+            instruction = p_instr.get("instruction", "")
+            if name:
+                session.instructions[name] = instruction
+                if instruction.strip():
+                    print(f"📝 Обновлена индивидуальная инструкция для {name}: {instruction[:50]}...")
+                else:
+                    print(f"📝 Удалена индивидуальная инструкция для {name}")
     
     return jsonify({"success": True})
 
