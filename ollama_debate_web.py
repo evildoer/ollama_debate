@@ -26,6 +26,18 @@ from urllib.parse import quote
 from flask import Flask, render_template_string, jsonify, request, send_from_directory
 from flask_socketio import SocketIO, emit
 
+# Попытка импорта tiktoken для точного подсчёта токенов
+try:
+    import tiktoken
+    TIKTOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
+    TIKTOKEN_AVAILABLE = True
+    print("✅ tiktoken доступен - точный подсчёт токенов")
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    TIKTOKEN_ENCODER = None
+    print("⚠️  tiktoken не установлен - используется приближённый подсчёт")
+    print("   Установите: pip install tiktoken")
+
 # Поиск в интернете
 try:
     from ddgs import DDGS
@@ -96,6 +108,22 @@ MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
 # Кэш для хранения URL аватаров по ключам (чтобы не искать повторно)
 AVATAR_URL_CACHE = {}  # {"avatar_keywords": "image_url"}
 
+# Дефолтные правила общения с плейсхолдерами
+# Плейсхолдеры: {ИМЯ}, {СОБЕСЕДНИКИ}, {ТЕМА}
+DEFAULT_STATIC_INSTRUCTIONS = [
+    'Ты — {ИМЯ}.',
+    'Ты участвуешь в диалоге вместе с: {СОБЕСЕДНИКИ}.',
+    'Тема обсуждения: "{ТЕМА}".',
+    'ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ).',
+    'ОБРАЩАЙСЯ к собеседникам по именам когда отвечаешь на их реплики.',
+    'ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ. Можешь описывать свои действия в *звёздочках*.',
+    'Учитывай всё что говорили другие участники и реагируй на их слова.',
+    'Отвечай на русском языке.',
+    'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
+    'Используй поиск в интернете для фактологических утверждений.',
+    'При поиске НЕ указывай годы.'
+]
+
 # ============================================================
 # СЛУЧАЙНЫЕ ИМЕНА И ЭМОДЗИ ДЛЯ ПЕРСОНАЖЕЙ
 # ============================================================
@@ -163,7 +191,7 @@ def setup_avatar_dir():
 def compute_file_checksum(filepath: Path) -> str:
     return hashlib.md5(filepath.read_bytes()).hexdigest()[:8]
 
-def compute_data_checksum(data: bytes) -> str:
+def compute_data_checksum( bytes) -> str:
     return hashlib.md5(data).hexdigest()[:8]
 
 # ============================================================
@@ -362,18 +390,25 @@ def markdown_to_html(text: str) -> str:
     
     return markdown.markdown(text, extensions=['nl2br'])
 
-# Попытка импорта tiktoken для точного подсчёта токенов
-try:
-    import tiktoken
-    # Используем cl100k_base (GPT-4, GPT-3.5) - наиболее универсальный
-    TIKTOKEN_ENCODER = tiktoken.get_encoding("cl100k_base")
-    TIKTOKEN_AVAILABLE = True
-    print("✅ tiktoken доступен - точный подсчёт токенов")
-except ImportError:
-    TIKTOKEN_AVAILABLE = False
-    TIKTOKEN_ENCODER = None
-    print("⚠️  tiktoken не установлен - используется приближённый подсчёт")
-    print("   Установите: pip install tiktoken")
+# ============================================================
+# FLASK APP + SOCKET.IO
+# ============================================================
+
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'debate-secret-key-change-in-production'
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Отключаем логирование GET запросов к /api/status чтобы не засорять консоль
+import logging
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.WARNING)
+
+# Единый источник правды о ходе спектакля - глобальный экземпляр DebateSession,
+# объявленный ниже после определения класса.
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/chat"
+OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
+OLLAMA_SHOW_URL = f"{OLLAMA_BASE_URL}/api/show"
 
 def estimate_tokens(text: str) -> int:
     """
@@ -428,26 +463,6 @@ def trim_history_by_tokens(messages: list, system_prompt_tokens: int) -> list:
     print(f"  ✂️  Удалено {removed_count} сообщений, осталось {len(trimmed_messages)} ({current_tokens} токенов)")
     
     return trimmed_messages
-
-# ============================================================
-# FLASK APP + SOCKET.IO
-# ============================================================
-
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'debate-secret-key-change-in-production'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
-
-# Отключаем логирование GET запросов к /api/status чтобы не засорять консоль
-import logging
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.WARNING)
-
-# Единый источник правды о ходе спектакля - глобальный экземпляр DebateSession,
-# объявленный ниже после определения класса.
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_URL = f"{OLLAMA_BASE_URL}/api/chat"
-OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
-OLLAMA_SHOW_URL = f"{OLLAMA_BASE_URL}/api/show"
 
 def check_model_tools_support(model: str) -> bool:
     """
@@ -816,41 +831,41 @@ class DebateSession:
         return post
     
     def get_system_prompt(self, participant: dict, all_names: list) -> str:
-        """Генерирует системный промпт для участника"""
+        """Генерирует системный промпт для участника с заменой плейсхолдеров"""
         other_names = [name for name in all_names if name != participant["display_name"]]
         
-        # Динамические части (зависят от переменных)
-        dynamic_parts = [
-            f'Ты — {participant["display_name"]}.',
-            f"Ты участвуешь в диалоге вместе с: {', '.join(other_names)}.",
-            f'Тема обсуждения: "{self.topic}".',
-        ]
-        
-        # Настраиваемые статичные инструкции (из self.static_instructions)
-        # Проверяем не только наличие, но и длину списка
+        # Определяем правила общения (статичные инструкции)
         if self.static_instructions and len(self.static_instructions) > 0:
-            static_parts = self.static_instructions
-            print(f"  📋 Используем пользовательские инструкции для {participant['display_name']}: {len(static_parts)} пунктов")
+            rules = [instr for instr in self.static_instructions if instr.strip()]
+            print(f"  📋 Используем пользовательские правила для {participant['display_name']}: {len(rules)} пунктов")
         else:
-            static_parts = [
-                'ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ).',
-                'ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики.',
-                'ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем!',
-                'Учитывай всё что говорили другие персонажи и реагируй на их слова.',
-                'Отвечай на русском языке.',
-                'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
-                'Используй поиск в интернете для фактологических утверждений.',
-                'При поиске НЕ указывай годы.'
-            ]
-            print(f"  📋 Используем дефолтные инструкции для {participant['display_name']}")
+            rules = DEFAULT_STATIC_INSTRUCTIONS
+            print(f"  📋 Используем дефолтные правила для {participant['display_name']}")
         
-        # Объединяем все части
-        all_parts = dynamic_parts + static_parts
-        system_prompt = ' '.join(all_parts)        
-        # Добавляем индивидуальную инструкцию участника
+        # Заменяем плейсхолдеры в каждом правиле
+        processed_rules = []
+        for rule in rules:
+            # {ИМЯ} → имя текущего участника
+            rule = rule.replace("{ИМЯ}", participant["display_name"])
+            # {СОБЕСЕДНИКИ} → список других участников через запятую
+            rule = rule.replace("{СОБЕСЕДНИКИ}", ", ".join(other_names))
+            # {ТЕМА} → тема обсуждения
+            rule = rule.replace("{ТЕМА}", self.topic)
+            processed_rules.append(rule)
+        
+        # Объединяем все правила
+        system_prompt = " ".join(processed_rules)
+        
+        # Добавляем индивидуальную инструкцию участника с чётким заголовком
         custom_instruction = self.instructions.get(participant["display_name"], "")
-        if custom_instruction:
-            system_prompt += f" {custom_instruction}"
+        if custom_instruction and custom_instruction.strip():
+            # Заменяем плейсхолдеры в личной инструкции тоже
+            custom_instruction = custom_instruction.replace("{ИМЯ}", participant["display_name"])
+            custom_instruction = custom_instruction.replace("{СОБЕСЕДНИКИ}", ", ".join(other_names))
+            custom_instruction = custom_instruction.replace("{ТЕМА}", self.topic)
+            
+            system_prompt += f"\n\nТВОИ ЛИЧНЫЕ ИНСТРУКЦИИ (обязательны к исполнению):\n{custom_instruction.strip()}"
+            print(f"  📝 Применяю индивидуальную инструкцию для {participant['display_name']}: {custom_instruction[:50]}...")
         
         # Добавляем инструкции по поиску
         if ENABLE_SEARCH:
@@ -863,6 +878,16 @@ class DebateSession:
                 "При поиске НЕ указывай год."
                 + min_search_text
             )
+        
+        # Добавляем указания модератора из истории (фильтруем пустые)
+        moderator_messages = [
+            post["content"] for post in self.conversation_history 
+            if post.get("is_moderator", False) and post["content"].strip()
+        ]
+        if moderator_messages:
+            system_prompt += "\n\nУКАЗАНИЯ ОТ РУКОВОДСТВА (обязательны к исполнению):\n"
+            for msg in moderator_messages:
+                system_prompt += f"• {msg}\n"
         
         return system_prompt
     
@@ -878,19 +903,8 @@ class DebateSession:
         participant_name = participant["display_name"]
         participant_name_normalized = participant_name.lower().replace(" ", "_")
         
+        # Получаем полный системный промпт (включая все инструкции)
         system_prompt = self.get_system_prompt(participant, non_moderator_names)
-        
-        # Собираем все реплики модератора из истории
-        moderator_messages = [
-            post["content"] for post in self.conversation_history 
-            if post.get("is_moderator", False)
-        ]
-        
-        # Добавляем указания модератора в системный промпт
-        if moderator_messages:
-            system_prompt += "\n\nУКАЗАНИЯ ОТ РУКОВОДСТВА (обязательны к исполнению):\n"
-            for msg in moderator_messages:
-                system_prompt += f"• {msg}\n"
         
         messages = [
             {"role": "system", "content": system_prompt, "name": "system"},
@@ -930,9 +944,10 @@ class DebateSession:
         messages.extend(trimmed_history)
         
         if round_num == 1 and len([p for p in self.conversation_history if not p.get("is_moderator", False)]) == 0:
+            # Первый участник начинает обсуждение - не нужно обращаться к другим, они ещё не говорили
             messages.append({
                 "role": "user", 
-                "content": f'Как {participant_name}, начни диалог на тему "{self.topic}". Обращайся к другим участникам по именам.',
+                "content": f'Как {participant_name}, ты начинаешь обсуждение на тему "{self.topic}". Представься, обозначь свою позицию по теме и предложи другим участникам высказаться.',
                 "name": participant_name_normalized
             })
         else:
@@ -942,11 +957,22 @@ class DebateSession:
             
             if last_post:
                 last_speaker = last_post["display_name"]
-                messages.append({
-                    "role": "user",
-                    "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ответь ему и другим участникам, обращаясь по именам.',
-                    "name": participant_name_normalized
-                })
+                
+                # Проверяем количество постов в истории
+                if len(non_moderator_posts) == 1:
+                    # Только один участник говорил - отвечаем только ему
+                    messages.append({
+                        "role": "user",
+                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ты тоже начинаешь обсуждение. Ответь {last_speaker} и вырази свою позицию по теме.',
+                        "name": participant_name_normalized
+                    })
+                else:
+                    # Несколько участников уже говорили - отвечаем последнему и другим
+                    messages.append({
+                        "role": "user",
+                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ответь ему и другим участникам, обращаясь по именам.',
+                        "name": participant_name_normalized
+                    })
             else:
                 messages.append({
                     "role": "user",
@@ -1130,19 +1156,22 @@ HTML_TEMPLATE = """
         .status-bar.active { border-left: 4px solid #000000; }
         .post { background: #ffffff; border: none; border-top: 1px solid #000000; padding: 40px 0; margin-bottom: 0; display: flex; gap: 30px; }
         .post-avatar { flex-shrink: 0; }
-        .post-avatar img { width: 120px; height: 120px; object-fit: cover; border: 1px solid #000000; filter: grayscale(100%); }
-        .post-avatar .emoji { width: 120px; height: 120px; background: #ffffff; border: 1px solid #000000; display: flex; align-items: center; justify-content: center; font-size: 60px; }
+        .post-avatar img { width: 150px; height: 150px; object-fit: cover; border: 1px solid #000000; filter: grayscale(100%); }
+        .post-avatar .emoji { width: 150px; height: 150px; background: #ffffff; border: 1px solid #000000; display: flex; align-items: center; justify-content: center; font-size: 75px; }
         .post-content { flex: 1; min-width: 0; }
         .post-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #000000; }
         .post-author { font-family: Georgia, serif; font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
         .post-model { font-size: 14px; color: #000000; font-family: Georgia, serif; margin-top: 5px; font-style: italic; }
         .post-time { font-size: 14px; color: #000000; font-style: italic; }
-        .post-text { font-size: 20px; line-height: 1.8; color: #000000; word-wrap: break-word; overflow-wrap: break-word; text-align: justify; }
+        .post-text { font-size: 18px; line-height: 1.8; color: #000000; word-wrap: break-word; overflow-wrap: break-word; text-align: justify; }
         .post-text p { margin-bottom: 15px; }
         .post-text p:last-child { margin-bottom: 0; }
         .post-text strong { font-weight: bold; }
         .post-text em { font-style: italic; }
         .post-text code { background: #ffffff; padding: 2px 6px; font-family: 'Courier New', monospace; border: 1px solid #000000; }
+        .post-text ul, .post-text ol { margin: 15px 0; padding-left: 30px; }
+        .post-text li { margin-bottom: 10px; line-height: 1.7; }
+        .post-text li::marker { font-weight: bold; }
         .search-info { background: transparent; padding: 20px 0 0 0; margin-top: 25px; font-size: 14px; color: #000000; font-style: italic; border-top: 1px solid #000000; }
         .search-info strong { font-weight: normal; font-style: normal; text-transform: uppercase; letter-spacing: 2px; display: block; margin-bottom: 10px; font-size: 13px; }
         .search-query { display: inline; margin-right: 12px; }
@@ -1177,10 +1206,16 @@ HTML_TEMPLATE = """
                     <div style="margin-top:10px;font-size:12px;color:#666;">Ctrl+Enter для отправки</div>
                 </div>
                 <div class="card" id="staticInstructionsCard">
-                    <h2>Общие инструкции</h2>
-                    <p style="font-size:14px;color:#666;margin-bottom:15px;font-style:italic;">Эти инструкции будут добавлены в системный промпт для всех участников. Вы можете редактировать, добавлять или удалять пункты.</p>
+                    <h2>Правила общения</h2>
+                    <p style="font-size:14px;color:#666;margin-bottom:15px;font-style:italic;">Эти правила будут добавлены в системный промпт для всех участников. Вы можете использовать плейсхолдеры:</p>
+                    <div style="font-size:13px;color:#333;margin-bottom:15px;padding:10px;background:#f9f9f9;border:1px solid #ddd;">
+                        <strong>Доступные плейсхолдеры:</strong><br>
+                        <code>{ИМЯ}</code> — имя текущего участника<br>
+                        <code>{СОБЕСЕДНИКИ}</code> — список других участников через запятую<br>
+                        <code>{ТЕМА}</code> — тема обсуждения
+                    </div>
                     <div id="staticInstructionsList"></div>
-                    <button class="btn btn-secondary" onclick="addStaticInstruction()" style="margin-top:10px;">➕ Добавить инструкцию</button>
+                    <button class="btn btn-secondary" onclick="addStaticInstruction()" style="margin-top:10px;">➕ Добавить правило</button>
                 </div>
                 <div id="posts"></div>
                 <div id="moderatorPanel" style="display:none; margin-top:30px; padding:20px; border:2px solid #000000;">
@@ -1199,9 +1234,10 @@ HTML_TEMPLATE = """
                         
                         <div id="instructionsEditor" style="display:none;">
                             <div style="margin-bottom:20px;">
-                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Статичные инструкции (для всех участников):</label>
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Правила общения (для всех участников):</label>
+                                <div style="font-size:12px;color:#666;margin-bottom:10px;">Плейсхолдеры: <code>{ИМЯ}</code>, <code>{СОБЕСЕДНИКИ}</code>, <code>{ТЕМА}</code></div>
                                 <div id="staticInstructionsEditor"></div>
-                                <button class="btn btn-secondary" onclick="addStaticInstructionEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить инструкцию</button>
+                                <button class="btn btn-secondary" onclick="addStaticInstructionEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить правило</button>
                             </div>
                             
                             <div style="margin-bottom:20px;">
@@ -1233,6 +1269,14 @@ HTML_TEMPLATE = """
             <div class="sidebar-section">
                 <div class="sidebar-title">Персонажи</div>
                 <div id="participantsDisplay" style="color:#000000;font-size:13px;line-height:1.6;"></div>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Правила общения</div>
+                <div id="rulesDisplay" style="color:#000000;font-size:12px;line-height:1.5;font-style:italic;"></div>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Инструкции от руководства</div>
+                <div id="moderatorInstructionsDisplay" style="color:#000000;font-size:12px;line-height:1.5;font-weight:bold;"></div>
             </div>
         </div>
     </div>
@@ -1309,7 +1353,7 @@ HTML_TEMPLATE = """
                         <label>Инструкция</label>
                         <textarea id="instruction-${idx}" ${debateRunning ? 'readonly' : ''} placeholder="Дополнительная инструкция..." onchange="updateParticipant(${idx}, 'instruction', this.value)">${p.instruction || ''}</textarea>
                     </div>
-                    <div style="font-size:12px;color:#999;margin-top:10px;">Модель: ${p.model} ${p.is_moderator ? '(режиссёр)' : ''}</div>
+                    <div style="font-size:12px;color:#999;margin-top:10px;">Модель: ${p.model} | Пол: ${p.gender === 'male' ? '♂' : '♀'} ${p.is_moderator ? '| Режиссёр' : ''}</div>
                 </div>
             `).join('');
         }
@@ -1334,22 +1378,11 @@ HTML_TEMPLATE = """
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ keywords: keywords, participant_idx: idx })
             }).then(r => r.json()).then(data => {
-                if (data.avatar_url) { 
-                    participants[idx].avatar_url = data.avatar_url; 
-                    preview.innerHTML = `<img src="${data.avatar_url}">`; 
-                } else { 
-                    preview.innerHTML = '❌'; 
-                    setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); 
-                }
+                if (data.avatar_url) { participants[idx].avatar_url = data.avatar_url; preview.innerHTML = `<img src="${data.avatar_url}">`; }
+                else { preview.innerHTML = '❌'; setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); }
                 btn.disabled = false;
                 btn.textContent = '🔍 Найти аватар';
-            }).catch(err => { 
-                console.error('Ошибка поиска аватара:', err); 
-                preview.innerHTML = '❌'; 
-                setTimeout(() => preview.innerHTML = fallbackEmoji, 2000);
-                btn.disabled = false;
-                btn.textContent = '🔍 Найти аватар';
-            });
+            }).catch(err => { console.error('Ошибка поиска аватара:', err); preview.innerHTML = '❌'; setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); btn.disabled = false; btn.textContent = '🔍 Найти аватар'; });
         }
         
         function openAvatarModal(idx) { const u = participants[idx].avatar_url; if (u) { document.getElementById('avatarModalImg').src = u; document.getElementById('avatarModal').style.display = 'block'; } }
@@ -1382,7 +1415,12 @@ HTML_TEMPLATE = """
             });
             
             fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ topic, instructions, participants, avatars, static_instructions: currentStaticInstructions }) })
-            .then(r => r.json()).then(data => { if (data.success) pollInterval = setInterval(updatePosts, 3000); })
+            .then(r => r.json()).then(data => { 
+                if (data.success) {
+                    pollInterval = setInterval(updatePosts, 3000);
+                    updateSidebarParticipants(); // Обновляем сайдбар при старте
+                }
+            })
             .catch(err => { console.error('Ошибка запуска:', err); alert('Ошибка: ' + err.message); });
         }
         
@@ -1450,6 +1488,8 @@ HTML_TEMPLATE = """
                 }
                 if (data.new_posts && data.new_posts.length > 0) data.new_posts.forEach(post => addPost(post));
                 if (typeof data.total_posts === 'number') lastPostCount = data.total_posts;
+                // Обновляем сайдбар (правила и инструкции от руководства)
+                updateSidebarParticipants();
             }).catch(err => {
                 console.error('Ошибка обновления статуса:', err);
                 // Если сервер недоступен — значит он остановлен
@@ -1474,94 +1514,55 @@ HTML_TEMPLATE = """
             .catch(err => { console.error('Ошибка:', err); alert('Ошибка: ' + err.message); });
         }
         
-        // Функции для редактирования инструкций и руководств
-        function toggleInstructionsEditor() {
-            const editor = document.getElementById('instructionsEditor');
-            if (editor.style.display === 'none') {
-                editor.style.display = 'block';
-                loadInstructionsForEdit();
-            } else {
-                editor.style.display = 'none';
-            }
-        }
-        
-        function loadInstructionsForEdit() {
+        function updateSidebarParticipants() {
+            // Получаем актуальные инструкции с сервера
             fetch('/api/moderator/instructions')
             .then(r => r.json())
             .then(data => {
-                renderStaticInstructionsEditor(data.static_instructions);
-                renderModeratorMessagesEditor(data.moderator_messages);
-                renderParticipantInstructionsEditor(data.participant_instructions || []);
+                // Создаём словарь индивидуальных инструкций
+                const currentInstructions = {};
+                if (data.participant_instructions) {
+                    data.participant_instructions.forEach(p => {
+                        if (p.instruction && p.instruction.trim()) {
+                            currentInstructions[p.name] = p.instruction;
+                        }
+                    });
+                }
+                
+                // Обновляем отображение персонажей в сайдбаре
+                document.getElementById('participantsDisplay').innerHTML = participants.map(p => {
+                    const instruction = currentInstructions[p.display_name];
+                    const genderSymbol = p.gender === 'male' ? '♂' : '♀';
+                    let html = `<div style="margin-bottom:12px;"><strong>${p.display_name}</strong> <small>(${p.model} ${genderSymbol})</small>`;
+                    if (instruction) {
+                        html += `<br><em style="margin-left:10px;">${instruction}</em>`;
+                    }
+                    return html + '</div>';
+                }).join('');
+                
+                // Обновляем блок "Правила общения"
+                const rulesDisplay = document.getElementById('rulesDisplay');
+                if (data.static_instructions && data.static_instructions.length > 0) {
+                    rulesDisplay.innerHTML = data.static_instructions
+                        .filter(rule => rule.trim())
+                        .map(rule => `<div style="margin-bottom:8px;">• ${rule}</div>`)
+                        .join('');
+                } else {
+                    rulesDisplay.innerHTML = '<div style="color:#999;">Правила не заданы</div>';
+                }
+                
+                // Обновляем блок "Инструкции от руководства"
+                const modInstructionsDisplay = document.getElementById('moderatorInstructionsDisplay');
+                if (data.moderator_messages && data.moderator_messages.length > 0) {
+                    modInstructionsDisplay.innerHTML = data.moderator_messages
+                        .filter(msg => msg.trim())
+                        .map(msg => `<div style="margin-bottom:8px;">• ${msg}</div>`)
+                        .join('');
+                } else {
+                    modInstructionsDisplay.innerHTML = '<div style="color:#999;font-weight:normal;">Нет указаний от руководства</div>';
+                }
             })
-            .catch(err => console.error('Ошибка загрузки инструкций:', err));
-        }
-        
-        function renderParticipantInstructionsEditor(participantInstructions) {
-            const container = document.getElementById('participantInstructionsEditor');
-            if (participantInstructions.length === 0) {
-                container.innerHTML = '<div style="color:#666;font-style:italic;font-size:13px;">Нет AI-участников для редактирования</div>';
-                return;
-            }
-            container.innerHTML = participantInstructions.map((p, idx) => `
-                <div style="margin-bottom:15px;padding:10px;border:1px solid #ccc;border-radius:4px;">
-                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${p.name}:</label>
-                    <textarea id="participant-instr-edit-${idx}" rows="3" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${p.name}...">${p.instruction || ''}</textarea>
-                </div>
-            `).join('');
-        }
-        
-        function renderStaticInstructionsEditor(instructions) {
-            const container = document.getElementById('staticInstructionsEditor');
-            container.innerHTML = instructions.map((instr, idx) => `
-                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
-                    <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${instr}</textarea>
-                    <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-                </div>
-            `).join('');
-        }
-        
-        function renderModeratorMessagesEditor(messages) {
-            const container = document.getElementById('moderatorMessagesEditor');
-            container.innerHTML = messages.map((msg, idx) => `
-                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
-                    <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${msg}</textarea>
-                    <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-                </div>
-            `).join('');
-        }
-        
-        function addStaticInstructionEditor() {
-            const container = document.getElementById('staticInstructionsEditor');
-            const idx = container.children.length;
-            const div = document.createElement('div');
-            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
-            div.innerHTML = `
-                <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новая инструкция..."></textarea>
-                <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-            `;
-            container.appendChild(div);
-        }
-        
-        function addModeratorMessageEditor() {
-            const container = document.getElementById('moderatorMessagesEditor');
-            const idx = container.children.length;
-            const div = document.createElement('div');
-            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
-            div.innerHTML = `
-                <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое руководство..."></textarea>
-                <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-            `;
-            container.appendChild(div);
-        }
-        
-        function removeStaticInstructionEditor(idx) {
-            const el = document.getElementById(`static-instr-edit-${idx}`);
-            if (el) el.parentElement.remove();
-        }
-        
-        function removeModeratorMessageEditor(idx) {
-            const el = document.getElementById(`mod-msg-edit-${idx}`);
-            if (el) el.parentElement.remove();
+            .catch(err => console.error('Ошибка обновления сайдбара:', err));
         }
         
         function saveInstructions() {
@@ -1610,6 +1611,8 @@ HTML_TEMPLATE = """
                 if (data.success) {
                     alert('✅ Инструкции обновлены!');
                     document.getElementById('instructionsEditor').style.display = 'none';
+                    // Обновляем сайдбар с актуальными инструкциями
+                    updateSidebarParticipants();
                 } else {
                     alert('❌ Ошибка: ' + (data.error || 'неизвестная'));
                 }
@@ -1668,6 +1671,96 @@ HTML_TEMPLATE = """
             }
         }
         
+        // Функции для редактирования инструкций и руководств
+        function toggleInstructionsEditor() {
+            const editor = document.getElementById('instructionsEditor');
+            if (editor.style.display === 'none') {
+                editor.style.display = 'block';
+                loadInstructionsForEdit();
+            } else {
+                editor.style.display = 'none';
+            }
+        }
+        
+        function loadInstructionsForEdit() {
+            fetch('/api/moderator/instructions')
+            .then(r => r.json())
+            .then(data => {
+                renderStaticInstructionsEditor(data.static_instructions);
+                renderModeratorMessagesEditor(data.moderator_messages);
+                renderParticipantInstructionsEditor(data.participant_instructions || []);
+            })
+            .catch(err => console.error('Ошибка загрузки инструкций:', err));
+        }
+        
+        function renderStaticInstructionsEditor(instructions) {
+            const container = document.getElementById('staticInstructionsEditor');
+            container.innerHTML = instructions.map((instr, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${instr}</textarea>
+                    <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function renderModeratorMessagesEditor(messages) {
+            const container = document.getElementById('moderatorMessagesEditor');
+            container.innerHTML = messages.map((msg, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${msg}</textarea>
+                    <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function renderParticipantInstructionsEditor(participantInstructions) {
+            const container = document.getElementById('participantInstructionsEditor');
+            if (participantInstructions.length === 0) {
+                container.innerHTML = '<div style="color:#666;font-style:italic;font-size:13px;">Нет AI-участников для редактирования</div>';
+                return;
+            }
+            container.innerHTML = participantInstructions.map((p, idx) => `
+                <div style="margin-bottom:15px;padding:10px;border:1px solid #ccc;border-radius:4px;">
+                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${p.name}:</label>
+                    <textarea id="participant-instr-edit-${idx}" rows="3" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${p.name}...">${p.instruction || ''}</textarea>
+                </div>
+            `).join('');
+        }
+        
+        function addStaticInstructionEditor() {
+            const container = document.getElementById('staticInstructionsEditor');
+            const idx = container.children.length;
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новая инструкция..."></textarea>
+                <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function addModeratorMessageEditor() {
+            const container = document.getElementById('moderatorMessagesEditor');
+            const idx = container.children.length;
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое руководство..."></textarea>
+                <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function removeStaticInstructionEditor(idx) {
+            const el = document.getElementById(`static-instr-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
+        function removeModeratorMessageEditor(idx) {
+            const el = document.getElementById(`mod-msg-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
         document.getElementById('topicInput').addEventListener('keydown', function(e) { if (e.ctrlKey && e.key === 'Enter') startDebate(); });
         document.getElementById('moderatorInput').addEventListener('keydown', function(e) { if (e.ctrlKey && e.key === 'Enter') sendModeratorMessage(); });
         const now = new Date();
@@ -1692,18 +1785,6 @@ def favicon():
 @app.route('/avatars/<path:filename>')
 def serve_avatar(filename):
     return send_from_directory(AVATAR_DIR, filename)
-
-# Дефолтные статичные инструкции
-DEFAULT_STATIC_INSTRUCTIONS = [
-    'ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ).',
-    'ОБРАЩАЙСЯ к ним по именам когда отвечаешь на их реплики.',
-    'ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ, не в третьем!',
-    'Учитывай всё что говорили другие участники и реагируй на их слова.',
-    'Отвечай на русском языке.',
-    'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
-    'Используй поиск в интернете для фактологических утверждений.',
-    'При поиске НЕ указывай годы.'
-]
 
 @app.route('/api/static_instructions')
 def get_static_instructions():
@@ -1932,7 +2013,7 @@ def get_moderator_instructions():
     """Возвращает текущие static_instructions, moderator_messages и индивидуальные инструкции участников"""
     moderator_messages = [
         post["content"] for post in session.conversation_history 
-        if post.get("is_moderator", False)
+        if post.get("is_moderator", False) and post["content"].strip()
     ]
     
     # Собираем индивидуальные инструкции участников
