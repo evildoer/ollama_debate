@@ -506,6 +506,9 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
     max_forced_attempts = 2 # Максимум попыток принудительного поиска
     content = ""
     
+    # Вычисляем нормализованное имя один раз
+    participant_name_normalized = participant_name.lower().replace(" ", "_")
+    
     for iteration in range(max_iterations):
         # Если нужен принудительный поиск - передаём tool_choice="any"
         current_tool_choice = "any" if force_tool_use else None
@@ -521,7 +524,7 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
             # Принудительный поиск только если модель поддерживает tools
             if search_count < MIN_SEARCHES and forced_attempts < max_forced_attempts and MODELS_TOOLS_SUPPORT.get(model, False):
                 print(f"  🔍 Принудительный поиск (попытка {forced_attempts + 1}/{max_forced_attempts})...")
-                messages.append({"role": "assistant", "content": content, "name": participant_name.lower().replace(" ", "_")})
+                messages.append({"role": "assistant", "content": content, "name": participant_name_normalized})
                 messages.append({
                     "role": "user",
                     "content": "Используй инструмент поиска для получения актуальной информации.",
@@ -539,7 +542,7 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
             "role": "assistant",
             "content": content or "",
             "tool_calls": tool_calls,
-            "name": participant_name.lower().replace(" ", "_")
+            "name": participant_name_normalized
         })
         
         has_search = False
@@ -766,6 +769,10 @@ class DebateSession:
             if not p.get("is_moderator", False)
         ]
         
+        # Вычисляем имена один раз
+        participant_name = participant["display_name"]
+        participant_name_normalized = participant_name.lower().replace(" ", "_")
+        
         system_prompt = self.get_system_prompt(participant, non_moderator_names)
         
         messages = [
@@ -776,32 +783,33 @@ class DebateSession:
             speaker_name = post["display_name"]
             content = post["content"]
             is_moderator = post.get("is_moderator", False)
+            speaker_name_normalized = speaker_name.lower().replace(" ", "_")
             
-            if speaker_name == participant["display_name"]:
+            if speaker_name == participant_name:
                 messages.append({
                     "role": "assistant",
                     "content": content,
-                    "name": speaker_name.lower().replace(" ", "_")
+                    "name": speaker_name_normalized
                 })
             elif is_moderator:
-                # Реплики модератора добавляем как системные сообщения (без упоминания "режиссёр")
+                # Реплики модератора добавляем как системные указания (без префикса)
                 messages.append({
                     "role": "system",
-                    "content": f"{speaker_name} говорит: {content}",
-                    "name": speaker_name.lower().replace(" ", "_")
+                    "content": content,
+                    "name": "moderator"
                 })
             else:
                 messages.append({
                     "role": "user",
                     "content": f"{speaker_name} говорит: {content}",
-                    "name": speaker_name.lower().replace(" ", "_")
+                    "name": speaker_name_normalized
                 })
         
         if round_num == 1 and len(self.conversation_history) == 0:
             messages.append({
                 "role": "user", 
-                "content": f'Как {participant["display_name"]}, начни диалог на тему "{self.topic}". Обращайся к другим участникам по именам.',
-                "name": participant["display_name"].lower().replace(" ", "_")
+                "content": f'Как {participant_name}, начни диалог на тему "{self.topic}". Обращайся к другим участникам по именам.',
+                "name": participant_name_normalized
             })
         else:
             last_post = self.conversation_history[-1] if self.conversation_history else None
@@ -811,20 +819,20 @@ class DebateSession:
                 if last_is_moderator:
                     messages.append({
                         "role": "system",
-                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant["display_name"]}, ответь ему и другим участникам, обращаясь по именам.',
-                        "name": participant["display_name"].lower().replace(" ", "_")
+                        "content": f'Как {participant_name}, ответь на указание: "{last_post["content"]}". Обращайся к другим участникам по именам.',
+                        "name": participant_name_normalized
                     })
                 else:
                     messages.append({
                         "role": "user",
-                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant["display_name"]}, ответь ему и другим участникам, обращаясь по именам.',
-                        "name": participant["display_name"].lower().replace(" ", "_")
+                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ответь ему и другим участникам, обращаясь по именам.',
+                        "name": participant_name_normalized
                     })
             else:
                 messages.append({
                     "role": "user",
-                    "content": f'Как {participant["display_name"]}, продолжай диалог, обращаясь к другим участникам по именам.',
-                    "name": participant["display_name"].lower().replace(" ", "_")
+                    "content": f'Как {participant_name}, продолжай диалог, обращаясь к другим участникам по именам.',
+                    "name": participant_name_normalized
                 })
         
         return messages
