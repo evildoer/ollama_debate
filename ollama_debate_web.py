@@ -262,6 +262,36 @@ def download_image_with_checksum(url: str, base_name: str) -> str:
                 time.sleep(3)
             else:
                 print(f"  ⚠️  Не удалось скачать изображение после 3 попыток: {e}")
+                
+                # Fallback: пробуем без прокси
+                if PROXY:
+                    print(f"  🔄 Пробую скачать без прокси...")
+                    try:
+                        # Создаём opener без прокси
+                        proxy_handler = urllib.request.ProxyHandler({})
+                        opener = urllib.request.build_opener(proxy_handler)
+                        
+                        req = urllib.request.Request(encoded_url, headers=headers)
+                        with opener.open(req, timeout=60) as response:
+                            image_data = response.read()
+                        
+                        checksum = compute_data_checksum(image_data)
+                        
+                        for existing_file in AVATAR_DIR.glob(f"{base_name}*.jpg"):
+                            existing_checksum = compute_file_checksum(existing_file)
+                            if existing_checksum == checksum:
+                                print(f"  ✅ Скачивание без прокси успешно!")
+                                return str(existing_file)
+                        
+                        filename = f"{base_name}_{checksum}.jpg"
+                        filepath = AVATAR_DIR / filename
+                        filepath.write_bytes(image_data)
+                        
+                        print(f"  ✅ Скачивание без прокси успешно!")
+                        return str(filepath)
+                    except Exception as e2:
+                        print(f"  ⚠️  Скачивание без прокси тоже не удалось: {e2}")
+                
                 return ""
     
     return ""
@@ -1180,6 +1210,11 @@ HTML_TEMPLATE = """
                                 <button class="btn btn-secondary" onclick="addModeratorMessageEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить руководство</button>
                             </div>
                             
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Индивидуальные инструкции участников:</label>
+                                <div id="participantInstructionsEditor"></div>
+                            </div>
+                            
                             <button class="btn btn-primary" onclick="saveInstructions()" style="margin-top:10px;">💾 Применить изменения</button>
                         </div>
                     </div>
@@ -1456,8 +1491,23 @@ HTML_TEMPLATE = """
             .then(data => {
                 renderStaticInstructionsEditor(data.static_instructions);
                 renderModeratorMessagesEditor(data.moderator_messages);
+                renderParticipantInstructionsEditor(data.participant_instructions || []);
             })
             .catch(err => console.error('Ошибка загрузки инструкций:', err));
+        }
+        
+        function renderParticipantInstructionsEditor(participantInstructions) {
+            const container = document.getElementById('participantInstructionsEditor');
+            if (participantInstructions.length === 0) {
+                container.innerHTML = '<div style="color:#666;font-style:italic;font-size:13px;">Нет AI-участников для редактирования</div>';
+                return;
+            }
+            container.innerHTML = participantInstructions.map((p, idx) => `
+                <div style="margin-bottom:15px;padding:10px;border:1px solid #ccc;border-radius:4px;">
+                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${p.name}:</label>
+                    <textarea id="participant-instr-edit-${idx}" rows="3" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${p.name}...">${p.instruction || ''}</textarea>
+                </div>
+            `).join('');
         }
         
         function renderStaticInstructionsEditor(instructions) {
@@ -1529,13 +1579,30 @@ HTML_TEMPLATE = """
                 if (ta.value.trim()) moderatorMessages.push(ta.value.trim());
             });
             
+            // Собираем индивидуальные инструкции участников
+            const participantInstructions = [];
+            const participantContainer = document.getElementById('participantInstructionsEditor');
+            const participantDivs = participantContainer.querySelectorAll('div[style*="margin-bottom:15px"]');
+            participantDivs.forEach((div, idx) => {
+                const textarea = div.querySelector('textarea');
+                if (textarea) {
+                    const label = div.querySelector('label');
+                    const name = label ? label.textContent.replace(':', '') : '';
+                    participantInstructions.push({
+                        name: name,
+                        instruction: textarea.value
+                    });
+                }
+            });
+            
             // Отправляем на сервер
             fetch('/api/moderator/instructions', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
                     static_instructions: staticInstructions,
-                    moderator_messages: moderatorMessages
+                    moderator_messages: moderatorMessages,
+                    participant_instructions: participantInstructions
                 })
             })
             .then(r => r.json())
