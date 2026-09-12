@@ -82,7 +82,7 @@ UNLOAD_AFTER_DEBATE = True
 # Оптимизация GPU
 OPTIONS = {
     "num_ctx": 16384,
-    "num_predict": 1024,
+    "num_predict": 8192,  # Увеличено для очень длинных ответов
     "num_thread": 0,
     "num_gpu": 999,
 }
@@ -775,28 +775,38 @@ class DebateSession:
         
         system_prompt = self.get_system_prompt(participant, non_moderator_names)
         
+        # Собираем все реплики модератора из истории
+        moderator_messages = [
+            post["content"] for post in self.conversation_history 
+            if post.get("is_moderator", False)
+        ]
+        
+        # Добавляем указания модератора в системный промпт
+        if moderator_messages:
+            system_prompt += "\n\nУКАЗАНИЯ ОТ РУКОВОДСТВА (обязательны к исполнению):\n"
+            for msg in moderator_messages:
+                system_prompt += f"• {msg}\n"
+        
         messages = [
             {"role": "system", "content": system_prompt, "name": "system"},
         ]
         
+        # В истории диалога пропускаем реплики модератора (они уже в системном промпте)
         for post in self.conversation_history:
             speaker_name = post["display_name"]
             content = post["content"]
             is_moderator = post.get("is_moderator", False)
             speaker_name_normalized = speaker_name.lower().replace(" ", "_")
             
+            # Пропускаем реплики модератора — они уже в системном промпте
+            if is_moderator:
+                continue
+            
             if speaker_name == participant_name:
                 messages.append({
                     "role": "assistant",
                     "content": content,
                     "name": speaker_name_normalized
-                })
-            elif is_moderator:
-                # Реплики модератора добавляем как системные указания (без префикса)
-                messages.append({
-                    "role": "system",
-                    "content": content,
-                    "name": "moderator"
                 })
             else:
                 messages.append({
@@ -805,29 +815,24 @@ class DebateSession:
                     "name": speaker_name_normalized
                 })
         
-        if round_num == 1 and len(self.conversation_history) == 0:
+        if round_num == 1 and len([p for p in self.conversation_history if not p.get("is_moderator", False)]) == 0:
             messages.append({
                 "role": "user", 
                 "content": f'Как {participant_name}, начни диалог на тему "{self.topic}". Обращайся к другим участникам по именам.',
                 "name": participant_name_normalized
             })
         else:
-            last_post = self.conversation_history[-1] if self.conversation_history else None
+            # Находим последний пост НЕ от модератора (модератор уже в системном промпте)
+            non_moderator_posts = [p for p in self.conversation_history if not p.get("is_moderator", False)]
+            last_post = non_moderator_posts[-1] if non_moderator_posts else None
+            
             if last_post:
                 last_speaker = last_post["display_name"]
-                last_is_moderator = last_post.get("is_moderator", False)
-                if last_is_moderator:
-                    messages.append({
-                        "role": "system",
-                        "content": f'Как {participant_name}, ответь на указание: "{last_post["content"]}". Обращайся к другим участникам по именам.',
-                        "name": participant_name_normalized
-                    })
-                else:
-                    messages.append({
-                        "role": "user",
-                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ответь ему и другим участникам, обращаясь по именам.',
-                        "name": participant_name_normalized
-                    })
+                messages.append({
+                    "role": "user",
+                    "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ответь ему и другим участникам, обращаясь по именам.',
+                    "name": participant_name_normalized
+                })
             else:
                 messages.append({
                     "role": "user",
@@ -972,6 +977,7 @@ HTML_TEMPLATE = """
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AI Театр</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&family=Raleway:wght@400;600&display=swap');
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -1391,6 +1397,10 @@ HTML_TEMPLATE = """
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
+
+@app.route('/favicon.ico')
+def favicon():
+    return send_from_directory(app.root_path, 'favicon.ico', mimetype='image/x-icon')
 
 @app.route('/avatars/<path:filename>')
 def serve_avatar(filename):
