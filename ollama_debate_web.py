@@ -104,6 +104,7 @@ PARTICIPANTS = [
     {"model": "r1"},
     {"model": "g1"},
     {"model": "q1"},
+    {"model": "q1", "is_judge": True},  # Судья - оценивает выступления
     {"model": "human", "is_moderator": True},  # Модератор (вы)
 ]
 
@@ -157,6 +158,28 @@ DEFAULT_STATIC_INSTRUCTIONS = [
     'Используй поиск в интернете для фактологических утверждений.',
     'При поиске НЕ указывай годы.'
 ]
+
+# Дефолтная инструкция для судьи
+DEFAULT_JUDGE_INSTRUCTION = (
+    'Ты — СТРОГИЙ судья этого спора. Твоя задача — объективно и критически оценить выступления участников. '
+    'НЕ реагируй на обращения к тебе от других участников. '
+    'Ты не участвуешь в дискуссии, а только оцениваешь её. '
+    'ОЦЕНИВАЙ ОТНОСИТЕЛЬНО: сравнивай участников между собой, не ставь всем высокие оценки. '
+    'Критерии оценки (будь строгим!): '
+    '- 1-2 балла: поверхностные аргументы, отсутствие конкретики, уход от темы '
+    '- 3 балла: средняя аргументация, есть факты но мало анализа '
+    '- 4 балла: хорошая аргументация, конкретные примеры, логичные выводы '
+    '- 5 баллов: выдающаяся аргументация, уникальные insights, безупречная логика '
+    'ВАЖНО: Не все должны получать 4-5 баллов! Распределяй оценки: кто-то 2-3, кто-то 4, максимум один 5. '
+    'Для каждого участника укажи: '
+    '1) Краткое содержание его речи (1-2 предложения) '
+    '2) Оценку от 1 до 5 баллов с подробным обоснованием '
+    'Формат ответа: '
+    '**Имя участника** — X/5 баллов '
+    'Краткое содержание: ... '
+    'Обоснование оценки: ... (критически!) '
+    'В конце дай общее резюме раунда: кто выступил лучше/хуже и почему (3-4 предложения).'
+)
 
 # ============================================================
 # СЛУЧАЙНЫЕ ИМЕНА И ЭМОДЗИ ДЛЯ ПЕРСОНАЖЕЙ
@@ -341,11 +364,14 @@ def download_image_with_checksum(url: str, base_name: str) -> str:
     return ""
 
 def generate_avatar_for_participant(participant: dict) -> str:
+    print(f"🎭 Генерация аватара для участника: {participant}")
     if not ENABLE_AVATAR_GENERATION or not SEARCH_AVAILABLE:
+        print(f"⚠️  Генерация аватаров отключена или поиск недоступен")
         return ""
     
     display_name = participant["display_name"]
     avatar_keywords = participant.get("avatar_keywords", display_name)
+    print(f"🔑 Ключевые слова для аватара: {avatar_keywords}")
     
     # Проверяем кэш URL аватаров - если уже искали этот запрос, используем сохранённый URL
     if avatar_keywords in AVATAR_URL_CACHE:
@@ -887,23 +913,42 @@ def unload_model(model: str):
 
 def create_post(display_name: str, model_used: str, content: str, round_num: int, 
                 avatar_url: str = None, avatar_emoji: str = None,
-                search_count: int = 0, search_queries: list = None) -> dict:
+                search_count: int = 0, search_queries: list = None,
+                role: str = "participant", gender: str = "male") -> dict:
     """Единая функция создания поста для любого участника (human или AI)"""
     if search_queries is None:
         search_queries = []
+    
+    # Определяем роль и соответствующую иконку
+    role_icons = {
+        "participant": "🎭",
+        "moderator": "🎬",
+        "judge": "⚖️"
+    }
+    
+    role_names = {
+        "participant": "Участник",
+        "moderator": "Модератор",
+        "judge": "Судья"
+    }
     
     return {
         "id": len(session.posts) + 1,
         "display_name": display_name,
         "model_used": model_used,
         "avatar_url": avatar_url,
-        "avatar_emoji": avatar_emoji or "📣",
+        "avatar_emoji": avatar_emoji or role_icons.get(role, "📣"),
         "content": content,
         "content_html": markdown_to_html(content),
         "round": round_num,
         "timestamp": time.strftime("%H:%M"),
         "search_count": search_count,
-        "search_queries": search_queries
+        "search_queries": search_queries,
+        "role": role,
+        "role_icon": role_icons.get(role, "🎭"),
+        "role_name": role_names.get(role, "Участник"),
+        "gender": gender,
+        "gender_symbol": "♂" if gender == "male" else "♀"
     }
 
 class DebateSession:
@@ -954,19 +999,29 @@ class DebateSession:
         self.__init__()
     
     def add_post(self, display_name: str, model_used: str, content: str, round_num: int,
-                 search_count: int = 0, search_queries: list = None, is_moderator: bool = False):
+                 search_count: int = 0, search_queries: list = None, is_moderator: bool = False, is_judge: bool = False, gender: str = "male"):
         """Добавляет пост в историю и список постов"""
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
+        
+        # Определяем роль
+        role = "participant"
+        if is_moderator:
+            role = "moderator"
+        elif is_judge:
+            role = "judge"
+        
         post = create_post(display_name, model_used, content, round_num, 
-                          avatar_url, avatar_emoji, search_count, search_queries)
+                          avatar_url, avatar_emoji, search_count, search_queries, role, gender)
         self.posts.append(post)
         
         if content.strip():
             self.conversation_history.append({
                 "display_name": display_name,
                 "content": content,
-                "is_moderator": is_moderator
+                "is_moderator": is_moderator,
+                "is_judge": is_judge,
+                "round": round_num
             })
         
         return post
@@ -990,10 +1045,29 @@ class DebateSession:
     
     def get_system_prompt(self, participant: dict, all_names: list) -> str:
         """Генерирует системный промпт для участника с заменой плейсхолдеров"""
-        other_names = [name for name in all_names if name != participant["display_name"]]
+        # Исключаем модератора и судью из списка собеседников
+        other_names = [
+            name for name in all_names 
+            if name != participant["display_name"]
+            and not any(p["display_name"] == name and (p.get("is_moderator") or p.get("is_judge")) 
+                       for p in self.runtime_participants)
+        ]
+        
+        # Проверяем, является ли этот участник судьёй
+        is_judge = participant.get("is_judge", False)
         
         # Определяем правила общения (статичные инструкции)
-        if self.static_instructions and len(self.static_instructions) > 0:
+        if is_judge:
+            # Для судьи используем специальные правила
+            rules = [
+                'Ты — {ИМЯ}, независимый судья этого спора.',
+                'Тема обсуждения: "{ТЕМА}".',
+                'Ты оцениваешь выступления участников: {СОБЕСЕДНИКИ}.',
+                'Отвечай на русском языке.',
+                'Будь объективным и кратким.'
+            ]
+            print(f"  ⚖️  Используем правила судьи для {participant['display_name']}")
+        elif self.static_instructions and len(self.static_instructions) > 0:
             rules = [instr for instr in self.static_instructions if instr.strip()]
             print(f"  📋 Используем пользовательские правила для {participant['display_name']}: {len(rules)} пунктов")
         else:
@@ -1016,6 +1090,12 @@ class DebateSession:
         
         # Добавляем индивидуальную инструкцию участника с чётким заголовком
         custom_instruction = self.instructions.get(participant["display_name"], "")
+        
+        # Для судьи используем дефолтную инструкцию если нет своей
+        if is_judge and not (custom_instruction and custom_instruction.strip()):
+            custom_instruction = DEFAULT_JUDGE_INSTRUCTION
+            print(f"  ⚖️  Применяю дефолтную инструкцию судьи для {participant['display_name']}")
+        
         if custom_instruction and custom_instruction.strip():
             # Заменяем плейсхолдеры в личной инструкции тоже
             custom_instruction = custom_instruction.replace("{ИМЯ}", participant["display_name"])
@@ -1048,15 +1128,18 @@ class DebateSession:
     
     def build_messages_for_ai(self, participant: dict, round_num: int) -> list:
         """Строит список сообщений для AI модели"""
-        # Исключаем модераторов из списка участников для промпта
+        # Исключаем модераторов и судей из списка участников для промпта
         non_moderator_names = [
             p["display_name"] for p in self.runtime_participants 
-            if not p.get("is_moderator", False)
+            if not p.get("is_moderator", False) and not p.get("is_judge", False)
         ]
         
         # Вычисляем имена один раз
         participant_name = participant["display_name"]
         participant_name_normalized = participant_name.lower().replace(" ", "_")
+        
+        # Проверяем, является ли этот участник судьёй
+        is_judge = participant.get("is_judge", False)
         
         # Получаем полный системный промпт (включая все инструкции)
         system_prompt = self.get_system_prompt(participant, non_moderator_names)
@@ -1065,11 +1148,82 @@ class DebateSession:
             {"role": "system", "content": system_prompt, "name": "system"},
         ]
         
-        # Фильтруем реплики модератора (они уже в системном промпте)
+        # Фильтруем реплики модератора и судьи (они уже в системном промпте)
         non_moderator_history = [
             post for post in self.conversation_history 
-            if not post.get("is_moderator", False)
+            if not post.get("is_moderator", False) and not post.get("is_judge", False)
         ]
+        
+        # Для судьи фильтруем только сообщения текущего раунда до него
+        if is_judge:
+            # Находим индекс ТЕКУЩЕГО судьи в списке участников
+            judge_idx = next(
+                (i for i, p in enumerate(self.runtime_participants) 
+                 if p["display_name"] == participant_name and p.get("is_judge", False)),
+                -1
+            )
+            
+            # Получаем только посты текущего раунда (исключаем посты других судей)
+            current_round_posts = [
+                post for post in non_moderator_history 
+                if post.get("round", 0) == round_num
+            ]
+            
+            # Если судья первый в раунде - у него нет постов для оценки
+            if judge_idx <= 0:
+                # Судья первый - оценивает предыдущий раунд или говорит что нет данных
+                if not current_round_posts:
+                    messages.append({
+                        "role": "user",
+                        "content": f'Как {participant_name}, оцени предыдущий раунд. Если это первый раунд и никто ещё не говорил, скажи что оценивать нечего.',
+                        "name": participant_name_normalized
+                    })
+                    return messages
+            else:
+                # Судья не первый - берём посты до него в текущем раунде
+                # Находим посты участников которые идут до этого судьи
+                participants_before_judge = [
+                    p["display_name"] for i, p in enumerate(self.runtime_participants) 
+                    if i < judge_idx and not p.get("is_moderator", False) and not p.get("is_judge", False)
+                ]
+                
+                # Фильтруем посты только от тех кто до судьи в этом раунде
+                current_round_posts = [
+                    post for post in current_round_posts
+                    if post["display_name"] in participants_before_judge
+                ]
+            
+            # Преобразуем в формат сообщений
+            history_messages = []
+            for post in current_round_posts:
+                speaker_name = post["display_name"]
+                content = post["content"]
+                speaker_name_normalized = speaker_name.lower().replace(" ", "_")
+                
+                history_messages.append({
+                    "role": "user",
+                    "content": f"{speaker_name} говорит: {content}",
+                    "name": speaker_name_normalized
+                })
+            
+            # Добавляем историю в messages
+            messages.extend(history_messages)
+            
+            # Добавляем финальный запрос для судьи
+            if current_round_posts:
+                messages.append({
+                    "role": "user",
+                    "content": f'Как {participant_name}, оцени выступления участников в этом раунде. Для каждого участника укажи оценку от 1 до 5 баллов и краткое содержание его речи.',
+                    "name": participant_name_normalized
+                })
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": f'Как {participant_name}, в этом раунде до тебя никто не говорил. Скажи что оценивать нечего.',
+                    "name": participant_name_normalized
+                })
+            
+            return messages
         
         # Преобразуем в формат сообщений
         history_messages = []
@@ -1155,7 +1309,9 @@ class DebateSession:
             content=response,
             round_num=round_num,
             search_count=search_count,
-            search_queries=search_queries
+            search_queries=search_queries,
+            is_judge=participant.get("is_judge", False),
+            gender=participant.get("gender", "male")
         )
         
         self.current_action = None
@@ -1167,7 +1323,9 @@ class DebateSession:
 session = DebateSession()
 
 def run_debate_thread(topic: str):
+    print(f"🎬 Поток дебатов запущен для темы: {topic}")
     runtime_participants = session.runtime_participants
+    print(f"👥 Участников в сессии: {len(runtime_participants)}")
     
     if not runtime_participants:
         # Без участников цикл ниже крутился бы вечно и съедал ядро процессора
@@ -1231,7 +1389,8 @@ def run_debate_thread(topic: str):
                                     round_num=round_num,
                                     search_count=0,
                                     search_queries=[],
-                                    is_moderator=participant.get("is_moderator", False)
+                                    is_moderator=participant.get("is_moderator", False),
+                                    gender=participant.get("gender", "male")
                                 )
                                 print(f"🎬 {participant['display_name']}: {current_message[:50]}")
                                 socketio.emit('new_post', post)
@@ -1302,7 +1461,7 @@ HTML_TEMPLATE = """
         .header-date { font-size: 14px; letter-spacing: 1px; margin-bottom: 20px; text-transform: uppercase; }
         .header h1 { font-family: Georgia, serif; font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
         .header-subtitle { font-size: 16px; font-style: italic; font-weight: normal; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
-        .header-topic { font-size: 24px; font-weight: bold; color: #000000; margin-top: 20px; padding: 20px; border: 2px solid #000000; text-align: center; line-height: 1.4; min-height: 60px; display: flex; align-items: center; justify-content: center; }
+        .header-topic { font-size: 24px; font-weight: bold; color: #000000; margin-top: 20px; padding: 20px; border: 2px solid #000000; text-align: center; line-height: 1.4; min-height: 60px; white-space: pre-wrap; word-wrap: break-word; }
         .card { background: #ffffff; border: none; border-top: 1px solid #000000; border-bottom: 1px solid #000000; padding: 30px 0; margin-bottom: 40px; }
         .card h2 { font-family: Georgia, serif; font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
         .participants-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px; margin-bottom: 30px; }
@@ -1344,6 +1503,34 @@ HTML_TEMPLATE = """
         .post-text ul, .post-text ol { margin: 15px 0; padding-left: 30px; }
         .post-text li { margin-bottom: 10px; line-height: 1.7; }
         .post-text li::marker { font-weight: bold; }
+        
+        /* Стили для ролей */
+        .role-badge { 
+            display: inline-block; 
+            padding: 2px 8px; 
+            border-radius: 3px; 
+            font-size: 11px; 
+            font-weight: bold; 
+            margin-right: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .role-participant { 
+            background: #e3f2fd; 
+            color: #1976d2; 
+            border: 1px solid #1976d2;
+        }
+        .role-moderator { 
+            background: #fff3e0; 
+            color: #f57c00; 
+            border: 1px solid #f57c00;
+        }
+        .role-judge { 
+            background: #f3e5f5; 
+            color: #7b1fa2; 
+            border: 1px solid #7b1fa2;
+        }
+        
         .search-info { background: transparent; padding: 20px 0 0 0; margin-top: 25px; font-size: 14px; color: #000000; font-style: italic; border-top: 1px solid #000000; }
         .search-info strong { font-weight: normal; font-style: normal; text-transform: uppercase; letter-spacing: 2px; display: block; margin-bottom: 10px; font-size: 13px; }
         .search-query { display: inline; margin-right: 12px; }
@@ -1516,11 +1703,23 @@ HTML_TEMPLATE = """
         
         function renderParticipantsSetup() {
             const container = document.getElementById('participantsSetup');
-            container.innerHTML = participants.map((p, idx) => `
-                <div class="participant-card">
+            container.innerHTML = participants.map((p, idx) => {
+                // Определяем роль и стиль
+                let roleBadge = '';
+                if (p.is_moderator) {
+                    roleBadge = '<span class="role-badge role-moderator" style="position:absolute;top:10px;right:10px;">🎬 МОДЕРАТОР</span>';
+                } else if (p.is_judge) {
+                    roleBadge = '<span class="role-badge role-judge" style="position:absolute;top:10px;right:10px;">⚖️ СУДЬЯ</span>';
+                } else {
+                    roleBadge = '<span class="role-badge role-participant" style="position:absolute;top:10px;right:10px;">🎭 УЧАСТНИК</span>';
+                }
+                
+                return `
+                <div class="participant-card" style="position:relative;">
+                    ${roleBadge}
                     <div class="avatar-container">
                         <div class="avatar-preview" id="avatar-preview-${idx}" onclick="openAvatarModal(${idx})">
-                            ${p.avatar_url ? `<img src="${p.avatar_url}">` : (p.avatar_emoji || (p.is_moderator ? '🎬' : '📣'))}
+                            ${p.avatar_url ? `<img src="${p.avatar_url}">` : (p.avatar_emoji || (p.is_moderator ? '🎬' : (p.is_judge ? '⚖️' : '📣')))}
                         </div>
                     </div>
                     <div class="input-group">
@@ -1543,9 +1742,10 @@ HTML_TEMPLATE = """
                         <label>Инструкция</label>
                         <textarea id="instruction-${idx}" ${debateRunning ? 'readonly' : ''} placeholder="Дополнительная инструкция..." onchange="updateParticipant(${idx}, 'instruction', this.value)">${p.instruction || ''}</textarea>
                     </div>
-                    <div style="font-size:12px;color:#999;margin-top:10px;">Модель: ${p.model} | Пол: ${p.gender === 'male' ? '♂' : '♀'} ${p.is_moderator ? '| Режиссёр' : ''}</div>
+                    <div style="font-size:12px;color:#999;margin-top:10px;">Модель: ${p.model} | Пол: ${p.gender === 'male' ? '♂' : '♀'}</div>
                 </div>
-            `).join('');
+                `;
+            }).join('');
         }
         
         function updateParticipant(idx, field, value) { participants[idx][field] = value; }
@@ -1659,9 +1859,17 @@ HTML_TEMPLATE = """
             let avatarHtml = post.avatar_url ? `<img src="${post.avatar_url}" onclick="showAvatarFull('${post.avatar_url}')">` : `<div class="emoji">${emoji}</div>`;
             let searchInfo = '';
             if (post.search_count > 0) { searchInfo = `<div class="search-info"><strong>Источники</strong>${post.search_queries.map(q => `<span class="search-query">"${q}"</span>`).join('')}</div>`; }
+            
+            // Определяем стиль для роли
+            const role = post.role || 'participant';
+            const roleIcon = post.role_icon || '🎭';
+            const roleName = post.role_name || 'Участник';
+            const roleClass = `role-${role}`;
+            
             const postDiv = document.createElement('div');
-            postDiv.className = 'post';
-            postDiv.innerHTML = `<div class="post-avatar">${avatarHtml}</div><div class="post-content"><div class="post-header"><div><div class="post-author">${post.display_name}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div><div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            postDiv.className = `post`;
+            const genderSymbol = post.gender === 'male' ? '♂' : '♀';
+            postDiv.innerHTML = `<div class="post-avatar">${avatarHtml}</div><div class="post-content"><div class="post-header"><div><div class="post-author"><span class="role-badge ${roleClass}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div><div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
             postsDiv.appendChild(postDiv);
         }
         
@@ -1741,7 +1949,19 @@ HTML_TEMPLATE = """
                 document.getElementById('participantsDisplay').innerHTML = participants.map(p => {
                     const instruction = currentInstructions[p.display_name];
                     const genderSymbol = p.gender === 'male' ? '♂' : '♀';
-                    let html = `<div style="margin-bottom:12px;"><strong>${p.display_name}</strong> <small>(${p.model} ${genderSymbol})</small>`;
+                    
+                    // Определяем иконку роли
+                    let roleIcon = '🎭';
+                    let roleLabel = ' <span style="color:#1976d2;font-size:11px;font-weight:bold;">УЧАСТНИК</span>';
+                    if (p.is_moderator) {
+                        roleIcon = '🎬';
+                        roleLabel = ' <span style="color:#f57c00;font-size:11px;font-weight:bold;">МОДЕРАТОР</span>';
+                    } else if (p.is_judge) {
+                        roleIcon = '⚖️';
+                        roleLabel = ' <span style="color:#7b1fa2;font-size:11px;font-weight:bold;">СУДЬЯ</span>';
+                    }
+                    
+                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${p.display_name}</strong>${roleLabel} <small>(${p.model} ${genderSymbol})</small>`;
                     if (instruction) {
                         html += `<br><em style="margin-left:10px;">${instruction}</em>`;
                     }
@@ -1927,12 +2147,25 @@ HTML_TEMPLATE = """
                 container.innerHTML = '<div style="color:#666;font-style:italic;font-size:13px;">Нет AI-участников для редактирования</div>';
                 return;
             }
-            container.innerHTML = participantInstructions.map((p, idx) => `
-                <div style="margin-bottom:15px;padding:10px;border:1px solid #ccc;border-radius:4px;">
-                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${p.name}:</label>
-                    <textarea id="participant-instr-edit-${idx}" rows="3" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${p.name}...">${p.instruction || ''}</textarea>
+            container.innerHTML = participantInstructions.map((p, idx) => {
+                // Определяем роль участника
+                let roleBadge = '<span class="role-badge role-participant">🎭 УЧАСТНИК</span>';
+                let borderColor = '#ccc';
+                let rows = 3;
+                
+                if (p.is_judge) {
+                    roleBadge = '<span class="role-badge role-judge">⚖️ СУДЬЯ</span>';
+                    borderColor = '#7b1fa2';
+                    rows = 8; // Больше строк для судьи
+                }
+                
+                return `
+                <div style="margin-bottom:15px;padding:10px;border:2px solid ${borderColor};border-radius:4px;background:${p.is_judge ? '#fafafa' : 'white'};">
+                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${roleBadge} ${p.name}:</label>
+                    ${p.is_judge ? '<div style="font-size:11px;color:#666;margin-bottom:5px;font-style:italic;">Системный промпт судьи (можно редактировать):</div>' : ''}
+                    <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${p.name}...">${p.instruction || ''}</textarea>
                 </div>
-            `).join('');
+            `}).join('');
         }
         
         function addStaticInstructionEditor() {
@@ -2055,7 +2288,8 @@ def get_participants():
             "avatar_keywords": profession,
             "avatar_emoji": emoji,
             "gender": gender,
-            "is_moderator": p.get("is_moderator", False)
+            "is_moderator": p.get("is_moderator", False),
+            "is_judge": p.get("is_judge", False)
         })
     
     return jsonify({
@@ -2073,9 +2307,11 @@ def get_avatar(keywords):
 
 @app.route('/api/avatar/<keywords>', methods=['POST'])
 def refresh_avatar(keywords):
+    print(f"🔍 Запрос аватара для: {keywords}")
     try:
         data = request.get_json(force=True, silent=True) or {}
         participant_idx = data.get('participant_idx')
+        print(f"📋 Индекс участника: {participant_idx}")
         
         if participant_idx is None:
             return jsonify({"error": "participant_idx не указан"}), 400
@@ -2137,8 +2373,11 @@ def start():
     if not models_status["ok"]:
         problem = models_problem_message(models_status)
         print(f"⛔ Спектакль не начат: {problem}")
+        # Сбрасываем running чтобы можно было попробовать снова
+        session.running = False
         return jsonify({"success": False, "error": problem})
     
+    print(f"🎭 Запускаем спектакль с {len(participants_data)} участниками")
     session.reset(topic, participants_data, avatars, instructions, avatar_emojis, static_instructions)
     
     print(f"🎭 Готовые персонажи: {avatars}")
@@ -2236,9 +2475,11 @@ def get_moderator_instructions():
         if participant.get("model") != "human":  # Только AI участники
             name = participant.get("display_name", "")
             instruction = session.instructions.get(name, "")
+            
             participant_instructions.append({
                 "name": name,
-                "instruction": instruction
+                "instruction": instruction,
+                "is_judge": participant.get("is_judge", False)
             })
     
     return jsonify({
@@ -2321,8 +2562,12 @@ if __name__ == "__main__":
     print("=" * 50)
     print(f"Персонажей:  {len(PARTICIPANTS)}")
     for i, p in enumerate(PARTICIPANTS, 1):
-        is_mod = " (режиссёр)" if p.get("is_moderator") else ""
-        print(f"  Персонаж {i}: модель {p['model']}{is_mod}")
+        role = ""
+        if p.get("is_moderator"):
+            role = " (режиссёр)"
+        elif p.get("is_judge"):
+            role = " (судья)"
+        print(f"  Персонаж {i}: модель {p['model']}{role}")
     
     # Проверяем, что модели реально скачаны: иначе спектакль упадёт уже на сцене
     report_models_status([p["model"] for p in PARTICIPANTS])
