@@ -34,7 +34,9 @@ from flask_socketio import SocketIO, emit
 # или на консоли с кодировкой cp1251/ascii печать падает с UnicodeEncodeError.
 for _stream in (sys.stdout, sys.stderr):
     try:
-        _stream.reconfigure(encoding="utf-8", errors="replace")
+        # line_buffering: при перенаправлении вывода (`python ollama_debate_web.py > log.txt`)
+        # иначе всё копится блоками и предупреждения видны только в конце
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     except (AttributeError, ValueError):
         pass
 
@@ -124,6 +126,14 @@ UNLOAD_AFTER_DEBATE = True
 UNLOAD_OTHER_MODELS = True
 MODELS_CACHE_TTL = 5  # секунд: на столько кэшируется список моделей Ollama
 
+# Проверка, влезет ли модель в видеопамять. Считаем «нужно» = веса + KV-кэш
+# и сравниваем с VRAM_SAFETY_FACTOR от всего объёма: остаток оставляем буферам
+# вычислений и рабочему столу.
+VRAM_SAFETY_FACTOR = 0.9
+KV_CACHE_BYTES_PER_ELEM = 2  # Ollama держит KV-кэш в f16 по умолчанию
+VRAM_SAFE_MIN_CTX = 2048     # ниже этого контекста спектакль уже не работает
+VRAM_SAFE_CTX_STEP = 1024    # предлагаемые num_ctx округляем до этого шага
+
 # Оптимизация GPU
 OPTIONS = {
     "num_ctx": 16384,
@@ -149,6 +159,20 @@ LOADED_MODELS_CACHE_TTL = 1.5  # секунд
 _GPU_MEMORY_CACHE = {"at": 0.0, "info": {}}
 GPU_MEMORY_CACHE_TTL = 10  # секунд
 
+# Метаданные моделей (/api/show): {имя: model_info}
+_MODEL_INFO_CACHE = {}
+
+# Измеренные размеры моделей в памяти: {имя: {"ctx", "size", "size_vram"}}.
+# Файл рядом с проектом, чтобы после перезапуска оценка была точной, а не только
+# по размеру файла модели.
+_VRAM_MEASUREMENTS = {}
+VRAM_MEASUREMENTS_FILE = Path(__file__).resolve().parent / ".vram_cache.json"
+
+# Настройки, которые не должны теряться при перезапуске (правила судьи)
+SETTINGS_FILE = Path(__file__).resolve().parent / ".theatre_settings.json"
+# Чтобы не повторять одно и то же предупреждение на каждом опросе статуса
+_RAM_SPILL_WARNED = set()
+
 # Кэш для хранения URL аватаров по ключам (чтобы не искать повторно)
 AVATAR_URL_CACHE = {}  # {"avatar_keywords": "image_url"}
 
@@ -166,6 +190,16 @@ DEFAULT_STATIC_INSTRUCTIONS = [
     'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
     'Используй поиск в интернете для фактологических утверждений.',
     'При поиске НЕ указывай годы.'
+]
+
+# Правила для роли судьи: их можно менять прямо в интерфейсе
+# (кнопка «Редактировать инструкции и руководства» на ходу режиссёра)
+DEFAULT_JUDGE_RULES = [
+    'Ты — {ИМЯ}, независимый судья этого спора.',
+    'Тема обсуждения: "{ТЕМА}".',
+    'Ты оцениваешь выступления участников: {СОБЕСЕДНИКИ}.',
+    'Отвечай на русском языке.',
+    'Будь объективным и кратким.'
 ]
 
 # Дефолтная инструкция для судьи
@@ -636,6 +670,14 @@ def fetch_loaded_models(force: bool = False, timeout: int = 5) -> tuple:
     except Exception as e:
         error = str(e)
     
+    if not error:
+        for loaded in models:
+            # Запоминаем реальные размеры: следующая оценка «влезет/не влезет»
+            # станет точной, а не по размеру файла
+            record_vram_measurement(
+                loaded["name"], loaded["context_length"], loaded["size"], loaded["size_vram"])
+            warn_if_partially_in_ram(loaded)
+    
     _LOADED_MODELS_CACHE = {"at": time.monotonic(), "models": models, "error": error}
     return models, error
 
@@ -676,6 +718,308 @@ def fetch_gpu_memory() -> dict:
     
     _GPU_MEMORY_CACHE = {"at": time.monotonic(), "info": info}
     return info
+
+# ============================================================
+# ВЛЕЗЕТ ЛИ МОДЕЛЬ В ВИДЕОПАМЯТЬ (num_ctx и подсказка безопасного значения)
+# ============================================================
+
+def load_theatre_settings():
+    """
+    Возвращает правила судьи, сохранённые в прошлых запусках: имена участников
+    каждый спектакль новые, а правила судьи - общая настройка роли.
+    """
+    try:
+        if SETTINGS_FILE.exists():
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            rules = data.get("judge_rules")
+            if isinstance(rules, list) and rules:
+                session.judge_rules = [str(r) for r in rules]
+                print(f"⚖️  Загружены сохранённые правила судьи: {len(session.judge_rules)} пунктов")
+    except Exception as e:
+        print(f"  ⚠️  Не читается {SETTINGS_FILE.name}: {e}")
+
+def save_theatre_settings():
+    try:
+        SETTINGS_FILE.write_text(
+            json.dumps({"judge_rules": session.judge_rules}, ensure_ascii=False, indent=1),
+            encoding="utf-8")
+    except Exception as e:
+        print(f"  ⚠️  Не сохраняется {SETTINGS_FILE.name}: {e}")
+
+def resolve_model_name(model: str, available: dict) -> str:
+    """«r1» -> «r1:latest»: имя, под которым модель реально лежит в Ollama."""
+    if not model:
+        return ""
+    if model in available:
+        return model
+    if ":" in model:
+        return model
+    tagged = f"{model}:latest"
+    return tagged if tagged in available else model
+
+def fetch_model_info(model: str) -> dict:
+    """
+    Метаданные модели через /api/show (блоки, головы, длины ключей) - по ним
+    считаем размер KV-кэша. Веса не грузятся, ответ кэшируется.
+    """
+    if not model:
+        return {}
+    if model in _MODEL_INFO_CACHE:
+        return _MODEL_INFO_CACHE[model]
+    
+    info = {}
+    try:
+        req = urllib.request.Request(
+            OLLAMA_SHOW_URL,
+            data=json.dumps({"model": model}).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            info = json.loads(response.read().decode('utf-8')).get("model_info", {}) or {}
+    except Exception as e:
+        print(f"  ⚠️  Не удалось прочитать метаданные модели {model}: {e}")
+    
+    _MODEL_INFO_CACHE[model] = info
+    return info
+
+def kv_bytes_per_token(info: dict) -> int:
+    """
+    Сколько KV-кэша съедает один токен контекста.
+    У гибридных архитектур (Qwen3.5 и подобные) полноценное внимание только
+    у каждого full_attention_interval-го блока, остальные - линейные/SSM слои
+    с постоянным состоянием: без этой поправки оценка врёт в разы.
+    """
+    arch = info.get("general.architecture", "") or ""
+    prefix = f"{arch}." if arch else ""
+    
+    blocks = as_int(info.get(prefix + "block_count"))
+    if not blocks:
+        return 0
+    
+    interval = as_int(info.get(prefix + "full_attention_interval"))
+    attention_blocks = max(1, blocks // interval) if interval > 1 else blocks
+    
+    head_count = max(1, as_int(info.get(prefix + "attention.head_count")))
+    kv_heads = as_int(info.get(prefix + "attention.head_count_kv")) or head_count
+    head_dim = as_int(info.get(prefix + "attention.key_length"))
+    if not head_dim:
+        head_dim = max(1, as_int(info.get(prefix + "embedding_length")) // head_count)
+    
+    # ключи и значения одного размера
+    return 2 * attention_blocks * kv_heads * head_dim * KV_CACHE_BYTES_PER_ELEM
+
+def estimated_kv_bytes(info: dict, num_ctx: int) -> int:
+    """
+    KV-кэш под весь контекст. У моделей со скользящим окном кэш таких слоёв
+    ограничен окном, а не всем контекстом.
+    """
+    per_token = kv_bytes_per_token(info)
+    if not per_token:
+        return 0
+    
+    arch = info.get("general.architecture", "") or ""
+    window = as_int(info.get(f"{arch}.attention.sliding_window"))
+    if window and window < num_ctx:
+        return per_token * window
+    return per_token * num_ctx
+
+def load_vram_measurements():
+    """Подхватывает размеры моделей, измеренные в прошлых запусках."""
+    global _VRAM_MEASUREMENTS
+    try:
+        if VRAM_MEASUREMENTS_FILE.exists():
+            data = json.loads(VRAM_MEASUREMENTS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _VRAM_MEASUREMENTS = {k: v for k, v in data.items() if isinstance(v, dict)}
+    except Exception as e:
+        print(f"  ⚠️  Не читается {VRAM_MEASUREMENTS_FILE.name}: {e}")
+
+def save_vram_measurements():
+    try:
+        VRAM_MEASUREMENTS_FILE.write_text(
+            json.dumps(_VRAM_MEASUREMENTS, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"  ⚠️  Не сохраняется {VRAM_MEASUREMENTS_FILE.name}: {e}")
+
+def record_vram_measurement(name: str, ctx: int, size: int, size_vram: int):
+    """
+    Запоминает реальный размер модели в памяти при известном контексте.
+    Больший контекст точнее для оценки, поэтому старую запись перезаписывает
+    только такая же или более подробная.
+    """
+    if not name or ctx <= 0 or size <= 0:
+        return
+    
+    old = _VRAM_MEASUREMENTS.get(name)
+    if old and as_int(old.get("ctx")) >= ctx and as_int(old.get("size")) == size:
+        return
+    
+    _VRAM_MEASUREMENTS[name] = {"ctx": ctx, "size": size, "size_vram": size_vram}
+    save_vram_measurements()
+
+def vram_base_bytes(resolved_name: str, info: dict, available: dict) -> tuple:
+    """
+    Сколько занимает модель БЕЗ KV-кэша под num_ctx, и точная ли это цифра.
+    Точная, если модель уже измерена в /api/ps. Иначе берём размер файла: у него
+    нет буферов вычислений, зато сверху есть запас VRAM_SAFETY_FACTOR.
+    """
+    per_token = kv_bytes_per_token(info)
+    measured = _VRAM_MEASUREMENTS.get(resolved_name)
+    if measured and per_token:
+        base = as_int(measured.get("size")) - per_token * as_int(measured.get("ctx"))
+        return max(0, base), True
+    return as_int(available.get(resolved_name)), False
+
+def estimate_vram_need(model: str, num_ctx: int, available: dict) -> dict:
+    """Сколько VRAM нужно модели при заданном num_ctx (веса + KV-кэш)."""
+    resolved = resolve_model_name(model, available)
+    info = fetch_model_info(resolved)
+    base, measured = vram_base_bytes(resolved, info, available)
+    kv = estimated_kv_bytes(info, num_ctx)
+    return {
+        "model": model,
+        "resolved": resolved,
+        "num_ctx": num_ctx,
+        "base": base,
+        "kv": kv,
+        "need": base + kv,
+        "measured": measured,
+    }
+
+def suggest_safe_ctx(model: str, num_ctx: int, budget: int, available: dict) -> tuple:
+    """
+    Наибольший num_ctx, при котором модель ещё влезает в бюджет VRAM.
+    Возвращает (num_ctx | None, сколько_байт_нужно | 0).
+    """
+    resolved = resolve_model_name(model, available)
+    info = fetch_model_info(resolved)
+    per_token = kv_bytes_per_token(info)
+    if not per_token:
+        return None, 0
+    
+    base, _ = vram_base_bytes(resolved, info, available)
+    room = budget - base
+    if room < per_token * VRAM_SAFE_MIN_CTX:
+        return None, 0
+    
+    safe = min(num_ctx, room // per_token)
+    safe = (safe // VRAM_SAFE_CTX_STEP) * VRAM_SAFE_CTX_STEP
+    if safe < VRAM_SAFE_MIN_CTX:
+        return None, 0
+    
+    return safe, base + per_token * safe
+
+def check_vram_fit(models: list, num_ctx: int = None) -> dict:
+    """
+    Проверяет, влезут ли модели спектакля в видеопамять при текущем num_ctx.
+    Ничего не грузит: только /api/show, /api/tags и уже измеренные размеры.
+    """
+    num_ctx = as_int(num_ctx) or as_int(OPTIONS.get("num_ctx")) or 4096
+    gpu = fetch_gpu_memory()
+    
+    result = {
+        "checked": False,
+        "ok": True,
+        "num_ctx": num_ctx,
+        "gpu_total": as_int(gpu.get("total")),
+        "budget": 0,
+        "warnings": [],
+        "error": "",
+    }
+    if not result["gpu_total"]:
+        result["error"] = "объём видеопамяти неизвестен (nvidia-smi не отвечает)"
+        return result
+    
+    available, models_error = fetch_ollama_models()
+    if models_error:
+        result["error"] = models_error
+        return result
+    
+    result["checked"] = True
+    result["budget"] = int(result["gpu_total"] * VRAM_SAFETY_FACTOR)
+    
+    for model in dict.fromkeys(models or []):
+        if not model or model == "human":
+            continue
+        if not model_is_installed(model, set(available.keys())):
+            continue  # про отсутствующие модели сообщает отдельная проверка
+        
+        est = estimate_vram_need(model, num_ctx, available)
+        if est["need"] <= result["budget"]:
+            continue
+        
+        safe_ctx, safe_need = suggest_safe_ctx(model, num_ctx, result["budget"], available)
+        result["warnings"].append({
+            "model": model,
+            "resolved": est["resolved"],
+            "need": est["need"],
+            "safe_ctx": safe_ctx,
+            "safe_need": safe_need,
+            "measured": est["measured"],
+        })
+    
+    result["ok"] = not result["warnings"]
+    return result
+
+def vram_warning_lines(status: dict) -> list:
+    """Человекочитаемые строки про нехватку видеопамяти - для лога и интерфейса."""
+    if not status.get("checked") or status.get("ok"):
+        return []
+    
+    budget_gb = status["budget"] / 1e9
+    lines = []
+    for w in status["warnings"]:
+        if w["safe_ctx"]:
+            advice = f"безопасный num_ctx: {w['safe_ctx']} (тогда нужно ~{w['safe_need'] / 1e9:.1f} ГБ)"
+        else:
+            advice = "даже с минимальным контекстом не влезает целиком - часть считает процессор"
+        tail = "" if w["measured"] else " [оценка по размеру файла]"
+        lines.append(
+            f"{w['model']}: при num_ctx {status['num_ctx']} нужно ~{w['need'] / 1e9:.1f} ГБ, "
+            f"а доступно ~{budget_gb:.1f} ГБ из {status['gpu_total'] / 1e9:.1f} ГБ. {advice}{tail}"
+        )
+    return lines
+
+def vram_spill_bytes(loaded: dict, gpu_total: int = 0) -> int:
+    """
+    Сколько памяти модели физически не поместилось в видеокарту.
+    Два сигнала:
+      • Ollama сама сказала, что положила в VRAM меньше, чем занимает модель;
+      • Ollama заявила больше, чем на карте есть - так бывает на Windows, где
+        часть памяти уходит в общую, и её считает процессор.
+    """
+    total, vram = as_int(loaded.get("size")), as_int(loaded.get("size_vram"))
+    if not total or not vram:
+        return 0
+    if gpu_total and vram > gpu_total:
+        return max(0, total - gpu_total)
+    if vram < total:
+        return total - vram
+    return 0
+
+def warn_if_partially_in_ram(loaded: dict):
+    """
+    Если модель не поместилась в видеопамять целиком, остальное считает
+    процессор - это заметно медленнее. Сообщаем один раз на модель и контекст,
+    иначе предупреждение повторялось бы на каждом опросе статуса.
+    """
+    spill = vram_spill_bytes(loaded, as_int(fetch_gpu_memory().get("total")))
+    if not spill:
+        return
+    
+    total = as_int(loaded.get("size"))
+    ctx = as_int(loaded.get("context_length"))
+    key = (loaded.get("name"), ctx)
+    if key in _RAM_SPILL_WARNED:
+        return
+    _RAM_SPILL_WARNED.add(key)
+    
+    print(f"  ⚠️  {loaded['name']}: занимает {total / 1e9:.1f} ГБ, из них ~{spill / 1e9:.1f} ГБ "
+          f"не поместились в видеопамять и считаются процессором (num_ctx={ctx}). "
+          f"Уменьшите num_ctx.")
+
+# Размеры моделей, измеренные в прошлых запусках: с ними подсказки num_ctx точные
+load_vram_measurements()
 
 def unload_other_show_models(current_model: str, show_models: set):
     """
@@ -736,6 +1080,19 @@ def report_models_status(models: list):
         parts = " + ".join(f"{m} {s / 1e9:.1f}" for m, s in sizes.items())
         total = sum(sizes.values()) / 1e9
         print(f"  📦 На диске: {parts} = {total:.1f} ГБ (в памяти держится только текущий говорящий)")
+    
+    # Влезут ли модели в видеопамять при текущем num_ctx
+    vram_status = check_vram_fit(models)
+    vram_lines = vram_warning_lines(vram_status)
+    if vram_lines:
+        print(f"  ⚠️  Не хватает видеопамяти (num_ctx {vram_status['num_ctx']}):")
+        for line in vram_lines:
+            print(f"     • {line}")
+        print("     Спектакль пойдёт, но такие модели будут считать заметно медленнее")
+    elif vram_status.get("checked"):
+        print(f"  ✅ Видеопамяти хватает на num_ctx {vram_status['num_ctx']}")
+    elif vram_status.get("error"):
+        print(f"  ℹ️  Проверка видеопамяти пропущена: {vram_status['error']}")
     
     loaded, _ = fetch_loaded_models(force=True)
     if loaded:
@@ -870,6 +1227,10 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
     participant_name_normalized = participant_name.lower().replace(" ", "_")
     
     for iteration in range(max_iterations):
+        # Режиссёр завершил спектакль - не тратим время на новые поиски
+        if session.moderator_finished and content and content.strip():
+            return content, search_count, search_queries
+        
         # Если нужен принудительный поиск - передаём tool_choice="any"
         current_tool_choice = "any" if force_tool_use else None
         
@@ -957,7 +1318,7 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
         if not has_search:
             break
     
-    if not content or not content.strip():
+    if (not content or not content.strip()) and not session.moderator_finished:
         messages.append({
             "role": "user",
             "content": "Дай свой финальный ответ на русском языке.",
@@ -1059,6 +1420,7 @@ class DebateSession:
         self.avatar_emojis = {}  # {"display_name": "🎭"}
         self.instructions = {}
         self.static_instructions = []  # Настраиваемые статичные инструкции
+        self.judge_rules = list(DEFAULT_JUDGE_RULES)  # настраиваемые правила судьи
         self.waiting_for_human = False
         self.moderator_message = None
         self.moderator_finished = False
@@ -1066,7 +1428,8 @@ class DebateSession:
         self.conversation_history = []
     
     def reset(self, topic: str, runtime_participants: list, avatars: dict, 
-              instructions: dict, avatar_emojis: dict = None, static_instructions: list = None):
+              instructions: dict, avatar_emojis: dict = None, static_instructions: list = None,
+              judge_rules: list = None):
         """Сброс состояния для новых дебатов"""
         self.running = True
         self.topic = topic
@@ -1080,6 +1443,9 @@ class DebateSession:
         self.avatar_emojis = avatar_emojis or {}
         self.instructions = instructions
         self.static_instructions = static_instructions or []
+        # Правила судьи - глобальная настройка, а не свойство спектакля: при новом
+        # спектакле они сохраняются, иначе правки модератора терялись бы
+        self.judge_rules = list(judge_rules) if judge_rules else (self.judge_rules or list(DEFAULT_JUDGE_RULES))
         self.waiting_for_human = False
         self.moderator_message = None
         self.moderator_finished = False
@@ -1150,15 +1516,9 @@ class DebateSession:
         
         # Определяем правила общения (статичные инструкции)
         if is_judge:
-            # Для судьи используем специальные правила
-            rules = [
-                'Ты — {ИМЯ}, независимый судья этого спора.',
-                'Тема обсуждения: "{ТЕМА}".',
-                'Ты оцениваешь выступления участников: {СОБЕСЕДНИКИ}.',
-                'Отвечай на русском языке.',
-                'Будь объективным и кратким.'
-            ]
-            print(f"  ⚖️  Используем правила судьи для {participant['display_name']}")
+            # Правила судьи настраиваются в интерфейсе, по умолчанию - DEFAULT_JUDGE_RULES
+            rules = [instr for instr in (self.judge_rules or DEFAULT_JUDGE_RULES) if instr.strip()]
+            print(f"  ⚖️  Используем правила судьи для {participant['display_name']} ({len(rules)} пунктов)")
         elif self.static_instructions and len(self.static_instructions) > 0:
             rules = [instr for instr in self.static_instructions if instr.strip()]
             print(f"  📋 Используем пользовательские правила для {participant['display_name']}: {len(rules)} пунктов")
@@ -1414,6 +1774,9 @@ class DebateSession:
 # Глобальный экземпляр сессии
 session = DebateSession()
 
+# Правила судьи из прошлых запусков (можно менять в интерфейсе на ходу режиссёра)
+load_theatre_settings()
+
 def run_debate_thread(topic: str):
     print(f"🎬 Поток дебатов запущен для темы: {topic}")
     runtime_participants = session.runtime_participants
@@ -1427,7 +1790,8 @@ def run_debate_thread(topic: str):
         return
     
     # Модели этого спектакля: их выгружаем по окончании и держим по одной в памяти
-    show_models = {p["model"] for p in runtime_participants if p.get("model") != "human"}
+    show_models = {p.get("model", "") for p in runtime_participants
+                   if p.get("model") and p.get("model") != "human"}
     
     print("\n🎭 Используем подготовленный грим и костюмы...")
     for participant in runtime_participants:
@@ -1445,13 +1809,19 @@ def run_debate_thread(topic: str):
             session.current_round = round_num
             print(f"\n🎭 Акт {round_num}")
             
-            print(f"  🎭 Персонажи: {[p['display_name'] + ' (' + p['model'] + ')' for p in runtime_participants]}")
+            print(f"  🎭 Персонажи: {[p.get('display_name', '') + ' (' + p.get('model', '') + ')' for p in runtime_participants]}")
             
             for participant in runtime_participants:
-                print(f"  🎭 На сцене: {participant['display_name']} (модель: {participant['model']})")
-                session.current_participant = participant["display_name"]
+                # Режиссёр мог завершить спектакль прямо посреди акта: тогда не ждём
+                # конца круга, а останавливаемся на ближайшем участнике
+                if session.moderator_finished:
+                    print("  ⏹  Режиссёр завершил спектакль - прерываю акт")
+                    break
                 
-                if participant["model"] == "human":
+                print(f"  🎭 На сцене: {participant.get('display_name', '')} (модель: {participant.get('model', '')})")
+                session.current_participant = participant.get("display_name", "")
+                
+                if participant.get("model") == "human":
                     session.moderator_message = None
                     session.current_action = None
                     time.sleep(0.2)
@@ -1475,7 +1845,7 @@ def run_debate_thread(topic: str):
                             
                             if current_message.strip():
                                 post = session.add_post(
-                                    display_name=participant["display_name"],
+                                    display_name=participant.get("display_name", ""),
                                     model_used="human",
                                     content=current_message,
                                     round_num=round_num,
@@ -1484,10 +1854,10 @@ def run_debate_thread(topic: str):
                                     is_moderator=participant.get("is_moderator", False),
                                     gender=participant.get("gender", "male")
                                 )
-                                print(f"🎬 {participant['display_name']}: {current_message[:50]}")
+                                print(f"🎬 {participant.get('display_name', '')}: {current_message[:50]}")
                                 socketio.emit('new_post', post)
                             else:
-                                print(f"🎬 {participant['display_name']} пропустил действие")
+                                print(f"🎬 {participant.get('display_name', '')} пропустил действие")
                             
                             session.moderator_message = None
                             session.current_action = None
@@ -1497,7 +1867,7 @@ def run_debate_thread(topic: str):
                         break
                 else:
                     # В памяти оставляем только того, кто сейчас говорит
-                    unload_other_show_models(participant["model"], show_models)
+                    unload_other_show_models(participant.get("model", ""), show_models)
                     
                     session.current_action = "thinking"
                     
@@ -1653,6 +2023,7 @@ HTML_TEMPLATE = """
                         <textarea id="topicInput" rows="3" placeholder="Опишите сюжет сцены..."></textarea>
                     </div>
                     <div id="modelsWarning" style="display:none;margin-bottom:20px;padding:15px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
+                    <div id="vramWarning" style="display:none;margin-bottom:20px;padding:15px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
                     <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
                     <button class="btn btn-secondary" id="newBtn" onclick="resetDebate()" style="display:none;">🎭 Новый спектакль</button>
                     <div style="margin-top:10px;font-size:12px;color:#666;">Ctrl+Enter для отправки</div>
@@ -1677,7 +2048,11 @@ HTML_TEMPLATE = """
                         <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
                         <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()">Завершить спектакль</button>
                     </div>
-                    <div style="margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки</div>
+                    <div style="display:flex; gap:10px; align-items:center; margin-bottom:15px;">
+                        <input id="topicChangeInput" type="text" style="flex:1; padding:10px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif;" placeholder="Сменить тему обсуждения..." onkeydown="if (event.key === 'Enter') { event.preventDefault(); changeTopic(); }">
+                        <button class="btn btn-secondary" onclick="changeTopic()" style="margin:0;">🎯 Сменить тему</button>
+                    </div>
+                    <div style="margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки • смена темы сразу попадает в системные промпты участников</div>
                     
                     <!-- Панель редактирования инструкций и руководств -->
                     <div style="border-top:1px solid #000; padding-top:20px; margin-top:20px;">
@@ -1696,6 +2071,14 @@ HTML_TEMPLATE = """
                                 <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Руководства (указания модератора):</label>
                                 <div id="moderatorMessagesEditor"></div>
                                 <button class="btn btn-secondary" onclick="addModeratorMessageEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить руководство</button>
+                            </div>
+                            
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">⚖️ Правила для роли судьи:</label>
+                                <div style="font-size:12px;color:#666;margin-bottom:10px;">Плейсхолдеры: <code>{ИМЯ}</code>, <code>{СОБЕСЕДНИКИ}</code>, <code>{ТЕМА}</code></div>
+                                <div id="judgeRulesEditor"></div>
+                                <button class="btn btn-secondary" onclick="addJudgeRuleEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить правило судьи</button>
+                                <div style="font-size:12px;color:#666;margin-top:10px;font-style:italic;">Личный системный промпт судьи — ниже, в блоке «Индивидуальные инструкции».</div>
                             </div>
                             
                             <div style="margin-bottom:20px;">
@@ -1740,19 +2123,43 @@ HTML_TEMPLATE = """
         <span class="modal-close">&times;</span>
         <img class="modal-content" id="avatarModalImg">
     </div>
+    <!-- Клиент Socket.IO лежит рядом с проектом: свежие посты приходят сразу,
+         а опрос /api/status остаётся страховкой -->
+    <script src="/static/socket.io.min.js"></script>
     <script>
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        }
+        
         let participants = [];
         let debateRunning = false;
         let pollInterval = null;
         let lastPostCount = 0;
         let staticInstructions = [];
+        let instructionsTick = 0;
+        let defaultJudgePrompt = '';  // им заполняется пустое поле промпта судьи
         
         // Загружаем участников и статичные инструкции
         fetch('/api/participants')
             .then(r => r.json())
-            .then(data => { participants = data.participants; renderParticipantsSetup(); renderModelsWarning(data.models_status); });
+            .then(data => { participants = data.participants; renderParticipantsSetup(); renderModelsWarning(data.models_status); renderVramWarning(data.vram_status); });
         
         refreshMemory();  // сразу видно, что уже загружено в Ollama (могут быть чужие модели)
+        
+        // Socket.IO - ускоритель: по событию new_post сразу тянем статус, поэтому
+        // реплика появляется без задержки в 3 секунды. Если клиент не загрузился,
+        // страница молча живёт на polling'е.
+        let socket = null;
+        if (typeof io === 'function') {
+            try {
+                socket = io();
+                ['new_post', 'state_update'].forEach(evt =>
+                    socket.on(evt, () => { if (debateRunning) updatePosts(); }));
+            } catch (e) {
+                console.warn('Socket.IO недоступен, обновляемся опросом:', e);
+                socket = null;
+            }
+        }
         
         fetch('/api/static_instructions')
             .then(r => r.json())
@@ -1893,7 +2300,9 @@ HTML_TEMPLATE = """
             participants.forEach(p => { const el = document.getElementById(`instruction-${participants.indexOf(p)}`); if (el && el.value.trim()) instructions[p.display_name] = el.value.trim(); });
             lastPostCount = 0;
             document.getElementById('topicDisplay').textContent = topic;
-            document.getElementById('participantsDisplay').innerHTML = participants.map(p => { const i = instructions[p.display_name]; let h = `<div style="margin-bottom:12px;"><strong>${p.display_name}</strong> <small>(${p.model})</small>`; if (i) h += `<br><em style="margin-left:10px;">${i}</em>`; return h + '</div>'; }).join('');
+            // Пол и роль рисует общий рендер сайдбара: раньше здесь был свой вариант
+            // без бейджа роли, и сайдбар «переключался» только со следующим опросом
+            updateSidebarParticipants();
             const avatars = {}; participants.forEach(p => { if (p.avatar_url) avatars[p.display_name] = p.avatar_url; });
             // Собираем статичные инструкции из формы
             const currentStaticInstructions = [];
@@ -1977,11 +2386,37 @@ HTML_TEMPLATE = """
         
         function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }
         
+        // Предупреждение «модель не влезает в VRAM»: показывается до старта,
+        // спектакль не блокирует - просто честно говорит, что будет медленнее
+        function renderVramWarning(status) {
+            const box = document.getElementById('vramWarning');
+            if (!box) return;
+            const warnings = (status && status.warnings) || [];
+            if (!warnings.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+            
+            const gb = b => (b / 1e9).toFixed(1);
+            const items = warnings.map(w => {
+                let text = `<b>${escapeHtml(w.model)}</b>: при num_ctx ${status.num_ctx} нужно ~${gb(w.need)} ГБ, `
+                    + `а доступно ~${gb(status.budget)} ГБ из ${gb(status.gpu_total)} ГБ. `;
+                if (w.safe_ctx) {
+                    text += `Поставьте num_ctx <b>${w.safe_ctx}</b> (тогда ~${gb(w.safe_need)} ГБ)`;
+                } else {
+                    text += 'Даже с минимальным контекстом модель не влезает целиком — часть будет считать процессор';
+                }
+                if (!w.measured) text += ' <span style="opacity:.7;">[оценка по размеру файла]</span>';
+                return `<div style="margin-bottom:8px;">${text}</div>`;
+            }).join('');
+            
+            box.innerHTML = `⚠️ <b>Не хватает видеопамяти</b><div style="margin-top:8px;">${items}</div>`
+                + '<div style="margin-top:8px;font-size:13px;">Спектакль пойдёт и так, но такие модели будут считать медленнее: уменьшите <code>num_ctx</code> в OPTIONS.</div>';
+            box.style.display = 'block';
+        }
+        
         function renderLoadedModels(loaded, gpu, error) {
             const el = document.getElementById('vramDisplay');
             if (!el) return;
             const gb = b => (b / 1e9).toFixed(1);
-            const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            const esc = escapeHtml;
             
             if (error) { el.innerHTML = '<div style="color:#b00020;">Ollama недоступна</div>'; return; }
             if (!loaded || loaded.length === 0) { el.innerHTML = '<div style="color:#999;">В памяти сейчас ничего нет</div>'; return; }
@@ -1992,7 +2427,16 @@ HTML_TEMPLATE = """
                 const size = vram ? `${gb(vram)} ГБ в VRAM` : `${gb(m.size)} ГБ в RAM`;
                 const pct = (vram && total) ? ` <span style="color:#666;">(${Math.round(vram / total * 100)}% из ${gb(total)} ГБ)</span>` : '';
                 const ctx = m.context_length ? `<div style="color:#666;font-size:12px;">контекст: ${m.context_length}</div>` : '';
-                return `<div style="margin-bottom:10px;"><strong>${esc(m.name)}</strong><div>${size}${pct}</div>${ctx}</div>`;
+                // Не поместилась в VRAM: либо Ollama сама это сказала, либо заявила
+                // больше, чем есть на карте (на Windows часть уходит в общую память)
+                let spillBytes = 0;
+                if (m.size && vram) {
+                    if (total && vram > total) spillBytes = Math.max(0, m.size - total);
+                    else if (vram < m.size) spillBytes = m.size - vram;
+                }
+                const spill = spillBytes
+                    ? `<div style="color:#b00020;font-size:12px;">⚠️ ещё ${gb(spillBytes)} ГБ в RAM</div>` : '';
+                return `<div style="margin-bottom:10px;"><strong>${esc(m.name)}</strong><div>${size}${pct}</div>${ctx}${spill}</div>`;
             }).join('');
             if (total) {
                 el.innerHTML += `<div style="color:#666;font-size:12px;border-top:1px solid #000;padding-top:8px;">Занято на GPU: ${gb(gpu.used)} из ${gb(total)} ГБ</div>`;
@@ -2002,13 +2446,40 @@ HTML_TEMPLATE = """
         // Обновить только блок памяти: он нужен и до спектакля, и после занавеса,
         // когда polling уже остановлен, а модели как раз выгружаются
         function refreshMemory() {
-            fetch('/api/status').then(r => r.json())
+            fetch('/api/status', {cache: 'no-store'}).then(r => r.json())
                 .then(d => renderLoadedModels(d.loaded_models, d.gpu_memory, d.loaded_models_error))
                 .catch(() => {});
         }
         
+        // После занавеса модели выгружаются НЕ мгновенно (гигабайты уходят
+        // в память не сразу), поэтому обновляем панель ещё несколько раз,
+        // а не двумя разовыми замерами
+        let memorySettleTimer = null;
+        let memorySettleTicks = 0;
+        
+        function settleMemoryPanel() {
+            memorySettleTicks = 8;  // ~40 секунд наблюдения
+            if (memorySettleTimer) return;
+            memorySettleTimer = setInterval(() => {
+                refreshMemory();
+                if (--memorySettleTicks <= 0) {
+                    clearInterval(memorySettleTimer);
+                    memorySettleTimer = null;
+                }
+            }, 5000);
+            refreshMemory();
+        }
+        
+        let statusRequestInFlight = false;
+        
         function updatePosts() {
-            fetch(`/api/status?lastPostCount=${lastPostCount}`).then(r => r.json()).then(data => {
+            // Опрос и событие Socket.IO могут сработать одновременно, а запрос несёт
+            // lastPostCount: два параллельных ответа добавили бы один пост дважды.
+            // Второй вызов пропускаем - следующий опрос всё равно подхватит новое.
+            if (statusRequestInFlight) return;
+            statusRequestInFlight = true;
+            
+            fetch(`/api/status?lastPostCount=${lastPostCount}`, {cache: 'no-store'}).then(r => r.json()).then(data => {
                 const statusDiv = document.getElementById('statusBar');
                 const statusPlaceholder = document.getElementById('statusPlaceholder');
                 const moderatorPanel = document.getElementById('moderatorPanel');
@@ -2033,16 +2504,16 @@ HTML_TEMPLATE = """
                     moderatorPanel.style.display = 'none';
                     const eb = document.querySelector('.footer .btn'); if (eb) eb.style.display = 'none';
                     clearInterval(pollInterval);
-                    // Модели выгружаются уже после «Занавеса» - добираем финальные цифры
-                    setTimeout(refreshMemory, 2500);
-                    setTimeout(refreshMemory, 6000);
+                    pollInterval = null;
+                    settleMemoryPanel();
                 }
                 if (data.new_posts && data.new_posts.length > 0) data.new_posts.forEach(post => addPost(post));
                 if (typeof data.total_posts === 'number') lastPostCount = data.total_posts;
                 // Показываем, какая модель сейчас в памяти и сколько занимает
                 renderLoadedModels(data.loaded_models, data.gpu_memory, data.loaded_models_error);
-                // Обновляем сайдбар (правила и инструкции от руководства)
-                updateSidebarParticipants();
+                // Инструкции в сайдбаре меняются только вручную, поэтому обновляем
+                // их раз в 30 секунд, а не на каждом опросе
+                if (instructionsTick++ % 10 === 0) updateSidebarParticipants();
             }).catch(err => {
                 console.error('Ошибка обновления статуса:', err);
                 // Если сервер недоступен — значит он остановлен
@@ -2057,7 +2528,29 @@ HTML_TEMPLATE = """
                 
                 // Останавливаем polling чтобы не спамить ошибками
                 if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-            });
+            })
+            .finally(() => { statusRequestInFlight = false; });
+        }
+        
+        // Смена темы на ходу режиссёра: сервер вернёт новую тему, её подхватят
+        // и системные промпты следующих реплик, и заголовок страницы
+        function changeTopic() {
+            const input = document.getElementById('topicChangeInput');
+            const topic = input.value.trim();
+            if (!topic) { alert('Введите новую тему'); return; }
+            
+            fetch('/api/moderator/topic', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({topic: topic}) })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        input.value = '';
+                        document.getElementById('topicDisplay').textContent = data.topic;
+                        alert('✅ Тема изменена: ' + data.topic);
+                    } else {
+                        alert('❌ ' + (data.error || 'не удалось сменить тему'));
+                    }
+                })
+                .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
         }
         
         function sendModeratorMessage() {
@@ -2098,7 +2591,8 @@ HTML_TEMPLATE = """
                         roleLabel = ' <span style="color:#7b1fa2;font-size:11px;font-weight:bold;">СУДЬЯ</span>';
                     }
                     
-                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${p.display_name}</strong>${roleLabel} <small>(${p.model} ${genderSymbol})</small>`;
+                    // Как и в ленте: пол сразу после имени
+                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${p.display_name}</strong> ${genderSymbol}${roleLabel} <small>(${p.model})</small>`;
                     if (instruction) {
                         html += `<br><em style="margin-left:10px;">${instruction}</em>`;
                     }
@@ -2148,17 +2642,18 @@ HTML_TEMPLATE = """
             // Собираем индивидуальные инструкции участников
             const participantInstructions = [];
             const participantContainer = document.getElementById('participantInstructionsEditor');
-            const participantDivs = participantContainer.querySelectorAll('div[style*="margin-bottom:15px"]');
-            participantDivs.forEach((div, idx) => {
+            participantContainer.querySelectorAll('div[data-participant]').forEach(div => {
                 const textarea = div.querySelector('textarea');
-                if (textarea) {
-                    const label = div.querySelector('label');
-                    const name = label ? label.textContent.replace(':', '') : '';
-                    participantInstructions.push({
-                        name: name,
-                        instruction: textarea.value
-                    });
+                const name = (div.dataset.participant || '').trim();
+                if (textarea && name) {
+                    participantInstructions.push({ name: name, instruction: textarea.value });
                 }
+            });
+            
+            // Собираем правила судьи
+            const judgeRules = [];
+            document.getElementById('judgeRulesEditor').querySelectorAll('textarea').forEach(ta => {
+                if (ta.value.trim()) judgeRules.push(ta.value.trim());
             });
             
             // Отправляем на сервер
@@ -2168,6 +2663,7 @@ HTML_TEMPLATE = """
                 body: JSON.stringify({
                     static_instructions: staticInstructions,
                     moderator_messages: moderatorMessages,
+                    judge_rules: judgeRules,
                     participant_instructions: participantInstructions
                 })
             })
@@ -2251,8 +2747,10 @@ HTML_TEMPLATE = """
             fetch('/api/moderator/instructions')
             .then(r => r.json())
             .then(data => {
+                defaultJudgePrompt = data.default_judge_prompt || '';
                 renderStaticInstructionsEditor(data.static_instructions);
                 renderModeratorMessagesEditor(data.moderator_messages);
+                renderJudgeRulesEditor(data.judge_rules || []);
                 renderParticipantInstructionsEditor(data.participant_instructions || []);
             })
             .catch(err => console.error('Ошибка загрузки инструкций:', err));
@@ -2278,6 +2776,33 @@ HTML_TEMPLATE = """
             `).join('');
         }
         
+        function renderJudgeRulesEditor(rules) {
+            const container = document.getElementById('judgeRulesEditor');
+            container.innerHTML = rules.map((rule, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="judge-rule-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${escapeHtml(rule)}</textarea>
+                    <button class="btn btn-secondary" onclick="removeJudgeRuleEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function addJudgeRuleEditor() {
+            const container = document.getElementById('judgeRulesEditor');
+            const idx = container.children.length;
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="judge-rule-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое правило судьи..."></textarea>
+                <button class="btn btn-secondary" onclick="removeJudgeRuleEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function removeJudgeRuleEditor(idx) {
+            const el = document.getElementById(`judge-rule-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
         function renderParticipantInstructionsEditor(participantInstructions) {
             const container = document.getElementById('participantInstructionsEditor');
             if (participantInstructions.length === 0) {
@@ -2296,11 +2821,18 @@ HTML_TEMPLATE = """
                     rows = 8; // Больше строк для судьи
                 }
                 
+                // Имя лежит в data-атрибуте: раньше его брали из текста label,
+                // а туда попал бейдж роли - и инструкции сохранялись под именем
+                // «🎭 УЧАСТНИК Варвара», то есть никогда не применялись
+                const value = (p.instruction && p.instruction.trim())
+                    ? p.instruction
+                    : (p.is_judge ? defaultJudgePrompt : '');
+                
                 return `
-                <div style="margin-bottom:15px;padding:10px;border:2px solid ${borderColor};border-radius:4px;background:${p.is_judge ? '#fafafa' : 'white'};">
-                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${roleBadge} ${p.name}:</label>
+                <div data-participant="${escapeHtml(p.name)}" style="margin-bottom:15px;padding:10px;border:2px solid ${borderColor};border-radius:4px;background:${p.is_judge ? '#fafafa' : 'white'};">
+                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${roleBadge} ${escapeHtml(p.name)}:</label>
                     ${p.is_judge ? '<div style="font-size:11px;color:#666;margin-bottom:5px;font-style:italic;">Системный промпт судьи (можно редактировать):</div>' : ''}
-                    <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${p.name}...">${p.instruction || ''}</textarea>
+                    <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${escapeHtml(p.name)}...">${escapeHtml(value)}</textarea>
                 </div>
             `}).join('');
         }
@@ -2432,7 +2964,9 @@ def get_participants():
     return jsonify({
         "participants": participants_data,
         # Сразу сообщаем интерфейсу, если нужных моделей нет в Ollama
-        "models_status": check_models_available([p["model"] for p in PARTICIPANTS])
+        "models_status": check_models_available([p["model"] for p in PARTICIPANTS]),
+        # И если они не влезают в видеопамять при текущем num_ctx
+        "vram_status": check_vram_fit([p["model"] for p in PARTICIPANTS])
     })
 
 @app.route('/api/avatar/<keywords>')
@@ -2503,6 +3037,18 @@ def start():
     if not participants_data:
         return jsonify({"success": False, "error": "Не выбрано ни одного участника"})
     
+    # Участник без модели не сможет говорить, а поток дебатов упал бы уже на сцене
+    participants_without_model = [
+        p.get("display_name") or "без имени"
+        for p in participants_data
+        if p.get("model") != "human" and not p.get("model")
+    ]
+    if participants_without_model:
+        return jsonify({
+            "success": False,
+            "error": f"У участников не указана модель: {', '.join(participants_without_model)}"
+        })
+    
     # Живая проверка перед стартом: модели могли удалить, а Ollama - перезапустить
     models_status = check_models_available(
         [p.get("model", "") for p in participants_data], force=True
@@ -2537,7 +3083,7 @@ def status():
     # Что сейчас лежит в памяти - для сайдбара (данные кэшируются на 1.5 с)
     loaded_models, loaded_models_error = fetch_loaded_models()
     
-    return jsonify({
+    response = jsonify({
         "running": session.running,
         "finished": session.finished,
         "topic": session.topic,
@@ -2553,6 +3099,10 @@ def status():
         "loaded_models_error": loaded_models_error or "",
         "gpu_memory": fetch_gpu_memory(),
     })
+    # Без этого браузер отдаёт статус из своего кэша, и панель с памятью GPU
+    # «зависает» с устаревшими цифрами, пока не изменится счётчик постов
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 # ============================================================
 # WEBSOCKET СОБЫТИЯ
@@ -2600,6 +3150,18 @@ def moderator_message():
     session.moderator_message = data.get("message", "") or ""
     return jsonify({"success": True})
 
+@app.route('/api/moderator/topic', methods=['POST'])
+def moderator_topic():
+    """Смена темы на ходу режиссёра: следующие реплики строятся уже по ней."""
+    data = request.get_json(silent=True) or {}
+    new_topic = str(data.get("topic", "") or "").strip()
+    if not new_topic:
+        return jsonify({"success": False, "error": "Тема не указана"})
+    
+    session.topic = new_topic
+    print(f"🎬 Режиссёр сменил тему: {new_topic}")
+    return jsonify({"success": True, "topic": new_topic})
+
 @app.route('/api/moderator/finish', methods=['POST'])
 def moderator_finish():
     session.moderator_finished = True
@@ -2627,7 +3189,12 @@ def get_moderator_instructions():
     return jsonify({
         "static_instructions": session.static_instructions or DEFAULT_STATIC_INSTRUCTIONS,
         "moderator_messages": moderator_messages,
-        "participant_instructions": participant_instructions
+        "participant_instructions": participant_instructions,
+        # Правила судьи редактируются так же, как правила участников
+        "judge_rules": session.judge_rules or DEFAULT_JUDGE_RULES,
+        # Ими заполняется пустое поле личного промпта судьи в редакторе
+        "default_judge_prompt": DEFAULT_JUDGE_INSTRUCTION,
+        "default_static_instructions": DEFAULT_STATIC_INSTRUCTIONS,
     })
 
 @app.route('/api/moderator/instructions', methods=['POST'])
@@ -2664,6 +3231,12 @@ def update_moderator_instructions():
         
         print(f"📝 Обновлены руководства: {len(new_messages)} пунктов")
     
+    # Обновляем правила судьи если переданы
+    if isinstance(data.get("judge_rules"), list):
+        session.judge_rules = [str(instr) for instr in data["judge_rules"]]
+        save_theatre_settings()
+        print(f"⚖️  Обновлены правила судьи: {len(session.judge_rules)} пунктов")
+    
     # Обновляем индивидуальные инструкции участников если переданы
     if isinstance(data.get("participant_instructions"), list):
         for p_instr in data["participant_instructions"]:
@@ -2683,7 +3256,8 @@ def update_moderator_instructions():
 @app.route('/api/shutdown', methods=['POST'])
 def shutdown():
     if UNLOAD_AFTER_DEBATE:
-        unique_models = set(p["model"] for p in session.runtime_participants if p["model"] != "human")
+        unique_models = set(p.get("model", "") for p in session.runtime_participants
+                            if p.get("model") and p.get("model") != "human")
         for model in unique_models:
             unload_model(model)
     
@@ -2698,7 +3272,7 @@ def shutdown():
 # MAIN
 # ============================================================
 
-if __name__ == "__main__":
+def main():
     print("=" * 50)
     print("🎭 AI Театр - Спектакль нейросетей")
     print("=" * 50)
@@ -2732,3 +3306,6 @@ if __name__ == "__main__":
     # "The Werkzeug web server is not designed to run in production", если stdin
     # не подключён к терминалу (перенаправленный вывод, запуск из IDE/службы).
     socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+
+if __name__ == "__main__":
+    main()
