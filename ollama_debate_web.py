@@ -14,6 +14,7 @@ import urllib.request
 import urllib.error
 import json
 import logging
+import subprocess
 import time
 import threading
 import webbrowser
@@ -139,6 +140,14 @@ MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
 
 # Кэш списка скачанных моделей Ollama: {"at": monotonic, "models": {имя: размер}, "error": str}
 _OLLAMA_MODELS_CACHE = {"at": 0.0, "models": {}, "error": None}
+
+# Кэш моделей, загруженных в память: {"at": monotonic, "models": [...], "error": str}
+_LOADED_MODELS_CACHE = {"at": 0.0, "models": [], "error": None}
+LOADED_MODELS_CACHE_TTL = 1.5  # секунд
+
+# Кэш объёма видеопамяти (nvidia-smi): {"at": monotonic, "info": {total, used}}
+_GPU_MEMORY_CACHE = {"at": 0.0, "info": {}}
+GPU_MEMORY_CACHE_TTL = 10  # секунд
 
 # Кэш для хранения URL аватаров по ключам (чтобы не искать повторно)
 AVATAR_URL_CACHE = {}  # {"avatar_keywords": "image_url"}
@@ -540,16 +549,22 @@ def check_model_tools_support(model: str) -> bool:
 
 def model_is_installed(model: str, available: set) -> bool:
     """
-    «r1» считается установленной, если в Ollama есть «r1:latest».
-    Точное совпадение тоже принимается («q1:q4_K_M» -> «q1:q4_K_M»).
+    Есть ли модель в Ollama. «r1» считается установленной, если в Ollama есть
+    «r1:latest» - этот тег Ollama подставляет сама.
+    Если тег указан явно («q1:q4_K_M»), нужно ТОЧНОЕ совпадение: иначе модель,
+    которой нет, прошла бы проверку, и спектакль упал бы уже на сцене.
+    По той же причине нельзя считать «q1» и «q1:q4_K_M» одной моделью: у них
+    разные файлы, и выгрузка одной не выгружает другую.
     """
     if not model:
         return False
     if model in available:
         return True
     
-    base = model.split(":")[0]
-    return any(name == base or name.startswith(base + ":") for name in available)
+    if ":" in model:
+        return False
+    
+    return f"{model}:latest" in available
 
 def fetch_ollama_models(force: bool = False, timeout: int = 5) -> tuple:
     """
@@ -577,18 +592,90 @@ def fetch_ollama_models(force: bool = False, timeout: int = 5) -> tuple:
     _OLLAMA_MODELS_CACHE = {"at": time.monotonic(), "models": models, "error": error}
     return models, error
 
-def fetch_loaded_models(timeout: int = 5) -> tuple:
+def as_int(value) -> int:
+    """Размеры из API Ollama - числа, но иногда строки; чужой формат не должен ронять сайдбар."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+def fetch_loaded_models(force: bool = False, timeout: int = 5) -> tuple:
     """
-    Спрашивает у Ollama, какие модели СЕЙЧАС в памяти (/api/ps).
-    Возвращает (список имён, текст ошибки).
+    Спрашивает у Ollama, какие модели СЕЙЧАС в памяти (/api/ps) и сколько места
+    занимают. Возвращает (список словарей, текст ошибки); у каждой модели:
+    name, size (всего), size_vram (сколько лежит в видеопамяти),
+    context_length, expires_at.
+    Результат ненадолго кэшируется: страница опрашивает статус каждые 3 секунды,
+    и без кэша каждый клиент дёргал бы Ollama на каждый запрос. force=True
+    берёт свежие данные (для выгрузки моделей нужна точная картина).
     """
+    global _LOADED_MODELS_CACHE
+    
+    if not force and time.monotonic() - _LOADED_MODELS_CACHE["at"] < LOADED_MODELS_CACHE_TTL:
+        return _LOADED_MODELS_CACHE["models"], _LOADED_MODELS_CACHE["error"]
+    
+    models, error = [], None
     try:
         with urllib.request.urlopen(OLLAMA_PS_URL, timeout=timeout) as response:
             data = json.loads(response.read().decode('utf-8'))
-        names = [(m.get("name") or m.get("model") or "") for m in data.get("models", [])]
-        return [n for n in names if n], None
+        for m in data.get("models", []) or []:
+            # Чужой формат одного элемента не должен обнулять весь список:
+            # иначе сайдбар решил бы, что Ollama недоступна
+            if not isinstance(m, dict):
+                continue
+            name = m.get("name") or m.get("model") or ""
+            if not name:
+                continue
+            models.append({
+                "name": name,
+                "size": as_int(m.get("size")),
+                "size_vram": as_int(m.get("size_vram")),
+                "context_length": as_int(m.get("context_length")),
+                "expires_at": str(m.get("expires_at") or ""),
+            })
     except Exception as e:
-        return [], str(e)
+        error = str(e)
+    
+    _LOADED_MODELS_CACHE = {"at": time.monotonic(), "models": models, "error": error}
+    return models, error
+
+def fetch_gpu_memory() -> dict:
+    """
+    Объём видеопамяти через nvidia-smi, если он есть (для процентов в сайдбаре).
+    Возвращает {"total": байт, "used": байт} либо {} - тогда показываем только
+    абсолютные гигабайты. Опрос внешнего процесса кэшируем на 10 секунд.
+    """
+    global _GPU_MEMORY_CACHE
+    
+    if time.monotonic() - _GPU_MEMORY_CACHE["at"] < GPU_MEMORY_CACHE_TTL:
+        return _GPU_MEMORY_CACHE["info"]
+    
+    info = {}
+    try:
+        kwargs = {"capture_output": True, "text": True, "timeout": 5}
+        if os.name == "nt":
+            # Иначе на Windows у пользователя каждые 10 секунд мигает консольное окно
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"],
+            **kwargs
+        )
+        if result.returncode == 0:
+            total_mb = used_mb = 0
+            for line in (result.stdout or "").strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2:
+                    total_mb += int(float(parts[0]))
+                    used_mb += int(float(parts[1]))
+            if total_mb:
+                info = {"total": total_mb * 1024 * 1024, "used": used_mb * 1024 * 1024}
+    except Exception:
+        # nvidia-smi нет, это не NVIDIA или он ругается - просто не показываем проценты
+        info = {}
+    
+    _GPU_MEMORY_CACHE = {"at": time.monotonic(), "info": info}
+    return info
 
 def unload_other_show_models(current_model: str, show_models: set):
     """
@@ -598,11 +685,11 @@ def unload_other_show_models(current_model: str, show_models: set):
     if not UNLOAD_OTHER_MODELS:
         return
     
-    loaded, error = fetch_loaded_models()
+    loaded_models, error = fetch_loaded_models(force=True)
     if error:
         return
     
-    for loaded_name in loaded:
+    for loaded_name in [m["name"] for m in loaded_models]:
         if model_is_installed(current_model, {loaded_name}):
             continue
         if any(model_is_installed(m, {loaded_name}) for m in show_models):
@@ -650,9 +737,14 @@ def report_models_status(models: list):
         total = sum(sizes.values()) / 1e9
         print(f"  📦 На диске: {parts} = {total:.1f} ГБ (в памяти держится только текущий говорящий)")
     
-    loaded, _ = fetch_loaded_models()
+    loaded, _ = fetch_loaded_models(force=True)
     if loaded:
-        print(f"  📦 Сейчас в памяти: {', '.join(loaded)}")
+        parts = ", ".join(
+            f"{m['name']} {m['size_vram'] / 1e9:.1f} ГБ VRAM" if m["size_vram"]
+            else f"{m['name']} {m['size'] / 1e9:.1f} ГБ RAM"
+            for m in loaded
+        )
+        print(f"  📦 Сейчас в памяти: {parts}")
 
 def models_problem_message(status: dict) -> str:
     """Человекочитаемое объяснение, почему спектакль нельзя начать."""
@@ -1627,6 +1719,10 @@ HTML_TEMPLATE = """
                 <div id="statusPlaceholder" style="color:#666;font-size:13px;">Ожидание начала...</div>
             </div>
             <div class="sidebar-section">
+                <div class="sidebar-title">Память GPU</div>
+                <div id="vramDisplay" style="color:#000000;font-size:13px;line-height:1.6;">—</div>
+            </div>
+            <div class="sidebar-section">
                 <div class="sidebar-title">Персонажи</div>
                 <div id="participantsDisplay" style="color:#000000;font-size:13px;line-height:1.6;"></div>
             </div>
@@ -1655,6 +1751,8 @@ HTML_TEMPLATE = """
         fetch('/api/participants')
             .then(r => r.json())
             .then(data => { participants = data.participants; renderParticipantsSetup(); renderModelsWarning(data.models_status); });
+        
+        refreshMemory();  // сразу видно, что уже загружено в Ollama (могут быть чужие модели)
         
         fetch('/api/static_instructions')
             .then(r => r.json())
@@ -1807,6 +1905,10 @@ HTML_TEMPLATE = """
             fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ topic, instructions, participants, avatars, static_instructions: currentStaticInstructions }) })
             .then(r => r.json()).then(data => { 
                 if (data.success) {
+                    // Спектакль пошёл: убираем баннер с прошлой неудачной попытки,
+                    // иначе он висел бы с устаревшим текстом до перезагрузки
+                    const box = document.getElementById('modelsWarning');
+                    if (box) { box.style.display = 'none'; box.innerHTML = ''; }
                     pollInterval = setInterval(updatePosts, 3000);
                     updateSidebarParticipants(); // Обновляем сайдбар при старте
                 } else {
@@ -1875,6 +1977,36 @@ HTML_TEMPLATE = """
         
         function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }
         
+        function renderLoadedModels(loaded, gpu, error) {
+            const el = document.getElementById('vramDisplay');
+            if (!el) return;
+            const gb = b => (b / 1e9).toFixed(1);
+            const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+            
+            if (error) { el.innerHTML = '<div style="color:#b00020;">Ollama недоступна</div>'; return; }
+            if (!loaded || loaded.length === 0) { el.innerHTML = '<div style="color:#999;">В памяти сейчас ничего нет</div>'; return; }
+            
+            const total = (gpu && gpu.total) ? gpu.total : 0;
+            el.innerHTML = loaded.map(m => {
+                const vram = m.size_vram || 0;
+                const size = vram ? `${gb(vram)} ГБ в VRAM` : `${gb(m.size)} ГБ в RAM`;
+                const pct = (vram && total) ? ` <span style="color:#666;">(${Math.round(vram / total * 100)}% из ${gb(total)} ГБ)</span>` : '';
+                const ctx = m.context_length ? `<div style="color:#666;font-size:12px;">контекст: ${m.context_length}</div>` : '';
+                return `<div style="margin-bottom:10px;"><strong>${esc(m.name)}</strong><div>${size}${pct}</div>${ctx}</div>`;
+            }).join('');
+            if (total) {
+                el.innerHTML += `<div style="color:#666;font-size:12px;border-top:1px solid #000;padding-top:8px;">Занято на GPU: ${gb(gpu.used)} из ${gb(total)} ГБ</div>`;
+            }
+        }
+        
+        // Обновить только блок памяти: он нужен и до спектакля, и после занавеса,
+        // когда polling уже остановлен, а модели как раз выгружаются
+        function refreshMemory() {
+            fetch('/api/status').then(r => r.json())
+                .then(d => renderLoadedModels(d.loaded_models, d.gpu_memory, d.loaded_models_error))
+                .catch(() => {});
+        }
+        
         function updatePosts() {
             fetch(`/api/status?lastPostCount=${lastPostCount}`).then(r => r.json()).then(data => {
                 const statusDiv = document.getElementById('statusBar');
@@ -1901,9 +2033,14 @@ HTML_TEMPLATE = """
                     moderatorPanel.style.display = 'none';
                     const eb = document.querySelector('.footer .btn'); if (eb) eb.style.display = 'none';
                     clearInterval(pollInterval);
+                    // Модели выгружаются уже после «Занавеса» - добираем финальные цифры
+                    setTimeout(refreshMemory, 2500);
+                    setTimeout(refreshMemory, 6000);
                 }
                 if (data.new_posts && data.new_posts.length > 0) data.new_posts.forEach(post => addPost(post));
                 if (typeof data.total_posts === 'number') lastPostCount = data.total_posts;
+                // Показываем, какая модель сейчас в памяти и сколько занимает
+                renderLoadedModels(data.loaded_models, data.gpu_memory, data.loaded_models_error);
                 // Обновляем сайдбар (правила и инструкции от руководства)
                 updateSidebarParticipants();
             }).catch(err => {
@@ -2397,6 +2534,8 @@ def reset():
 @app.route('/api/status')
 def status():
     last_post_count = max(0, request.args.get("lastPostCount", 0, type=int))
+    # Что сейчас лежит в памяти - для сайдбара (данные кэшируются на 1.5 с)
+    loaded_models, loaded_models_error = fetch_loaded_models()
     
     return jsonify({
         "running": session.running,
@@ -2410,6 +2549,9 @@ def status():
         "search_query": session.search_query,
         "waiting_for_human": session.waiting_for_human,
         "current_participant_is_moderator": session.current_participant_is_moderator(),
+        "loaded_models": loaded_models if not loaded_models_error else [],
+        "loaded_models_error": loaded_models_error or "",
+        "gpu_memory": fetch_gpu_memory(),
     })
 
 # ============================================================
