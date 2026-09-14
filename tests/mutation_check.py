@@ -101,6 +101,35 @@ BUGS = {
          '                    and own.strip() == settings.DEFAULT_JUDGE_INSTRUCTION.strip():',
          "            elif False:"),
     ],
+    "судья снова видит все прошлые акты, хотя опция говорит иное": [
+        ("aitheatre/show.py",
+         '                        and round_num is not None and post.get("round") != round_num:',
+         "                        and False:"),
+    ],
+    "слово судьи снова слышит только он сам": [
+        ("aitheatre/show.py",
+         '                if is_judge and post.get("display_name") != viewer_name \\\n'
+         '                        and post.get("display_name") not in public_judges:',
+         '                if is_judge and post.get("display_name") != viewer_name:'),
+    ],
+    "чужое значение опции роли проходит как своё": [
+        ("aitheatre/show.py",
+         "                if value not in allowed:",
+         "                if False:"),
+    ],
+    "опции прежней роли остаются у места с новой ролью": [
+        ("aitheatre/show.py",
+         '    if not ROLE_OPTIONS.get(role):\n'
+         '        entry.pop("role_options", None)\n'
+         "        return",
+         "    if not ROLE_OPTIONS.get(role):\n"
+         "        return"),
+    ],
+    "в разметку карточки подставляется имя, которого в странице нет": [
+        ("aitheatre/page.py",
+         "                const roleOptionsBlock = roleOptionKeys.length === 0 ? '' : ''",
+         "                const unusedRoleOptionsBlock = roleOptionKeys.length === 0 ? '' : ''"),
+    ],
     "новому месту не находится модель, когда соседа нет": [
         ("aitheatre/show.py",
          "    models, _error = ollama_api.fetch_ollama_models()",

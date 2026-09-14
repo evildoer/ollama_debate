@@ -661,6 +661,35 @@ HTML_TEMPLATE = """
             p.is_judge = role === 'judge';
         }
 
+        // Опции роли — не выключатели, а положения: у каждой опции конечный набор
+        // значений, и одно из них занято всегда. Пока они есть только у судьи,
+        // и обе — про то, кто кого слышит: список должен совпадать с сервером,
+        // за этим следит TestScenePanel.
+        const ROLE_OPTIONS = {
+            judge: {
+                scope: [
+                    {value: 'all', label: '⚖️ Всё обсуждение — текущий акт и прошлые'},
+                    {value: 'act', label: '🎬 Только текущий акт'},
+                ],
+                publicity: [
+                    {value: 'anonymous', label: '🤫 Анонимный — слышит только режиссёр'},
+                    {value: 'public', label: '📣 Публичный — слышат все участники'},
+                ],
+            },
+        };
+        const ROLE_OPTION_DEFAULTS = {judge: {scope: 'all', publicity: 'anonymous'}};
+        const ROLE_OPTION_NAMES = {scope: 'Что видит судья', publicity: 'Кто слышит судью'};
+        const ROLE_OPTION_HINTS = {
+            scope: 'Оценки за прошлые акты судья выносит заново каждый раз. «Только текущий акт» — судья оценивает лишь то, что сказано с его прошлого вердикта: это имеет смысл, когда в очереди есть кто-то до него, иначе оценивать ему нечего.',
+            publicity: 'Анонимный судья говорит только для режиссёра: вердикт виден в ленте, но участники его не слышат — так спектакль игрался всегда. Публичный попадает в реплики остальных вместе с оценками: его можно похвалить, оспорить или обидеться.',
+        };
+
+        function roleOptionsOf(p) {
+            const role = roleOf(p);
+            const own = (p.role_options && typeof p.role_options === 'object') ? p.role_options : {};
+            return Object.assign({}, ROLE_OPTION_DEFAULTS[role] || {}, own);
+        }
+
         // Числа и имена, набранные в полях, живут в разметке, а перестановка и
         // удаление работают с массивом cast: перед ними переносим набранное
         // в массив — иначе перенос карточки стёр бы всё, что уже вписано,
@@ -754,6 +783,7 @@ HTML_TEMPLATE = """
                 const borderColor = role === 'judge' ? '#7b1fa2' : '#000000';
                 // Селекты роли и модели не тянутся на всю ширину, в отличие от полей
                 const tightStyle = 'padding:6px;border:1px solid #000;font-family:Georgia,serif;font-size:13px;';
+
                 const avatar = p.avatar_url
                     ? '<img src="' + escapeHtml(p.avatar_url) + '">'
                     : (p.avatar_emoji || '📣');
@@ -856,6 +886,32 @@ HTML_TEMPLATE = """
                     +   '<div id="effective-' + idx + '" style="font-size:11px;color:#666;margin-top:9px;line-height:1.6;"></div>'
                     + '</div>';
 
+                // Опции роли — не числа и не характер: это «кто кого слышит», и они
+                // есть только у тех ролей, где такие положения вообще бывают. Значение
+                // по умолчанию показано выбранным, поэтому сразу видно, как роль ведёт
+                // себя, если ничего не менять
+                const roleOptionKeys = Object.keys(ROLE_OPTIONS[role] || {});
+                const currentOptions = roleOptionsOf(p);
+                const roleOptionsBlock = roleOptionKeys.length === 0 ? '' : ''
+                    + '<div style="margin-top:14px;padding-top:12px;border-top:1px dotted #cccccc;">'
+                    +   '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;">'
+                    +     roleOptionKeys.map(key => {
+                              const choices = ROLE_OPTIONS[role][key];
+                              return '<div>' + fieldLabel(ROLE_OPTION_NAMES[key] || key)
+                                + '<select id="' + key + '-' + idx + '" style="' + fieldStyle + '"'
+                                +   ' title="' + escapeHtml(ROLE_OPTION_HINTS[key] || '') + '">'
+                                +   choices.map(choice =>
+                                      '<option value="' + choice.value + '" '
+                                      + selectIf(choice.value, currentOptions[key]) + '>'
+                                      + escapeHtml(choice.label) + '</option>').join('')
+                                + '</select>'
+                                + '<div style="font-size:11px;color:#666;margin-top:6px;line-height:1.5;">'
+                                +   escapeHtml(ROLE_OPTION_HINTS[key] || '') + '</div>'
+                                + '</div>';
+                          }).join('')
+                    +   '</div>'
+                    + '</div>';
+
                 return ''
                 + '<div data-participant-index="' + idx + '" style="margin-bottom:18px;padding:14px;border:1px solid ' + borderColor + ';background:#ffffff;">'
                 +   '<div style="display:flex;gap:15px;align-items:flex-start;">'
@@ -886,6 +942,7 @@ HTML_TEMPLATE = """
                 +       paramsBlock
                 +     '</div>'
                 +   '</div>'
+                +   roleOptionsBlock
                 // Роль и очередь правятся прямо в карточке: верхняя карточка —
                 // та, чья реплика прозвучит первой
                 +   '<div style="margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">'
@@ -947,6 +1004,17 @@ HTML_TEMPLATE = """
                     });
                     entry.think = pick(`think-${idx}`, p.think || 'auto');
                     entry.preset = pick(`preset-${idx}`, p.preset || 'custom');
+                }
+                // Опции роли — только те, что есть у нынешней роли: если место
+                // перестало быть судьёй, чужих опций с собой не унесёт
+                const optionKeys = Object.keys(ROLE_OPTIONS[roleOf(p)] || {});
+                if (optionKeys.length) {
+                    const current = roleOptionsOf(p);
+                    entry.role_options = {};
+                    optionKeys.forEach(key => {
+                        const el = document.getElementById(`${key}-${idx}`);
+                        entry.role_options[key] = el ? el.value : current[key];
+                    });
                 }
                 return entry;
             });
@@ -1570,7 +1638,13 @@ HTML_TEMPLATE = """
                         roleLabel = ' <span style="color:#f57c00;font-size:11px;font-weight:bold;">МОДЕРАТОР</span>';
                     } else if (p.is_judge) {
                         roleIcon = '⚖️';
-                        roleLabel = ' <span style="color:#7b1fa2;font-size:11px;font-weight:bold;">СУДЬЯ</span>';
+                        // Публичного судью слышат участники — это стоит видеть, не
+                        // заходя в карточку: на ходу именно это и решает, отзовутся
+                        // ли другие на вердикт
+                        roleLabel = ' <span style="color:#7b1fa2;font-size:11px;font-weight:bold;">СУДЬЯ</span>'
+                            + (roleOptionsOf(p).publicity === 'public'
+                                ? '<span style="font-size:11px;" title="Публичный: вердикт слышат участники"> 📣</span>'
+                                : '<span style="font-size:11px;" title="Анонимный: вердикт видит только режиссёр"> 🤫</span>');
                     }
                     
                     // Как и в ленте: пол сразу после имени

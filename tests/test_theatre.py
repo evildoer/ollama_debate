@@ -723,6 +723,53 @@ class TestSceneEditing(unittest.TestCase):
         self.assertEqual(draft["model"], "")
         self.assertTrue(draft["display_name"].strip(), "имя всё равно должно быть")
 
+    def test_the_role_options_are_checked_like_everything_else(self):
+        """Значение опции из пульта либо разрешено, либо это ошибка, а не «как-нибудь»."""
+        judge_index = next(i for i, p in enumerate(self.session.runtime_participants)
+                           if p.get("is_judge"))
+        payload = cast_payload(self.session)
+        payload[judge_index]["role_options"] = {"scope": "какой-нибудь"}
+        self.assertIn("scope", show.apply_cast_patch(payload))
+        self.assertNotEqual(show.role_options(self.session.runtime_participants[judge_index]),
+                            {"scope": "какой-нибудь"})
+
+    def test_the_role_options_come_and_go_with_the_role(self):
+        judge_index = next(i for i, p in enumerate(self.session.runtime_participants)
+                           if p.get("is_judge"))
+        payload = cast_payload(self.session)
+        payload[judge_index]["role_options"] = {"scope": "act", "publicity": "public"}
+        self._apply(payload)
+        self.assertEqual(show.role_options(self.session.runtime_participants[judge_index]),
+                         {"scope": "act", "publicity": "public"})
+
+        # Место перестало быть судьёй: опции прежней роли с собой не уносит
+        payload = cast_payload(self.session)
+        payload[judge_index]["role"] = "participant"
+        self._apply(payload)
+        self.assertNotIn("role_options", self.session.runtime_participants[judge_index])
+
+        # А новое место-судья получает набор своей роли по умолчанию
+        payload = cast_payload(self.session)
+        payload[0]["role"] = "judge"
+        self._apply(payload)
+        self.assertEqual(show.role_options(self.session.runtime_participants[0]),
+                         {"scope": "all", "publicity": "anonymous"})
+
+    def test_the_scene_keeps_the_role_options(self):
+        judge_index = next(i for i, p in enumerate(self.session.runtime_participants)
+                           if p.get("is_judge"))
+        payload = cast_payload(self.session)
+        payload[judge_index]["role_options"] = {"scope": "act"}
+        self._apply(payload)
+
+        place = self.session.scene[judge_index]
+        self.assertEqual(place["role_options"], {"scope": "act", "publicity": "anonymous"},
+                         "сцена должна помнить опции судьи целиком")
+
+        self.session.new_show()
+        self.assertEqual(show.role_options(self.session.runtime_participants[judge_index]),
+                         {"scope": "act", "publicity": "anonymous"})
+
     def test_the_draft_place_does_not_touch_the_cast(self):
         before = [p["display_name"] for p in self.session.runtime_participants]
         draft = show.draft_cast_entry()
@@ -733,6 +780,72 @@ class TestSceneEditing(unittest.TestCase):
         for key in ("cast_id", "display_name", "avatar_emoji", "avatar_keywords", "gender"):
             self.assertIn(key, draft)
         self.assertEqual([p["display_name"] for p in self.session.runtime_participants], before)
+
+
+# ---------------------------------------------------------------- опции роли
+
+class TestRoleOptions(unittest.TestCase):
+    """Опции роли судьи: что слышит он и кто слышит его.
+
+    Обе — положение, а не выключатель: значение есть всегда, и по умолчанию оно
+    такое, как спектакль игрался всегда — судья оценивает всё обсуждение,
+    а слово его слышит только режиссёр. Поэтому старые сцены и файлы настроек
+    ничего не теряют.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.session.topic = "Тема"
+        self.judge = judge_of(self.session)
+        self.other = non_judge_ai(self.session)
+        self.session.conversation_history = [
+            self._post("Первый", "МЫСЛЬ ПЕРВОГО АКТА", 1),
+            self._post(self.judge["display_name"], "ВЕРДИКТ СУДЬИ", 1, judge=True),
+            self._post("Второй", "МЫСЛЬ ВТОРОГО АКТА", 2),
+        ]
+
+    def _post(self, name, content, round_num, judge=False):
+        return {"display_name": name, "content": content, "is_moderator": False,
+                "is_judge": judge, "round": round_num}
+
+    def _prompt_text(self, person, round_num=2):
+        return " ".join(message["content"]
+                        for message in self.session.build_messages_for_ai(person, round_num))
+
+    def test_by_default_the_judge_sums_up_the_whole_show(self):
+        text = self._prompt_text(self.judge)
+        self.assertIn("МЫСЛЬ ПЕРВОГО АКТА", text)
+        self.assertIn("МЫСЛЬ ВТОРОГО АКТА", text)
+
+    def test_the_judge_can_be_limited_to_the_current_act(self):
+        self.judge["role_options"] = {"scope": "act"}
+        text = self._prompt_text(self.judge)
+        self.assertNotIn("МЫСЛЬ ПЕРВОГО АКТА", text, "прошлый акт судье видеть незачем")
+        self.assertIn("МЫСЛЬ ВТОРОГО АКТА", text)
+        self.assertIn("только текущий акт", text, "и задача должна быть про этот акт")
+
+    def test_by_default_nobody_hears_the_judge(self):
+        self.assertNotIn("ВЕРДИКТ СУДЬИ", self._prompt_text(self.other))
+
+    def test_a_public_judge_is_heard_by_the_others(self):
+        self.judge["role_options"] = {"publicity": "public"}
+        text = self._prompt_text(self.other)
+        self.assertIn("ВЕРДИКТ СУДЬИ", text)
+        self.assertIn("СУДЬЯ", text, "участник должен понимать, что это вердикт, а не реплика")
+
+    def test_the_judge_does_not_evaluate_its_own_verdicts(self):
+        """Публичность не должна подсовывать судье его же слова как выступление."""
+        self.judge["role_options"] = {"publicity": "public"}
+        self.assertNotIn("ВЕРДИКТ СУДЬИ", self._prompt_text(self.judge))
+
+    def test_a_missing_or_broken_option_falls_back_to_the_default(self):
+        """Файл настроек и старые сцены правятся руками — мусор не должен ломать роль."""
+        for broken in ({"scope": "полдень"}, {"кухня": "all"}, "просто строка", None):
+            with self.subTest(options=broken):
+                self.judge["role_options"] = broken
+                self.assertEqual(show.role_options(self.judge),
+                                 {"scope": "all", "publicity": "anonymous"})
 
 
 # ---------------------------------------------------------------- промпт
@@ -1232,6 +1345,62 @@ class TestScenePanel(unittest.TestCase):
         self.assertIn("cast_id: p.cast_id", body)
         self.assertIn("role: roleOf(p)", body)
 
+    def test_the_option_lists_match_the_server(self):
+        """Пульт и сервер должны сходиться и в значениях опций роли, а не только в ролях."""
+        match = re.search(r"const ROLE_OPTIONS = \{(.*?)\n        \};", self.page, re.DOTALL)
+        self.assertIsNotNone(match, "в пульте не нашёлся список опций роли")
+        listed = re.findall(r"(\w+): \[(.*?)\],\n", match.group(1), re.DOTALL)
+        self.assertTrue(listed, "в пульте нет ни одной опции")
+        for key, body in listed:
+            with self.subTest(option=key):
+                values = re.findall(r"value: '([^']+)'", body)
+                self.assertEqual(values, list(show.ROLE_OPTIONS["judge"][key]),
+                                 f"пульт и сервер разошлись в опции {key}")
+
+    def test_the_editor_sends_the_role_options(self):
+        start = self.page.index("function collectCast()")
+        body = self.page[start:self.page.index("function saveCast()", start)]
+        self.assertIn("entry.role_options", body,
+                      "без этого опция роли осталась бы только на экране")
+
+    def test_the_role_option_field_is_named_like_the_collector_looks_for_it(self):
+        """Поле опции и сборщик состава обязаны называть её одинаково.
+
+        Поле собирается в карточке, а читает его collectCast по id: разойдись они
+        хоть на символ — выбранное положение роли молча не доедет до сервера,
+        а место будет играть не так, как обещает подсказка.
+        """
+        start = self.page.index("const roleOptionsBlock")
+        filler = self.page[start:self.page.index("return ''", start)]
+        for piece in ("id=\"' + key + '-' + idx + '\"",
+                      "ROLE_OPTION_NAMES[key]", "ROLE_OPTION_HINTS[key]"):
+            with self.subTest(piece=piece):
+                self.assertIn(piece, filler, "опция роли собирается не из ключа и номера места")
+
+        start = self.page.index("function collectCast()")
+        body = self.page[start:self.page.index("function saveCast()", start)]
+        self.assertIn("document.getElementById(`${key}-${idx}`)", body)
+        self.assertIn("ROLE_OPTIONS[roleOf(p)]", body,
+                      "без этого места с новой ролью унесли бы чужие опции")
+
+    def test_every_name_pasted_into_the_markup_is_declared(self):
+        """Имя, подставленное в разметку карточки, но нигде не объявленное, роняет её целиком.
+
+        Так уже случилось: в карточку добавили roleOptionsBlock, а сам блок собрать
+        забыли — скрипт падал на первой же карточке, и пульт показывал пустоту.
+        Ни один тест этого не видел, потому что разметку никто не исполняет.
+        """
+        for line in self.page.splitlines():
+            match = re.fullmatch(r"\s*\+\s*([A-Za-z_$][\w$]*)\s*", line)
+            if not match:
+                continue
+            name = match.group(1)
+            with self.subTest(name=name):
+                self.assertRegex(
+                    self.page,
+                    r"(?:const|let|var|function)\s+" + re.escape(name) + r"\b",
+                    f"в разметку карточки подставляется {name}, а такого имени в странице нет")
+
     def test_an_unchosen_model_is_not_silently_replaced(self):
         """Пустое место — это «модель ещё не выбрана», а не «первая модель Ollama».
 
@@ -1241,6 +1410,13 @@ class TestScenePanel(unittest.TestCase):
         start = self.page.index("function modelOptions(")
         body = self.page[start:self.page.index("function collectCast()", start)]
         self.assertIn("— выберите модель —", body)
+
+    def test_the_sidebar_shows_whether_the_judge_is_public(self):
+        """Судья-публичный меняет спектакль на ходу — это должно быть видно сразу."""
+        start = self.page.index("function updateSidebarParticipants()")
+        body = self.page[start:self.page.index("function saveInstructions()", start)]
+        self.assertIn("roleOptionsOf(p).publicity", body,
+                      "в сайдбаре не видно, слышат ли судью остальные")
 
     def test_the_new_controls_use_the_routes_that_exist(self):
         for route in ("/api/participants/draft", "/api/participants/reset"):

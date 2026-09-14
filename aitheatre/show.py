@@ -303,13 +303,24 @@ class DebateSession:
     # Единый фильтр истории
     # ------------------------------------------------------------
 
-    def _get_history_for(self, viewer: dict, mode: str = "dialog") -> list:
+    def _get_history_for(self, viewer: dict, mode: str = "dialog",
+                         round_num: int = None) -> list:
         """
         mode:
-          "dialog"            — поток диалога (без вердиктов судьи, бусты inline)
-          "participants_only" — только посты обычных участников (для судьи)
+          "dialog"            — поток диалога: бусты модератора видны всем, а
+                                вердикт судьи — всем, если судья публичный;
+          "participants_only" — только посты обычных участников (для судьи),
+                                а судье с опцией «только текущий акт» — ещё и
+                                только за этот акт.
         """
         viewer_name = viewer.get("display_name", "")
+        viewer_options = role_options(viewer)
+        # Публичные судьи — те, чьё слово слышат остальные. Считаем по текущему
+        # составу: сделав судью анонимным, его прошлые вердикты тоже закрываются
+        public_judges = {
+            p.get("display_name") for p in self.runtime_participants
+            if p.get("is_judge") and role_options(p).get("publicity") == "public"
+        }
         result = []
         for post in self.conversation_history:
             is_mod = post.get("is_moderator", False)
@@ -318,8 +329,12 @@ class DebateSession:
             if mode == "participants_only":
                 if is_mod or is_judge:
                     continue
+                if viewer.get("is_judge") and viewer_options.get("scope") == "act" \
+                        and round_num is not None and post.get("round") != round_num:
+                    continue
             elif mode == "dialog":
-                if is_judge and post.get("display_name") != viewer_name:
+                if is_judge and post.get("display_name") != viewer_name \
+                        and post.get("display_name") not in public_judges:
                     continue
             result.append(post)
         return result
@@ -343,6 +358,14 @@ class DebateSession:
                         f"(ведущий обсуждения) даёт указание: {content}"
                     ),
                     "name": "moderator",
+                })
+            elif post.get("is_judge"):
+                # Сюда попадает только слово публичного судьи: анонимного другие
+                # не слышат, и до этих строк его вердикт просто не доходит
+                messages.append({
+                    "role": "user",
+                    "content": (f"⚖️ СУДЬЯ {speaker} выносит вердикт: {content}"),
+                    "name": "judge",
                 })
             elif speaker == viewer_name:
                 messages.append({
@@ -449,16 +472,22 @@ class DebateSession:
 
         # ---- Судья ----
         if is_judge:
-            history = self._get_history_for(participant, mode="participants_only")
+            # Что судья слышит, решает опция роли: всё обсуждение или только этот акт
+            viewer_options = role_options(participant)
+            history = self._get_history_for(participant, mode="participants_only",
+                                            round_num=round_num)
             history_messages = self._format_history(name, history)
             trimmed = text.trim_history_by_tokens(history_messages, text.estimate_tokens(system_prompt))
             messages.extend(trimmed)
 
             if trimmed:
+                task = ("оцени только текущий акт — то, что сказано с прошлого вердикта. "
+                        if viewer_options.get("scope") == "act"
+                        else "оцени выступления участников за всё обсуждение. ")
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"Как {name}, оцени выступления участников. "
+                        f"Как {name}, {task}"
                         f"Для каждого участника укажи оценку от 1 до 10 баллов "
                         f"и краткое содержание его речи."
                     ),
@@ -636,6 +665,64 @@ def set_cast_role(participant: dict, role: str):
     participant["is_judge"] = role == "judge"
 
 
+# ── ОПЦИИ РОЛИ ───────────────────────────────────────────────────────────────
+# Опция — это не выключатель, а положение: у неё конечный набор значений, и одно
+# из них занято всегда. Опции есть только у роли судьи, и обе они про слух, потому
+# что роль — это ведь прежде всего вопрос «кто кого слышит»:
+#
+#   scope     — что видит судья: всё обсуждение или только текущий акт
+#   publicity — кто слышит судью: только режиссёр (как было всегда) или все
+#
+# Значения по умолчанию — это ровно то, как спектакль игрался до появления опций,
+# поэтому старые сцены и файлы настроек ничего не теряют.
+ROLE_OPTIONS = {
+    "judge": {
+        "scope": ("all", "act"),
+        "publicity": ("anonymous", "public"),
+    },
+}
+
+ROLE_OPTION_DEFAULTS = {
+    "judge": {"scope": "all", "publicity": "anonymous"},
+}
+
+
+def sanitize_role_options(role: str, raw) -> dict:
+    """Опции роли: неизвестные ключи и чужие значения просто не берутся.
+
+    Так читаются и файл настроек (его правят руками), и старые сцены, где опций
+    ещё не было, — место получает набор своей роли по умолчанию.
+    """
+    allowed = ROLE_OPTIONS.get(role) or {}
+    options = dict(ROLE_OPTION_DEFAULTS.get(role, {}))
+    if isinstance(raw, dict):
+        for key, values in allowed.items():
+            if raw.get(key) in values:
+                options[key] = raw[key]
+    return options
+
+
+def role_options(participant: dict) -> dict:
+    """Опции места — по его роли. У роли без опций это пустой словарь."""
+    return sanitize_role_options(cast_role(participant), participant.get("role_options"))
+
+
+def apply_role_options(entry: dict, sent=None):
+    """Ставит месту набор опций его роли, сохраняя то, что уже стояло.
+
+    Если роль без опций — поле убирается совсем: иначе в составе копился бы мусор
+    от прежней роли, и место, снова став судьёй, вспомнило бы чужие настройки.
+    """
+    role = cast_role(entry)
+    if not ROLE_OPTIONS.get(role):
+        entry.pop("role_options", None)
+        return
+    merged = dict(entry.get("role_options") or {})
+    if isinstance(sent, dict):
+        merged.update(sent)
+    entry["role_options"] = sanitize_role_options(role, merged)
+
+
 def _free_pick(pool, used) -> str:
     """Случайное значение из списка, которого нет среди занятых.
 
@@ -726,6 +813,7 @@ def build_cast_entry(template: dict, used: dict) -> dict:
         "instruction": settings.DEFAULT_JUDGE_INSTRUCTION if role == "judge" else "",
     }
     set_cast_role(entry, role)
+    apply_role_options(entry, template.get("role_options"))
 
     # Персональные числа и режим размышлений: то, что задано явно, важнее жребия
     own_params = {key: template[key] for key in settings.PER_PARTICIPANT_OPTION_KEYS
@@ -769,6 +857,9 @@ def scene_from_cast(cast: list) -> list:
     scene = []
     for participant in cast or []:
         place = {"model": participant.get("model", ""), "role": cast_role(participant)}
+        options = role_options(participant)
+        if options:
+            place["role_options"] = options
         for key in settings.PER_PARTICIPANT_OPTION_KEYS:
             if participant.get(key) is not None:
                 place[key] = participant[key]
@@ -820,6 +911,9 @@ def sanitize_scene(raw) -> list:
         role = item.get("role")
         place = {"model": str(item.get("model", "") or ""),
                  "role": role if role in CAST_ROLES else "participant"}
+        options = sanitize_role_options(place["role"], item.get("role_options"))
+        if options:
+            place["role_options"] = options
         for key in settings.PER_PARTICIPANT_OPTION_KEYS:
             value = item.get(key)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -921,6 +1015,23 @@ def apply_cast_patch(incoming: list) -> str:
         if role not in CAST_ROLES:
             return f"{name}: роль может быть участник, модератор или судья"
 
+        # Опции роли: из пульта приходят только разрешённые значения, поэтому
+        # чужое — это уже расхождение клиента с сервером, и лучше сказать о нём
+        # вслух, чем тихо поставить своё
+        sent_options = raw.get("role_options")
+        if sent_options is not None:
+            if not isinstance(sent_options, dict):
+                return f"{name}: опции роли должны быть набором значений"
+            for key, value in sent_options.items():
+                allowed = (ROLE_OPTIONS.get(role) or {}).get(key)
+                if allowed is None:
+                    # Опция от прежней роли: место только что сменило роль, и требовать
+                    # от клиента идеально чистых полей было бы ловушкой — такая
+                    # опция просто не ставится
+                    continue
+                if value not in allowed:
+                    return f"{name}: «{key}» может быть " + " или ".join(allowed)
+
         model = str(raw.get("model", (entry or {}).get("model", "")) or "").strip()
         if entry and entry.get("model") == "human":
             # Живое место человеком и остаётся: он говорит сам, модель ему не подсунуть
@@ -975,7 +1086,7 @@ def apply_cast_patch(incoming: list) -> str:
         updates.append({"entry": entry, "name": name, "gender": gender,
                         "model": model, "options": options, "think": think,
                         "preset": preset, "role": role, "keywords": keywords,
-                        "emoji": emoji,
+                        "emoji": emoji, "role_options": sent_options,
                         "avatar_url": raw.get("avatar_url") or None,
                         "has_avatar_url": "avatar_url" in raw})
 
@@ -1031,6 +1142,9 @@ def apply_cast_patch(incoming: list) -> str:
 
         # Роль меняется целиком: бывший судья, став модератором, судьёй быть перестаёт
         set_cast_role(entry, u["role"])
+        # Опции роли — её собственный набор: у судьи он есть, у остальных ролей
+        # поле убирается, чтобы место не принесло старые опции в новую роль
+        apply_role_options(entry, u["role_options"])
         # Правила судьи ходят вместе с ролью — но только те, что поставил сам
         # сервер вместе с ролью: инструкцию, написанную руками, роль не трогает
         if was_role != u["role"]:
