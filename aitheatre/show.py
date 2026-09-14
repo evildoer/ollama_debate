@@ -23,24 +23,31 @@ from . import text
 
 def load_theatre_settings():
     """
-    Возвращает правила судьи, сохранённые в прошлых запусках: имена участников
-    каждый спектакль новые, а правила судьи — общая настройка роли.
+    Возвращает правила судьи и сцену, сохранённые в прошлых запусках: имена
+    участников каждый спектакль новые, а это — режиссёрские настройки.
     """
     try:
         if settings.SETTINGS_FILE.exists():
             data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
-            rules = data.get("judge_rules") if isinstance(data, dict) else None
+            if not isinstance(data, dict):
+                return
+            rules = data.get("judge_rules")
             if isinstance(rules, list) and rules:
                 session.judge_rules = [str(r) for r in rules]
                 print(f"⚖️  Загружены сохранённые правила судьи: {len(session.judge_rules)} пунктов")
+            scene = sanitize_scene(data.get("scene"))
+            if scene:
+                session.scene = scene
+                print(f"🎬 Загружена сохранённая сцена: мест {len(scene)}")
     except Exception as e:
         print(f"  ⚠️  Не читается {settings.SETTINGS_FILE.name}: {e}")
 
 def save_theatre_settings():
-    """Сохраняет правила судьи рядом с проектом (файл в .gitignore)."""
+    """Сохраняет правила судьи и сцену рядом с проектом (файл в .gitignore)."""
     try:
         settings.SETTINGS_FILE.write_text(
-            json.dumps({"judge_rules": session.judge_rules}, ensure_ascii=False, indent=1),
+            json.dumps({"judge_rules": session.judge_rules, "scene": session.scene or []},
+                       ensure_ascii=False, indent=1),
             encoding="utf-8")
     except Exception as e:
         print(f"  ⚠️  Не сохраняется {settings.SETTINGS_FILE.name}: {e}")
@@ -117,6 +124,12 @@ class DebateSession:
         self.moderator_finished = False
         self.runtime_participants = []
         self.conversation_history = []
+        # Сцена: места состава без имён, аватаров и личных инструкций — роли,
+        # модели, порядок и числа. None значит «своей сцены нет»: места берутся
+        # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
+        # остаётся на будущее, поэтому она переживает и новый спектакль,
+        # и перезапуск приложения.
+        self.scene = None
 
     # ------------------------------------------------------------
     # Состав: единственный источник правды
@@ -126,9 +139,22 @@ class DebateSession:
     # а не дублирует форму настройки отдельной формой модератора.
 
     def load_new_cast(self):
-        """Новый состав: роли и модели из PARTICIPANTS, свежие имена, эмодзи, профессии."""
-        self.runtime_participants = build_new_cast()
+        """Новый состав: свежие имена, эмодзи и характеры, а места — со сцены.
+
+        Сцены нет (первый запуск, «Состав из PARTICIPANTS») — места берутся
+        из PARTICIPANTS, как было всегда.
+        """
+        self.runtime_participants = build_new_cast(self.scene or None)
         self.sync_cast_media()
+
+    def reset_scene(self):
+        """Забыть сцену и собрать состав заново из PARTICIPANTS.
+
+        Это выход из положения, если составом наэкспериментировались так, что
+        непонятно, откуда что взялось: имена, роли и порядок станут как в файле.
+        """
+        self.scene = None
+        self.load_new_cast()
 
     def sync_cast_media(self):
         """
@@ -180,14 +206,19 @@ class DebateSession:
         self.sync_cast_media()
 
     def new_show(self):
-        """«Новый спектакль»: новый состав, настройки роли сохраняем."""
+        """«Новый спектакль»: новые имена и характеры, настройки и сцена — те же."""
         guidelines = list(self.moderator_guidelines)
         judge_rules = list(self.judge_rules)
         static_instructions = list(self.static_instructions)
+        # Сцена — то, что режиссёр настроил руками, поэтому её и переживает:
+        # иначе «Новый спектакль» возвращал бы состав из файла, а не тот,
+        # который только что собрали в пульте
+        scene = [dict(place) for place in self.scene] if self.scene else None
         self.__init__()
         self.moderator_guidelines = guidelines
         self.judge_rules = judge_rules
         self.static_instructions = static_instructions
+        self.scene = scene
         self.load_new_cast()
 
     # ------------------------------------------------------------
@@ -531,6 +562,9 @@ class DebateSession:
             search_count=search_count,
             search_queries=search_queries,
             is_judge=participant.get("is_judge", False),
+            # Роль модератора тоже должна быть видна в ленте: пульт разрешает
+            # назначить модератором не только живого человека, но и модель
+            is_moderator=participant.get("is_moderator", False),
             gender=participant.get("gender", "male"),
         )
         self.current_action = None
@@ -578,132 +612,326 @@ def character_parameters(key: str) -> tuple:
     return params, preset.get("think", "auto")
 
 
-def build_new_cast() -> list:
+# ── МЕСТА В СОСТАВЕ ────────────────────────────────────────────────────────
+# У каждого места свой cast_id, и состав правят именно по нему, а не по номеру:
+# режиссёр убирает, добавляет и переставляет участников прямо в пульте, поэтому
+# «третий по счёту» в любой момент может оказаться другим человеком — вместе с
+# чужими личными инструкциями, если опознавать место по индексу.
+CAST_ROLES = ("participant", "moderator", "judge")
+
+
+def cast_role(participant: dict) -> str:
+    """Роль места в составе: обычный участник, модератор или судья."""
+    if participant.get("is_moderator"):
+        return "moderator"
+    if participant.get("is_judge"):
+        return "judge"
+    return "participant"
+
+
+def set_cast_role(participant: dict, role: str):
+    """Роль ставится целиком: модератор и судья — разные места, а не два флага,
+    поэтому «сделать судьёй» автоматически снимает прежнюю роль."""
+    participant["is_moderator"] = role == "moderator"
+    participant["is_judge"] = role == "judge"
+
+
+def _free_pick(pool, used) -> str:
+    """Случайное значение из списка, которого нет среди занятых.
+
+    dict.fromkeys заодно снимает повторы в самом списке: имена и профессии
+    когда-то выдавались через .remove(), а он убирает только одно вхождение —
+    лишний повтор давал двух «Галин» в одном спектакле.
     """
-    Состав спектакля: роли и модели из PARTICIPANTS, новые имена, эмодзи по полу
-    и ключевые слова для аватара. Характер (температура и прочие параметры) либо
-    берётся из PARTICIPANTS, либо разыгрывается случайно - см. RANDOMIZE_CHARACTERS.
+    free = [value for value in dict.fromkeys(pool) if value not in used]
+    return random.choice(free) if free else ""
+
+
+def pick_name(gender: str, used_names: set) -> str:
+    """Свободное имя для нужного пола; если свои кончились — берём из другого списка."""
+    own = settings.MALE_NAMES if gender == "male" else settings.FEMALE_NAMES
+    other = settings.FEMALE_NAMES if gender == "male" else settings.MALE_NAMES
+    for pool in (own, other, own + other):
+        name = _free_pick(pool, used_names)
+        if name:
+            return name
+    return "Участник"
+
+
+def pick_emoji(gender: str, used_emojis: set) -> str:
+    """Эмодзи по полу: сначала свои, потом нейтральные; два одинаковых в одном
+    спектакле не встречаются, а нейтральные добирают нехватку."""
+    own = settings.AVATAR_EMOJIS_MALE if gender == "male" else settings.AVATAR_EMOJIS_FEMALE
+    for pool in (own, settings.AVATAR_EMOJIS_NEUTRAL, settings.AVATAR_EMOJIS):
+        emoji = _free_pick(pool, used_emojis)
+        if emoji:
+            return emoji
+    return "📣"
+
+
+def pick_keywords(gender: str, used: dict) -> str:
+    """Ключевые слова для аватара: профессия плюс пол.
+
+    Пол дописывается обязательно, иначе поисковик охотно отдаёт женщине
+    «мужчину-геолога», а профессия не повторяется — иначе двум участникам
+    искалась бы одна и та же картинка.
     """
-    cast = []
-    # dict.fromkeys заодно снимает возможные повторы в самих списках: имена,
-    # эмодзи и профессии выдаются через .remove(), а он убирает только одно
-    # вхождение - лишний повтор в списке давал двух «Галин» в одном спектакле
-    available_male_names = list(dict.fromkeys(settings.MALE_NAMES))
-    available_female_names = list(dict.fromkeys(settings.FEMALE_NAMES))
-    available_professions = list(dict.fromkeys(settings.PROFESSIONS))
-    available_emojis = list(dict.fromkeys(
-        settings.AVATAR_EMOJIS_MALE + settings.AVATAR_EMOJIS_FEMALE + settings.AVATAR_EMOJIS_NEUTRAL))
+    gender_word = "женщина" if gender == "female" else "мужчина"
+    profession = _free_pick(settings.PROFESSIONS, used["professions"]) or "человек"
+    used["professions"].add(profession)
+    return f"{profession} {gender_word}"
 
-    for template in settings.PARTICIPANTS:
-        gender = random.choice(["male", "female"])
 
-        # Уникальное имя по полу, с запасным вариантом из другого списка
-        if gender == "male":
-            if available_male_names:
-                name = random.choice(available_male_names)
-                available_male_names.remove(name)
-            elif available_female_names:
-                name = random.choice(available_female_names)
-                available_female_names.remove(name)
-            else:
-                name = "Участник"
-        else:
-            if available_female_names:
-                name = random.choice(available_female_names)
-                available_female_names.remove(name)
-            elif available_male_names:
-                name = random.choice(available_male_names)
-                available_male_names.remove(name)
-            else:
-                name = "Участник"
+def empty_used() -> dict:
+    """Занятые имена, эмодзи, ключевые слова и профессии — для выбора свободных."""
+    return {"names": set(), "emojis": set(), "keywords": set(), "professions": set()}
 
-        # Эмодзи по полу: сначала свои, потом нейтральные; в одном спектакле
-        # два одинаковых аватара не встречаются
-        own_pool = settings.AVATAR_EMOJIS_MALE if gender == "male" else settings.AVATAR_EMOJIS_FEMALE
-        for pool in (own_pool, settings.AVATAR_EMOJIS_NEUTRAL, available_emojis, settings.AVATAR_EMOJIS):
-            free = [e for e in pool if e in available_emojis]
-            if free:
-                emoji = random.choice(free)
-                available_emojis.remove(emoji)
-                break
-        else:
-            emoji = "📣"
 
-        if available_professions:
-            profession = random.choice(available_professions)
-            available_professions.remove(profession)
-        else:
-            profession = "человек"
+def used_from_cast(cast: list) -> dict:
+    """Занятые имена, эмодзи и профессии по уже собранному составу."""
+    used = empty_used()
+    for participant in cast or []:
+        used["names"].add(participant.get("display_name", ""))
+        used["emojis"].add(participant.get("avatar_emoji", ""))
+        keywords = participant.get("avatar_keywords", "") or ""
+        used["keywords"].add(keywords)
+        if keywords.strip():
+            used["professions"].add(keywords.rsplit(" ", 1)[0])
+    return used
 
-        # Ключевые слова для поиска аватара: с полом, иначе поисковик охотно
-        # отдаёт женщине «мужчину-геолога»
-        gender_word = "женщина" if gender == "female" else "мужчина"
 
-        entry = {
-            "model": template["model"],
-            "display_name": name,
-            "avatar_keywords": f"{profession} {gender_word}",
-            "avatar_emoji": emoji,
-            "avatar_url": None,
-            "gender": gender,
-            "is_moderator": template.get("is_moderator", False),
-            "is_judge": template.get("is_judge", False),
-            "instruction": settings.DEFAULT_JUDGE_INSTRUCTION if template.get("is_judge") else "",
-        }
+def build_cast_entry(template: dict, used: dict) -> dict:
+    """Одно место в составе: имя, пол, эмодзи, ключевые слова и характер.
 
-        # Персональные параметры и режим размышлений из PARTICIPANTS: то, что задано
-        # в конфиге, важнее случайного розыгрыша
-        own_params = {key: template[key] for key in settings.PER_PARTICIPANT_OPTION_KEYS
-                      if template.get(key) is not None}
-        entry.update(own_params)
-        if template.get("think") in settings.THINK_MODES and template.get("think") != "auto":
-            entry["think"] = template["think"]
-        if isinstance(template.get("preset"), str) and template["preset"]:
-            entry["preset"] = template["preset"]
-        # Характер на этот спектакль — общий жребий, без скидок на роль
-        elif settings.RANDOMIZE_CHARACTERS and template.get("model") != "human" and not own_params:
-            character = draw_character()
-            params, think = character_parameters(character)
-            entry.update(params)
-            entry["preset"] = character
-            if think != "auto":
-                entry["think"] = think
+    used — занятые значения; функция ими пользуется и тут же их пополняет,
+    поэтому и вся труппа, и одно добавленное место собираются одинаково.
+    """
+    gender = random.choice(["male", "female"])
+    role = template.get("role") or cast_role(template)
+    name = pick_name(gender, used["names"])
+    keywords = pick_keywords(gender, used)
+    emoji = pick_emoji(gender, used["emojis"])
+    used["names"].add(name)
+    used["emojis"].add(emoji)
+    used["keywords"].add(keywords)
 
-        cast.append(entry)
+    entry = {
+        "cast_id": uuid.uuid4().hex[:8],
+        "model": template.get("model", ""),
+        "display_name": name,
+        "avatar_keywords": keywords,
+        "avatar_emoji": emoji,
+        "avatar_url": None,
+        "gender": gender,
+        "instruction": settings.DEFAULT_JUDGE_INSTRUCTION if role == "judge" else "",
+    }
+    set_cast_role(entry, role)
 
-    return cast
+    # Персональные числа и режим размышлений: то, что задано явно, важнее жребия
+    own_params = {key: template[key] for key in settings.PER_PARTICIPANT_OPTION_KEYS
+                  if template.get(key) is not None}
+    entry.update(own_params)
+    if template.get("think") in settings.THINK_MODES and template.get("think") != "auto":
+        entry["think"] = template["think"]
+    if isinstance(template.get("preset"), str) and template["preset"]:
+        entry["preset"] = template["preset"]
+    # Характер на этот спектакль — общий жребий, без скидок на роль
+    elif settings.RANDOMIZE_CHARACTERS and entry["model"] != "human" and not own_params:
+        character = draw_character()
+        params, think = character_parameters(character)
+        entry.update(params)
+        entry["preset"] = character
+        if think != "auto":
+            entry["think"] = think
+
+    return entry
+
+
+def build_new_cast(places: list = None) -> list:
+    """
+    Новая труппа: имена, эмодзи и характеры разыгрываются заново, а места (роли,
+    модели, порядок, числа) берутся со сцены — того, что режиссёр настроил
+    в пульте. Сцены нет — места берутся из PARTICIPANTS.
+    """
+    templates = places if places is not None else settings.PARTICIPANTS
+    used = empty_used()
+    return [build_cast_entry(template, used) for template in templates]
+
+
+def scene_from_cast(cast: list) -> list:
+    """
+    Сцена: места состава без имён, аватаров и личных инструкций.
+
+    Имена каждый спектакль новые, а вот роли, модели, порядок в очереди реплик и
+    числа генерации режиссёр настраивает один раз — они и переживают и «Новый
+    спектакль», и перезапуск приложения.
+    """
+    scene = []
+    for participant in cast or []:
+        place = {"model": participant.get("model", ""), "role": cast_role(participant)}
+        for key in settings.PER_PARTICIPANT_OPTION_KEYS:
+            if participant.get(key) is not None:
+                place[key] = participant[key]
+        if participant.get("think") in settings.THINK_MODES:
+            place["think"] = participant["think"]
+        if participant.get("preset"):
+            place["preset"] = str(participant["preset"])[:32]
+        scene.append(place)
+    return scene
+
+
+def default_cast_model(cast: list, places: list = None) -> str:
+    """Модель для нового места: как у соседа по сцене, иначе как в PARTICIPANTS."""
+    for participant in reversed(cast or []):
+        model = participant.get("model", "")
+        if model and model != "human":
+            return model
+    for place in (places if places is not None else settings.PARTICIPANTS):
+        model = place.get("model", "")
+        if model and model != "human":
+            return model
+    return ""
+
+
+def sanitize_scene(raw) -> list:
+    """
+    Сцена из файла настроек: лишнее отбрасывается, чужие значения не проходят.
+
+    Файл лежит рядом с проектом и правится руками, поэтому сцену из него проверяем
+    так же строго, как пришедшую из пульта: непонятная роль или строка вместо
+    числа не должны ломать спектакль — такое место просто теряет это поле.
+    """
+    if not isinstance(raw, list):
+        return []
+    scene = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        place = {"model": str(item.get("model", "") or ""),
+                 "role": role if role in CAST_ROLES else "participant"}
+        for key in settings.PER_PARTICIPANT_OPTION_KEYS:
+            value = item.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                place[key] = value
+        if item.get("think") in settings.THINK_MODES:
+            place["think"] = item["think"]
+        if item.get("preset") in settings.CHARACTER_PRESETS:
+            place["preset"] = item["preset"]
+        scene.append(place)
+    return scene
+
+
+def still_in_cast(participant: dict, cast: list) -> bool:
+    """Место всё ещё в составе? Режиссёр может убрать его прямо посреди акта.
+
+    Сравниваем по cast_id, а не по имени: имя правится в пульте на ходу,
+    а место при этом остаётся тем же.
+    """
+    cast_id = participant.get("cast_id")
+    if cast_id:
+        return any(p.get("cast_id") == cast_id for p in cast)
+    return participant in cast
+
+
+def draft_cast_entry(role: str = "participant") -> dict:
+    """
+    Заготовка нового места для кнопки «➕ Добавить»: имя, эмодзи и профессия
+    выбираются сразу, а модель — как у соседа по сцене.
+
+    Заготовка живёт только на странице: в составе места ещё нет, и до кнопки
+    «Применить состав» она спектакль не трогает.
+    """
+    template = {
+        "model": default_cast_model(session.runtime_participants,
+                                    session.scene or settings.PARTICIPANTS),
+        "role": role if role in CAST_ROLES else "participant",
+    }
+    return build_cast_entry(template, used_from_cast(session.runtime_participants))
 
 
 def apply_cast_patch(incoming: list) -> str:
     """
-    Правка состава по индексам: имя, пол, модель, ключевые слова, аватар и параметры
-    генерации. Одинаково работает и для заготовки, и для идущего спектакля: прошлые
-    реплики не трогаются, меняется только то, что будет сказано дальше.
-    Возвращает текст ошибки либо пустую строку.
-    """
-    cast = session.runtime_participants
-    if len(incoming) != len(cast):
-        return f"В составе {len(cast)} участников, получено {len(incoming)}"
+    Применяет состав целиком: имена, пол, роли, модели, ключевые слова, аватар,
+    порядок в очереди реплик, добавление и удаление мест.
 
-    updates = []
-    for index, raw in enumerate(incoming):
+    Место опознаётся по cast_id, а не по номеру: режиссёр переставляет и убирает
+    участников прямо в пульте, и по индексам личная инструкция уехала бы к соседу.
+    Пришло без cast_id — значит это новое место, и ему придумываются имя, эмодзи и
+    профессия, если клиент их не прислал.
+
+    Одинаково работает и для заготовки, и для идущего спектакля: уже сказанное не
+    трогается, меняется только то, что будет дальше. Запрос применяется целиком либо
+    отклоняется целиком — иначе ошибка в последнем участнике оставила бы предыдущих
+    уже переименованными, а форму — с прежними именами.
+    """
+    if not isinstance(incoming, list):
+        return "Нужен список participants"
+    if not incoming:
+        return "В составе должно остаться хотя бы одно место"
+    for raw in incoming:
         if not isinstance(raw, dict):
             return "Каждый участник должен быть объектом"
-        entry = cast[index]
-        name = str(raw.get("display_name", entry.get("display_name", "")) or "").strip()
-        if not name:
-            return "У всех участников должны быть имена"
-        gender = str(raw.get("gender", entry.get("gender", "male")) or "male")
+
+    cast = session.runtime_participants
+    by_id = {p.get("cast_id"): p for p in cast if p.get("cast_id")}
+
+    # Имена, эмодзи и профессии, занятые тем, что прислал пульт: по ним выбираются
+    # свободные значения для новых мест
+    used = empty_used()
+    for raw in incoming:
+        used["names"].add(str(raw.get("display_name", "") or "").strip())
+        used["emojis"].add(str(raw.get("avatar_emoji", "") or ""))
+        keywords = str(raw.get("avatar_keywords", "") or "")
+        used["keywords"].add(keywords)
+        if keywords.strip():
+            used["professions"].add(keywords.rsplit(" ", 1)[0])
+
+    updates = []
+    for raw in incoming:
+        entry = by_id.get(str(raw.get("cast_id") or ""))
+        name = str(raw.get("display_name", "") or "").strip()
+        gender = str(raw.get("gender", (entry or {}).get("gender", "male")) or "male")
         if gender not in ("male", "female"):
-            return f"{name}: пол может быть только «male» или «female»"
-        model = str(raw.get("model", entry.get("model", "")) or "").strip()
+            return f"{name or 'Новое место'}: пол может быть только «male» или «female»"
+        if not name:
+            if entry:
+                # У места на сцене имя уже есть, и пустое поле в пульте — это
+                # скорее стёртая строка, чем желание остаться без имени
+                return "У всех участников должны быть имена"
+            # А новое место имени ещё не имеет: придумываем его так же,
+            # как при подъёме занавеса
+            name = pick_name(gender, used["names"])
+            used["names"].add(name)
+
+        # Роль — это место в очереди, а не два флага: судья и модератор друг друга
+        # исключают, поэтому роль ставится целиком
+        role = raw.get("role", cast_role(entry) if entry else "participant")
+        role = str(role or "participant")
+        if role not in CAST_ROLES:
+            return f"{name}: роль может быть участник, модератор или судья"
+
+        model = str(raw.get("model", (entry or {}).get("model", "")) or "").strip()
+        if entry and entry.get("model") == "human":
+            # Живое место человеком и остаётся: он говорит сам, модель ему не подсунуть
+            model = "human"
+
+        keywords = str(raw.get("avatar_keywords", "") or "")
+        emoji = str(raw.get("avatar_emoji", "") or "")
+        if not entry:
+            if not keywords:
+                keywords = pick_keywords(gender, used)
+                used["keywords"].add(keywords)
+            if not emoji:
+                emoji = pick_emoji(gender, used["emojis"])
+                used["emojis"].add(emoji)
 
         # Режим размышлений и «характер» — не числа Ollama, а наши поля
-        think = raw.get("think", entry.get("think", "auto"))
+        think = raw.get("think", (entry or {}).get("think", "auto"))
         think = str(think or "auto")
         if think not in settings.THINK_MODES:
             return f"{name}: размышления могут быть auto, on или off"
-        preset = raw.get("preset", entry.get("preset", ""))
+        preset = raw.get("preset", (entry or {}).get("preset", ""))
         preset = preset if isinstance(preset, str) else ""
 
         # Параметры генерации разбираем здесь же: запрос применяется целиком либо
@@ -734,8 +962,12 @@ def apply_cast_patch(incoming: list) -> str:
                 return f"{name}: «top_k» должен быть не меньше 1"
             options[key] = number
 
-        updates.append({"entry": entry, "raw": raw, "name": name, "gender": gender,
-                        "model": model, "options": options, "think": think, "preset": preset})
+        updates.append({"entry": entry, "name": name, "gender": gender,
+                        "model": model, "options": options, "think": think,
+                        "preset": preset, "role": role, "keywords": keywords,
+                        "emoji": emoji,
+                        "avatar_url": raw.get("avatar_url") or None,
+                        "has_avatar_url": "avatar_url" in raw})
 
     names = [u["name"] for u in updates]
     if len(set(names)) != len(names):
@@ -753,9 +985,53 @@ def apply_cast_patch(incoming: list) -> str:
     old_models = {p.get("model", "") for p in cast if p.get("model")}
     busy = session.current_action == "thinking"
 
+    new_cast = []
     for u in updates:
-        entry, raw = u["entry"], u["raw"]
-        old_name = entry.get("display_name", "")
+        entry = u["entry"]
+        was_role = cast_role(entry) if entry else "participant"
+        if entry is None:
+            # Новое место: пульт присылает его целиком (имя, эмодзи, профессию,
+            # модель придумал сервер, когда пульт попросил заготовку)
+            entry = {
+                "cast_id": uuid.uuid4().hex[:8],
+                "model": u["model"],
+                "display_name": u["name"],
+                "avatar_keywords": u["keywords"],
+                "avatar_emoji": u["emoji"] or "📣",
+                "avatar_url": u["avatar_url"],
+                "gender": u["gender"],
+                "instruction": settings.DEFAULT_JUDGE_INSTRUCTION if u["role"] == "judge" else "",
+            }
+        else:
+            # Место уже играло: имя меняется вместе с историей для промптов,
+            # иначе модель считала бы прошлые реплики чужими
+            if u["name"] != entry.get("display_name"):
+                session.rename_participant(entry.get("display_name", ""), u["name"])
+                entry["display_name"] = u["name"]
+            entry["gender"] = u["gender"]
+            if entry.get("model") != "human" and u["model"]:
+                entry["model"] = u["model"]
+            if u["keywords"]:
+                entry["avatar_keywords"] = u["keywords"]
+            if u["emoji"]:
+                entry["avatar_emoji"] = u["emoji"]
+            if u["has_avatar_url"]:
+                entry["avatar_url"] = u["avatar_url"]
+        new_cast.append(entry)
+
+        # Роль меняется целиком: бывший судья, став модератором, судьёй быть перестаёт
+        set_cast_role(entry, u["role"])
+        # Правила судьи ходят вместе с ролью — но только те, что поставил сам
+        # сервер вместе с ролью: инструкцию, написанную руками, роль не трогает
+        if was_role != u["role"]:
+            own = str(entry.get("instruction", "") or "")
+            if u["role"] == "judge" and not own.strip():
+                entry["instruction"] = settings.DEFAULT_JUDGE_INSTRUCTION
+            elif was_role == "judge" \
+                    and own.strip() == settings.DEFAULT_JUDGE_INSTRUCTION.strip():
+                # Место перестало быть судьёй: правила судьи в другой роли —
+                # это уже не правило роли, а чужой текст в чужом промпте
+                entry["instruction"] = ""
 
         for key, number in u["options"].items():
             if number is None:
@@ -772,27 +1048,16 @@ def apply_cast_patch(incoming: list) -> str:
         else:
             entry.pop("preset", None)
 
-        if u["name"] != old_name:
-            session.rename_participant(old_name, u["name"])
-            entry["display_name"] = u["name"]
-        entry["gender"] = u["gender"]
-        # Роль (человек или модель) не меняется: у людей модель остаётся "human"
-        if entry.get("model") != "human" and u["model"] and u["model"] != "human":
-            entry["model"] = u["model"]
-        if raw.get("avatar_keywords") is not None:
-            entry["avatar_keywords"] = str(raw["avatar_keywords"])
-        if raw.get("avatar_emoji"):
-            entry["avatar_emoji"] = str(raw["avatar_emoji"])
-        if "avatar_url" in raw:
-            entry["avatar_url"] = raw.get("avatar_url") or None
-
+    session.runtime_participants = new_cast
+    # Сцена — это и есть порядок, роли и числа: она переживёт «Новый спектакль»
+    session.scene = scene_from_cast(new_cast)
     session.sync_cast_media()
 
-    # Заменённые модели этому спектаклю больше не нужны - освобождаем память
-    # (но не ту, что прямо сейчас считает реплику)
+    # Модели заменённых и убранных мест этому спектаклю больше не нужны —
+    # освобождаем память (но не ту, что прямо сейчас считает реплику)
     if not busy:
-        used = {p.get("model", "") for p in cast if p.get("model")}
-        for model in sorted(old_models - used):
+        still_used = {p.get("model", "") for p in new_cast if p.get("model")}
+        for model in sorted(old_models - still_used):
             if model and model != "human":
                 ollama_api.unload_model(model)
 
@@ -850,9 +1115,17 @@ def run_debate_thread(topic: str, on_post=None):
             session.current_round = round_num
             print(f"\n🎭 Акт {round_num}")
             
-            print(f"  🎭 Персонажи: {[p.get('display_name', '') + ' (' + p.get('model', '') + ')' for p in runtime_participants]}")
+            # Состав перечитываем на каждом акте: режиссёр мог убрать место или
+            # добавить новое прямо на ходу, и этот акт играется уже новым составом
+            act_cast = list(session.runtime_participants)
+            print(f"  🎭 Персонажи: {[p.get('display_name', '') + ' (' + p.get('model', '') + ')' for p in act_cast]}")
             
-            for participant in runtime_participants:
+            for participant in act_cast:
+                # Убранный участник на сцену не выходит: слепок act_cast его ещё
+                # держит, а в составе его уже нет
+                if not still_in_cast(participant, session.runtime_participants):
+                    print(f"  ⤵️  {participant.get('display_name', '')} убран из состава - пропускаю")
+                    continue
                 # Режиссёр мог завершить спектакль прямо посреди акта: тогда не ждём
                 # конца круга, а останавливаемся на ближайшем участнике
                 if session.moderator_finished:
@@ -874,6 +1147,14 @@ def run_debate_thread(topic: str, on_post=None):
                     while True:
                         time.sleep(0.5)
                         
+                        # Живое место могли убрать из состава, пока оно ждало
+                        # реплики: без этой проверки спектакль ждал бы его вечно
+                        if not still_in_cast(participant, session.runtime_participants):
+                            print(f"\n⤵️  {participant.get('display_name', '')} убран из состава")
+                            session.waiting_for_human = False
+                            session.current_action = None
+                            break
+                        
                         if session.moderator_finished:
                             print(f"\n✅ Спектакль завершён режиссёром")
                             session.finished = True
@@ -893,6 +1174,7 @@ def run_debate_thread(topic: str, on_post=None):
                                     search_count=0,
                                     search_queries=[],
                                     is_moderator=participant.get("is_moderator", False),
+                                    is_judge=participant.get("is_judge", False),
                                     gender=participant.get("gender", "male")
                                 )
                                 print(f"🎬 {participant.get('display_name', '')}: {current_message[:50]}")

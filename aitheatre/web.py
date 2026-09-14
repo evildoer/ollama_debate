@@ -79,14 +79,42 @@ def get_models():
         "error": error or "",
     })
 
+def cast_payload() -> list:
+    """
+    Состав для пульта: сам участник, его роль и действующие числа.
+
+    Отдаётся и на GET, и в ответе на правку состава. Пустое поле участника значит
+    «взять из OPTIONS», поэтому вместе с числами уходит и их источник: иначе это
+    пришлось бы держать в голове, а строка «Уйдёт в модель» после «Применить
+    состав» на миг показывала бы прочерки.
+    """
+    cast = []
+    for p in show.session.runtime_participants:
+        item = dict(p)
+        # Роль одним словом: странице так проще, чем два флага
+        item["role"] = show.cast_role(p)
+        if p.get("model") != "human":
+            merged = ollama_api._merge_options(p)
+            item["effective_options"] = {
+                k: merged[k] for k in settings.PER_PARTICIPANT_OPTION_KEYS if merged.get(k) is not None
+            }
+            item["own_options"] = [k for k in settings.PER_PARTICIPANT_OPTION_KEYS if p.get(k) is not None]
+            # Пока поле пустое, работают параметры из самого Modelfile модели
+            item["model_defaults"] = ollama_api.fetch_model_parameters(p.get("model", ""))
+        cast.append(item)
+    return cast
+
+
 @app.route('/api/participants', methods=['GET', 'POST'])
 def participants():
     """
     GET  - состав спектакля (пока он не начат – заготовка) плюс проверки моделей
            и видеопамяти. Имена больше не генерируются на каждый запрос, поэтому
            перезагрузка страницы не подменяет труппу.
-    POST - правка состава: {participants: [{display_name, gender, model, temperature, ...}]}.
-           Одинаково работает и в настройке, и на ходу режиссёра.
+    POST - правка состава целиком: {participants: [{cast_id, display_name, role,
+           gender, model, temperature, ...}]}. Работает и в настройке, и на ходу:
+           место опознаётся по cast_id, поэтому его можно переставить, убрать или
+           добавить, а роль — поменять (роль у каждого места одна).
     """
     if request.method == 'POST':
         data = request.get_json(silent=True) or {}
@@ -97,26 +125,15 @@ def participants():
         if error:
             print(f"⛔ Состав не изменён: {error}")
             return jsonify({"success": False, "error": error})
+        # Сцена правится вместе с составом: именно она переживёт новый спектакль
+        # и перезапуск приложения
+        show.save_theatre_settings()
         print(f"🎭 Состав обновлён: {[p.get('display_name') for p in show.session.runtime_participants]}")
-        return jsonify({"success": True, "participants": show.session.runtime_participants})
+        return jsonify({"success": True, "participants": cast_payload()})
 
     models = [p.get("model", "") for p in show.session.runtime_participants]
-    # Пустое поле участника значит «взять из OPTIONS». Чтобы это не приходилось
-    # держать в голове, отдаём интерфейсу действующие значения и их источник.
-    cast = []
-    for p in show.session.runtime_participants:
-        item = dict(p)
-        if p.get("model") != "human":
-            merged = ollama_api._merge_options(p)
-            item["effective_options"] = {
-                k: merged[k] for k in settings.PER_PARTICIPANT_OPTION_KEYS if merged.get(k) is not None
-            }
-            item["own_options"] = [k for k in settings.PER_PARTICIPANT_OPTION_KEYS if p.get(k) is not None]
-            # Пока поле пустое, работают параметры из самого Modelfile модели
-            item["model_defaults"] = ollama_api.fetch_model_parameters(p.get("model", ""))
-        cast.append(item)
     return jsonify({
-        "participants": cast,
+        "participants": cast_payload(),
         "option_keys": list(settings.PER_PARTICIPANT_OPTION_KEYS),
         # «Характер»: список и его числа держит сервер, чтобы пульт и случайный
         # розыгрыш на новый спектакль опирались на один и тот же набор
@@ -136,6 +153,25 @@ def participants():
         # И если они не влезают в видеопамять при текущем num_ctx
         "vram_status": ollama_api.check_vram_fit(models),
     })
+
+@app.route('/api/participants/draft', methods=['POST'])
+def draft_participant():
+    """
+    Заготовка нового места для кнопки «➕ Добавить»: имя, эмодзи, профессия
+    и модель как у соседа по сцене. В составе при этом ничего не меняется —
+    место появится только после «Применить состав».
+    """
+    data = request.get_json(silent=True) or {}
+    role = str(data.get("role", "participant") or "participant")
+    return jsonify({"success": True, "participant": show.draft_cast_entry(role)})
+
+@app.route('/api/participants/reset', methods=['POST'])
+def reset_cast():
+    """«Состав из PARTICIPANTS»: забыть сцену и собрать труппу заново по файлу."""
+    show.session.reset_scene()
+    show.save_theatre_settings()
+    print(f"↺ Сцена сброшена, места берутся из PARTICIPANTS")
+    return jsonify({"success": True, "participants": cast_payload()})
 
 @app.route('/api/avatar/<keywords>')
 def get_avatar(keywords):
@@ -235,10 +271,10 @@ def start():
 
 @app.route('/api/reset', methods=['POST'])
 def reset():
-    """«Новый спектакль»: новый состав, правила роли остаются."""
+    """«Новый спектакль»: новые имена и характеры, а сцена и правила — те же."""
     show.session.new_show()
     print(f"🎭 Новый состав: {[p.get('display_name') for p in show.session.runtime_participants]}")
-    return jsonify({"success": True, "participants": show.session.runtime_participants})
+    return jsonify({"success": True, "participants": cast_payload()})
 
 @app.route('/api/status')
 def status():

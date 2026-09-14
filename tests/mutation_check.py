@@ -56,9 +56,55 @@ BUGS = {
     ],
     "судью снова закрепили за одним характером": [
         ("aitheatre/show.py",
-         "            character = draw_character()",
-         '            character = "pedant" if template.get("is_judge") '
+         "        character = draw_character()",
+         '        character = "pedant" if template.get("is_judge") '
          "else draw_character()"),
+    ],
+    "место в составе снова опознаётся по номеру, а не по себе": [
+        ("aitheatre/show.py",
+         '        entry = by_id.get(str(raw.get("cast_id") or ""))',
+         "        _index = incoming.index(raw)\n"
+         "        entry = cast[_index] if _index < len(cast) else None"),
+    ],
+    "роль на месте ставят, не снимая прежнюю": [
+        ("aitheatre/show.py",
+         '    participant["is_moderator"] = role == "moderator"\n'
+         '    participant["is_judge"] = role == "judge"',
+         '    if role == "moderator":\n'
+         '        participant["is_moderator"] = True\n'
+         '    if role == "judge":\n'
+         '        participant["is_judge"] = True'),
+    ],
+    "убранный участник всё равно выходит на сцену": [
+        ("aitheatre/show.py",
+         "                if not still_in_cast(participant, session.runtime_participants):",
+         "                if False:"),
+    ],
+    "«Новый спектакль» забывает сцену": [
+        ("aitheatre/show.py",
+         "        scene = [dict(place) for place in self.scene] if self.scene else None",
+         "        scene = None"),
+    ],
+    "сцена не возвращается после перезапуска": [
+        ("aitheatre/show.py",
+         '            scene = sanitize_scene(data.get("scene"))',
+         "            scene = []"),
+    ],
+    "чужая роль из файла становится ролью на сцене": [
+        ("aitheatre/show.py",
+         '                 "role": role if role in CAST_ROLES else "participant"}',
+         '                 "role": role}'),
+    ],
+    "правила судьи остаются у того, кто судьёй быть перестал": [
+        ("aitheatre/show.py",
+         '            elif was_role == "judge" \\\n'
+         '                    and own.strip() == settings.DEFAULT_JUDGE_INSTRUCTION.strip():',
+         "            elif False:"),
+    ],
+    "пульт не отправляет опознавательное место": [
+        ("aitheatre/page.py",
+         "                    cast_id: p.cast_id || '',",
+         "                    cast_id: '',"),
     ],
     "тема берётся только из поля формы": [
         ("aitheatre/web.py",
@@ -77,17 +123,16 @@ BUGS = {
     ],
     "характер судьи теряется при переименовании состава": [
         ("aitheatre/show.py",
-         '        if raw.get("avatar_keywords") is not None:',
-         '        entry.pop("instruction", None)\n'
-         '        if raw.get("avatar_keywords") is not None:'),
+         "            # Место уже играло: имя меняется вместе с историей для промптов,\n"
+         "            # иначе модель считала бы прошлые реплики чужими\n"
+         '            if u["name"] != entry.get("display_name"):',
+         '            entry.pop("instruction", None)\n'
+         '            if u["name"] != entry.get("display_name"):'),
     ],
-    "повтор в списке имён снова даёт двух «Галин»": [
+    "имя и эмодзи выбираются без оглядки на занятые": [
         ("aitheatre/show.py",
-         "    available_female_names = list(dict.fromkeys(settings.FEMALE_NAMES))",
-         "    available_female_names = settings.FEMALE_NAMES.copy()"),
-        ("aitheatre/settings.py",
-         '    "Варвара", "Диана", "Елизавета", "Кристина", "Нелли"',
-         '    "Варвара", "Диана", "Елизавета", "Кристина", "Нелли", "Галина"'),
+         "    free = [value for value in dict.fromkeys(pool) if value not in used]",
+         "    free = list(dict.fromkeys(pool))"),
     ],
     "пост не получает класс роли (полосы пропадают)": [
         ("aitheatre/page.py",

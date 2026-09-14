@@ -279,11 +279,13 @@ HTML_TEMPLATE = """
 
                     <div class="panel-section" id="sec-cast">
                         <div class="panel-heading"><span class="num">02</span><span class="name">Состав</span></div>
-                        <div class="panel-note">Имена, пол, модели и параметры генерации. Правки действуют сразу: до спектакля — на заготовку, на ходу — на будущие реплики (уже сказанное не меняется). Характер (температура и прочее) на каждый спектакль разыгрывается случайно.</div>
+                        <div class="panel-note">Сцена: кто играет, в каком порядке и в какой роли. Правки действуют сразу и работают до и на ходу — уже сказанное не меняется. Порядок карточек — очередь реплик, поэтому участников можно переставлять, а место может быть любым из трёх ролей. Характер (температура и прочее) на каждый спектакль разыгрывается случайно.</div>
                         <div id="castEditor"></div>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-top:6px;">
                             <button class="btn btn-secondary" onclick="saveCast()" style="margin:0;">💾 Применить состав</button>
+                            <button class="btn btn-secondary" onclick="addCast()" style="margin:0;" title="Добавить место в конец сцены: имя, эмодзи и профессия придумаются сами, а модель будет как у соседа. Потом место можно настроить как любое другое">➕ Добавить участника</button>
                             <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику — и судье тоже (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
+                            <button class="btn btn-secondary" onclick="resetCast()" style="margin:0;" title="Забыть собранную сцену и взять места из PARTICIPANTS — имена, роли и порядок как в файле настроек">↺ Состав из PARTICIPANTS</button>
                             <span id="randomizeHint" style="font-size:12px;color:#666;"></span>
                         </div>
                     </div>
@@ -634,6 +636,106 @@ HTML_TEMPLATE = """
             return String(value) === String(current) ? 'selected' : '';
         }
 
+        // Роли места. На сервере это два флага (модератор и судья друг друга
+        // исключают), а в пульте — одно значение из списка: так режиссёру не надо
+        // помнить, что бывший судья может остаться судьёй, став модератором
+        const CAST_ROLES = [
+            {value: 'participant', label: '🎭 Участник', badge: 'role-participant'},
+            {value: 'moderator', label: '🎬 Модератор', badge: 'role-moderator'},
+            {value: 'judge', label: '⚖️ Судья', badge: 'role-judge'},
+        ];
+
+        function roleOf(p) {
+            if (p.role) return p.role;
+            return p.is_moderator ? 'moderator' : (p.is_judge ? 'judge' : 'participant');
+        }
+
+        function roleInfo(role) {
+            return CAST_ROLES.find(r => r.value === role) || CAST_ROLES[0];
+        }
+
+        // Та же роль целиком, что и на сервере: меняется место, а не флаг
+        function setRoleLocally(p, role) {
+            p.role = role;
+            p.is_moderator = role === 'moderator';
+            p.is_judge = role === 'judge';
+        }
+
+        // Числа и имена, набранные в полях, живут в разметке, а перестановка и
+        // удаление работают с массивом cast: перед ними переносим набранное
+        // в массив — иначе перенос карточки стёр бы всё, что уже вписано,
+        // но ещё не применено кнопкой «Применить состав»
+        function syncCastFromForm() {
+            const typed = collectCast();
+            cast = cast.map((p, idx) => Object.assign({}, p, typed[idx]));
+        }
+
+        function moveCast(idx, delta) {
+            const target = idx + delta;
+            if (target < 0 || target >= cast.length) return;
+            syncCastFromForm();
+            cast.splice(target, 0, cast.splice(idx, 1)[0]);
+            renderCastEditor();
+        }
+
+        function removeCast(idx) {
+            if (cast.length <= 1) {
+                alert('В составе должно остаться хотя бы одно место — иначе спектаклю некому играть');
+                return;
+            }
+            syncCastFromForm();
+            cast.splice(idx, 1);
+            renderCastEditor();
+            updateSidebarParticipants();
+        }
+
+        function setCastRole(idx, role) {
+            syncCastFromForm();
+            setRoleLocally(cast[idx], role);
+            renderCastEditor();
+            updateSidebarParticipants();
+        }
+
+        // Новое место придумывает сервер: у него те же списки имён, эмодзи
+        // и профессий, что у жребия при подъёме занавеса
+        function addCast() {
+            fetch('/api/participants/draft', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({role: 'participant'})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success || !data.participant) {
+                    throw new Error(data.error || 'сервер не дал заготовку места');
+                }
+                syncCastFromForm();
+                cast.push(data.participant);
+                renderCastEditor();
+                updateSidebarParticipants();
+                // Место появляется в конце длинной сцены: показываем его,
+                // иначе непонятно, сработала ли кнопка
+                const card = document.querySelector('[data-participant-index="' + (cast.length - 1) + '"]');
+                if (card) card.scrollIntoView({block: 'center', behavior: 'smooth'});
+            })
+            .catch(err => alert('❌ ' + err.message));
+        }
+
+        function resetCast() {
+            if (!confirm('Взять состав из PARTICIPANTS? Собранная сцена и её порядок будут забыты.')) return;
+            fetch('/api/participants/reset', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { alert('❌ ' + (data.error || 'не удалось сбросить состав')); return; }
+                cast = data.participants || [];
+                renderCastEditor();
+                updateSidebarParticipants();
+                loadCast();
+            })
+            .catch(err => alert('❌ ' + err.message));
+        }
+
         // Состав — одна и та же форма и для настройки спектакля, и для правок на ходу.
         // Параметры генерации видны сразу: у пустого поля подсказкой стоит значение из
         // OPTIONS, а под ними написано, что именно уйдёт в модель.
@@ -645,14 +747,13 @@ HTML_TEMPLATE = """
             }
             container.innerHTML = cast.map((p, idx) => {
                 const isHuman = p.model === 'human';
-                let roleBadge = '<span class="role-badge role-participant">🎭 УЧАСТНИК</span>';
-                let borderColor = '#000000';
-                if (p.is_moderator) {
-                    roleBadge = '<span class="role-badge role-moderator">🎬 МОДЕРАТОР</span>';
-                } else if (p.is_judge) {
-                    roleBadge = '<span class="role-badge role-judge">⚖️ СУДЬЯ</span>';
-                    borderColor = '#7b1fa2';
-                }
+                const role = roleOf(p);
+                const roleBadge = '<span class="role-badge ' + roleInfo(role).badge + '">'
+                    + roleInfo(role).label + '</span>';
+                // Рамка карточки показывает роль — тот же цвет, что у полосы судьи в ленте
+                const borderColor = role === 'judge' ? '#7b1fa2' : '#000000';
+                // Селекты роли и модели не тянутся на всю ширину, в отличие от полей
+                const tightStyle = 'padding:6px;border:1px solid #000;font-family:Georgia,serif;font-size:13px;';
                 const avatar = p.avatar_url
                     ? '<img src="' + escapeHtml(p.avatar_url) + '">'
                     : (p.avatar_emoji || '📣');
@@ -785,7 +886,21 @@ HTML_TEMPLATE = """
                 +       paramsBlock
                 +     '</div>'
                 +   '</div>'
-                +   '<div style="margin-top:14px;">' + roleBadge + '</div>'
+                // Роль и очередь правятся прямо в карточке: верхняя карточка —
+                // та, чья реплика прозвучит первой
+                +   '<div style="margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">'
+                +     roleBadge
+                +     '<select id="role-' + idx + '" onchange="setCastRole(' + idx + ', this.value)" style="' + tightStyle + '"'
+                +       ' title="Роль места: участник говорит по очереди, модератор ведёт обсуждение, судья оценивает в конце. Роль одна — назначив судью, прежняя снимается">'
+                +       CAST_ROLES.map(r => '<option value="' + r.value + '" ' + selectIf(r.value, role) + '>'
+                                      + escapeHtml(r.label) + '</option>').join('')
+                +     '</select>'
+                +     '<span style="margin-left:auto;display:flex;gap:6px;align-items:center;">'
+                +       '<button class="btn btn-secondary" onclick="moveCast(' + idx + ', -1)" ' + (idx === 0 ? 'disabled' : '') + ' style="padding:4px 12px;margin:0;font-size:14px;" title="Раньше в очереди реплик">↑</button>'
+                +       '<button class="btn btn-secondary" onclick="moveCast(' + idx + ', 1)" ' + (idx === cast.length - 1 ? 'disabled' : '') + ' style="padding:4px 12px;margin:0;font-size:14px;" title="Позже в очереди реплик">↓</button>'
+                +       '<button class="btn btn-secondary" onclick="removeCast(' + idx + ')" ' + (cast.length <= 1 ? 'disabled' : '') + ' style="padding:4px 12px;margin:0;font-size:14px;" title="Убрать это место из состава">🗑</button>'
+                +     '</span>'
+                +   '</div>'
                 + '</div>';
             }).join('');
             // У людей параметров нет, у моделей строка «Уйдёт в модель» собирается по полям
@@ -797,13 +912,23 @@ HTML_TEMPLATE = """
             // Модель из PARTICIPANTS может быть с тегом: показываем её, даже если список иной
             if (current && !list.includes(current)) list.unshift(current);
             if (!list.length) return `<option value="${escapeHtml(current || '')}" selected>${escapeHtml(current || 'нет моделей')}</option>`;
-            return list.map(name => `<option value="${escapeHtml(name)}" ${name === current ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+            // Место без модели — это «ещё не выбрана», а не «первая в списке».
+            // Раньше подходящего варианта не находилось, и браузер сам показывал
+            // первую модель: перестановка или удаление соседа молча записывали её
+            // в участника, а сайдбар показывал чужую модель вместо прочерка
+            const blank = current ? '' : '<option value="" selected>— выберите модель —</option>';
+            return blank + list.map(name => `<option value="${escapeHtml(name)}" ${name === current ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
         }
         
         function collectCast() {
             return cast.map((p, idx) => {
                 const pick = (id, fallback) => { const el = document.getElementById(id); return el ? el.value : fallback; };
                 const entry = {
+                    // cast_id — это и есть место: по нему сервер понимает, кого
+                    // переставили, кого убрали, а кого только что добавили
+                    // (без него место считалось бы новым и получило бы новое имя)
+                    cast_id: p.cast_id || '',
+                    role: roleOf(p),
                     display_name: pick(`name-${idx}`, p.display_name).trim(),
                     gender: pick(`gender-${idx}`, p.gender),
                     avatar_keywords: pick(`keywords-${idx}`, p.avatar_keywords),

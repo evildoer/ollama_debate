@@ -37,6 +37,8 @@ import json
 import re
 import symtable
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -470,9 +472,21 @@ class TestCastEditor(unittest.TestCase):
         self.assertNotIn("temperature", self.session.runtime_participants[0],
                          "пустое поле значит «как в модели», параметр не отправляем")
 
-    def test_wrong_participant_count_is_rejected(self):
-        error = show.apply_cast_patch([{}])
-        self.assertIn("участник", error.lower())
+    def test_an_empty_cast_is_rejected(self):
+        """Спектаклю некому играть: пустой список — ошибка, а не «убрать всех»."""
+        self.assertIn("хотя бы одно", show.apply_cast_patch([]))
+
+    def test_a_place_without_an_id_is_a_new_place_not_an_error(self):
+        """Незнакомое место — это новое место, и сервер сам даёт ему имя.
+
+        Раньше тот же ответ был «в составе шесть участников, получено один»,
+        и добавить участника из пульта было нельзя.
+        """
+        self.assertEqual(show.apply_cast_patch([{"model": "r1", "role": "participant"}]), "")
+        cast = self.session.runtime_participants
+        self.assertEqual(len(cast), 1)
+        self.assertTrue(cast[0]["display_name"].strip())
+        self.assertTrue(cast[0]["cast_id"])
 
     def test_empty_name_is_rejected(self):
         payload = cast_payload(self.session)
@@ -521,6 +535,179 @@ class TestCastEditor(unittest.TestCase):
         payload[0]["display_name"] = "Новое Имя"
         self.assertEqual(show.apply_cast_patch(payload), "")
         self.assertEqual(self.session.posts[0]["display_name"], "Старое Имя")
+
+
+# ---------------------------------------------------------------- сцена
+
+class TestSceneEditing(unittest.TestCase):
+    """Сцена собирается из пульта: добавить, убрать, переставить, сменить роль.
+
+    Место в составе опознаётся по cast_id, а не по номеру. Это главное в правке
+    состава: по номерам личная инструкция уехала бы к соседу, как только места
+    переставят, — и никто бы этого не заметил до странной реплики на сцене.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        for name, value in (
+            ("check_models_available",
+             mock.Mock(return_value={"ok": True, "missing": [], "error": None})),
+            ("unload_model", mock.Mock()),
+            ("ask_model", mock.Mock(side_effect=self._answer)),
+        ):
+            patcher = mock.patch.object(ollama_api, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _answer(self, model, messages, participant_name, **kwargs):
+        return f"Реплика от {participant_name}.", 0, []
+
+    def _apply(self, payload):
+        self.assertEqual(show.apply_cast_patch(payload), "")
+
+    def test_a_new_place_arrives_with_name_emoji_and_profession(self):
+        payload = cast_payload(self.session)
+        was = {p["display_name"] for p in self.session.runtime_participants}
+        payload.append({"model": "r1", "role": "participant"})
+        self._apply(payload)
+
+        cast = self.session.runtime_participants
+        self.assertEqual(len(cast), len(payload))
+        new_place = cast[-1]
+        self.assertTrue(new_place["display_name"].strip())
+        self.assertNotIn(new_place["display_name"], was, "двух одинаковых имён быть не должно")
+        self.assertTrue(new_place["avatar_emoji"])
+        self.assertTrue(new_place["avatar_keywords"].strip())
+        self.assertEqual(new_place["model"], "r1")
+
+    def test_a_removed_place_leaves_the_cast(self):
+        payload = cast_payload(self.session)
+        gone = payload[1]
+        payload.remove(gone)
+        self._apply(payload)
+
+        names = [p["display_name"] for p in self.session.runtime_participants]
+        self.assertNotIn(gone["display_name"], names)
+        self.assertEqual(len(names), len(payload))
+
+    def test_reordering_keeps_personal_settings_with_their_place(self):
+        """Сердце правки состава: переставили места — настройки переехали с ними."""
+        first = self.session.runtime_participants[0]
+        first["instruction"] = "ЛИЧНАЯ ИНСТРУКЦИЯ ПЕРВОГО"
+        first["temperature"] = 1.11
+        order_before = [p["display_name"] for p in self.session.runtime_participants]
+        payload = cast_payload(self.session)
+        payload.reverse()
+        self._apply(payload)
+
+        cast = self.session.runtime_participants
+        self.assertEqual([p["display_name"] for p in cast],
+                         list(reversed(order_before)),
+                         "места должны встать в том порядке, в котором их прислал пульт")
+        keeper = next(p for p in cast if p["display_name"] == first["display_name"])
+        self.assertEqual(keeper["instruction"], "ЛИЧНАЯ ИНСТРУКЦИЯ ПЕРВОГО")
+        self.assertEqual(keeper["temperature"], 1.11)
+
+    def test_role_is_one_per_place(self):
+        """Бывший судья, став модератором, судьёй быть перестаёт."""
+        judge_index = next(i for i, p in enumerate(self.session.runtime_participants)
+                           if p.get("is_judge"))
+        payload = cast_payload(self.session)
+        payload[judge_index]["role"] = "moderator"
+        self._apply(payload)
+
+        place = self.session.runtime_participants[judge_index]
+        self.assertTrue(place["is_moderator"])
+        self.assertFalse(place["is_judge"], "две роли сразу — это уже не роль")
+        self.assertEqual(show.cast_role(place), "moderator")
+
+    def test_the_judge_rules_travel_with_the_role(self):
+        """Правила судьи ставит сама роль: судьёй стал — получил их, перестал — отдал."""
+        judge_index = next(i for i, p in enumerate(self.session.runtime_participants)
+                           if p.get("is_judge"))
+        self.assertEqual(self.session.runtime_participants[judge_index]["instruction"].strip(),
+                         settings.DEFAULT_JUDGE_INSTRUCTION.strip())
+
+        payload = cast_payload(self.session)
+        payload[judge_index]["role"] = "participant"
+        payload[0]["role"] = "judge"
+        self._apply(payload)
+
+        cast = self.session.runtime_participants
+        self.assertEqual(cast[judge_index]["instruction"], "",
+                         "бывший судья унёс с собой свои правила")
+        self.assertTrue(cast[0]["instruction"].strip(), "новому судье нужны его правила")
+
+    def test_a_hand_written_instruction_survives_a_role_change(self):
+        """Инструкцию, написанную руками, роль не трогает — даже у судьи."""
+        judge_index = next(i for i, p in enumerate(self.session.runtime_participants)
+                           if p.get("is_judge"))
+        self.session.runtime_participants[judge_index]["instruction"] = "МОЯ ЛИЧНАЯ ИНСТРУКЦИЯ"
+
+        payload = cast_payload(self.session)
+        payload[judge_index]["role"] = "participant"
+        self._apply(payload)
+
+        self.assertEqual(self.session.runtime_participants[judge_index]["instruction"],
+                         "МОЯ ЛИЧНАЯ ИНСТРУКЦИЯ")
+
+    def test_any_place_can_become_the_judge(self):
+        payload = cast_payload(self.session)
+        for item in payload:
+            item["role"] = "participant"
+        payload[0]["role"] = "judge"
+        self._apply(payload)
+
+        cast = self.session.runtime_participants
+        self.assertEqual([show.cast_role(p) for p in cast].count("judge"), 1)
+        prompt = self.session.get_system_prompt(cast[0])
+        self.assertIn(settings.DEFAULT_JUDGE_INSTRUCTION.strip()[:30], prompt,
+                      "судья без правил судьи — это уже не судья")
+
+    def test_the_scene_stores_places_without_names(self):
+        payload = cast_payload(self.session)
+        payload.reverse()
+        self._apply(payload)
+
+        scene = self.session.scene
+        self.assertEqual([place["role"] for place in scene],
+                         [show.cast_role(p) for p in self.session.runtime_participants])
+        for place in scene:
+            self.assertNotIn("display_name", place)
+            self.assertNotIn("instruction", place)
+
+    def test_a_model_moderator_is_marked_as_one_in_the_feed(self):
+        """Модератором можно назначить и модель — в ленте это должно быть видно."""
+        person = self.session.runtime_participants[0]
+        show.set_cast_role(person, "moderator")
+        self.session.handle_ai_turn(person, 1)
+        self.assertEqual(self.session.posts[-1]["role"], "moderator")
+
+    def test_new_show_keeps_the_scene_and_makes_new_names(self):
+        """«Новый спектакль» меняет имена, но не роли, порядок и число мест."""
+        payload = cast_payload(self.session)[1:]
+        payload[0]["role"] = "moderator"
+        payload[0]["model"] = "другая-модель"
+        self._apply(payload)
+
+        self.session.new_show()
+
+        cast = self.session.runtime_participants
+        self.assertEqual(len(cast), len(payload), "убранное место вернулось на сцену")
+        self.assertEqual(show.cast_role(cast[0]), "moderator")
+        self.assertEqual(cast[0]["model"], "другая-модель")
+
+    def test_the_draft_place_does_not_touch_the_cast(self):
+        before = [p["display_name"] for p in self.session.runtime_participants]
+        draft = show.draft_cast_entry()
+
+        self.assertTrue(draft["model"], "новому месту нужна модель — как у соседа")
+        self.assertFalse(draft["is_judge"])
+        self.assertFalse(draft["is_moderator"])
+        for key in ("cast_id", "display_name", "avatar_emoji", "avatar_keywords", "gender"):
+            self.assertIn(key, draft)
+        self.assertEqual([p["display_name"] for p in self.session.runtime_participants], before)
 
 
 # ---------------------------------------------------------------- промпт
@@ -612,6 +799,184 @@ class TestSettingsPersistence(unittest.TestCase):
         self.assertEqual(self.session.static_instructions, ["Общее правило"])
         self.assertEqual(self.session.posts, [])
         self.assertEqual(len(self.session.runtime_participants), len(old_names))
+
+
+class TestScenePersistence(unittest.TestCase):
+    """Сцена переживает перезапуск: лежит в том же файле, что правила судьи.
+
+    В файле мест не хранятся: только роли, модели, порядок и числа. Имена
+    каждый спектакль новые, а собранную сцену не хочется собирать заново.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        for target, name, value in (
+            (settings, "SETTINGS_FILE", Path(self.tmpdir.name) / "settings.json"),
+            (ollama_api, "check_models_available",
+             mock.Mock(return_value={"ok": True, "missing": [], "error": None})),
+        ):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_saved_scene_comes_back_after_a_restart(self):
+        payload = cast_payload(self.session)
+        payload[0]["role"] = "judge"
+        payload[1]["role"] = "participant"
+        payload[2]["temperature"] = 0.33
+        payload.reverse()
+        self.assertEqual(show.apply_cast_patch(payload), "")
+        saved = copy.deepcopy(self.session.scene)
+        show.save_theatre_settings()
+
+        # Перезапуск: сессия поднимается с нуля и читает файл
+        self.session.scene = None
+        show.load_theatre_settings()
+        self.assertEqual(self.session.scene, saved)
+
+    def test_rules_and_scene_live_in_one_file(self):
+        self.session.judge_rules = ["Пункт"]
+        self.session.scene = [{"model": "r1", "role": "judge"}]
+        show.save_theatre_settings()
+
+        data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(data["judge_rules"], ["Пункт"])
+        self.assertEqual(data["scene"], [{"model": "r1", "role": "judge"}])
+
+    def test_a_new_cast_is_built_from_the_saved_scene(self):
+        self.session.scene = [{"model": "r1", "role": "participant"},
+                              {"model": "human", "role": "judge"}]
+        show.save_theatre_settings()
+
+        self.session.scene = None
+        show.load_theatre_settings()
+        self.session.load_new_cast()
+
+        cast = self.session.runtime_participants
+        self.assertEqual([show.cast_role(p) for p in cast], ["participant", "judge"])
+        self.assertEqual([p["model"] for p in cast], ["r1", "human"])
+        self.assertTrue(cast[1]["instruction"].strip())
+
+    def test_a_broken_scene_in_the_file_does_not_break_the_show(self):
+        """Файл лежит рядом с проектом и правится руками — сцена из него не священна."""
+        settings.SETTINGS_FILE.write_text(json.dumps({
+            "judge_rules": ["Пункт"],
+            "scene": [{"model": "r1", "role": "дворецкий", "temperature": "горячо",
+                       "think": "наверное", "preset": "неттакого"},
+                      "просто строка"],
+        }, ensure_ascii=False), encoding="utf-8")
+
+        show.load_theatre_settings()
+
+        self.assertEqual(len(self.session.scene), 1, "мусор из файла не должен становиться местом")
+        self.assertEqual(self.session.scene[0]["role"], "participant")
+        for key in ("temperature", "think", "preset"):
+            self.assertNotIn(key, self.session.scene[0])
+
+
+class TestLiveCastChanges(unittest.TestCase):
+    """Спектакль читает состав заново: правки на ходу — поведение, а не слова.
+
+    Гоняется настоящий поток спектакля, но Ollama подменена заглушкой, а пауза
+    между репликами убрана: в тесте она только тянет время. Занавес опускаем
+    из того же колбэка, которым спектакль сообщает о новой реплике.
+    """
+
+    def setUp(self):
+        self.session = show.DebateSession()
+        self.session.scene = [{"model": "r1", "role": "participant"} for _ in range(3)]
+        self.session.load_new_cast()
+        strip_session_patch(self, self.session)
+        self.spoken = []
+        self.cast_error = None
+        for name, value in (
+            ("ask_model", mock.Mock(side_effect=self._answer)),
+            ("check_models_available",
+             mock.Mock(return_value={"ok": True, "missing": [], "error": None})),
+            ("unload_model", mock.Mock()),
+            ("unload_other_show_models", mock.Mock()),
+        ):
+            patcher = mock.patch.object(ollama_api, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _answer(self, model, messages, participant_name, **kwargs):
+        return f"Реплика от {participant_name}.", 0, []
+
+    def _play(self, on_post):
+        with mock.patch("time.sleep"):
+            show.run_debate_thread("тема", on_post=on_post)
+
+    def test_a_removed_place_does_not_speak(self):
+        # Убираем среднее место: тогда занавес опускается уже после того, как
+        # убранный успел бы сказать — иначе проверка ничего не стоит
+        removed = self.session.runtime_participants[1]
+
+        def on_post(post):
+            self.spoken.append(post["display_name"])
+            if len(self.spoken) == 1:
+                self.cast_error = show.apply_cast_patch(
+                    [p for p in cast_payload(self.session)
+                     if p["cast_id"] != removed["cast_id"]])
+            if len(self.spoken) >= 2:
+                self.session.moderator_finished = True
+
+        self._play(on_post)
+
+        self.assertEqual(self.cast_error, "", "состав не изменился — проверять нечего")
+        self.assertEqual(len(self.session.runtime_participants), 2)
+        self.assertIn(self.session.runtime_participants[-1]["display_name"], self.spoken,
+                      "акт должен был пойти дальше, а не встать")
+        self.assertNotIn(removed["display_name"], self.spoken,
+                         "убранный участник всё равно вышел на сцену")
+
+    def test_a_place_added_mid_act_speaks_in_the_next_act(self):
+        self.session.scene = [{"model": "r1", "role": "participant"}]
+        self.session.load_new_cast()
+        added = []
+
+        def on_post(post):
+            self.spoken.append(post["display_name"])
+            if len(self.spoken) == 1:
+                draft = show.draft_cast_entry()
+                added.append(draft["display_name"])
+                self.cast_error = show.apply_cast_patch(cast_payload(self.session) + [draft])
+            if len(self.spoken) >= 3:
+                self.session.moderator_finished = True
+
+        self._play(on_post)
+
+        self.assertEqual(self.cast_error, "")
+        self.assertIn(added[0], self.spoken,
+                      "новое место так и не вышло на сцену — значит акт играет старый состав")
+
+    def test_the_live_judges_post_is_marked_as_the_judge(self):
+        """Судьёй можно назначить и живого человека: в ленте он должен быть судьёй."""
+        self.session.scene = [{"model": "human", "role": "judge"}]
+        self.session.load_new_cast()
+
+        worker = threading.Thread(target=show.run_debate_thread, args=("тема",),
+                                  kwargs={"on_post": None})
+        worker.daemon = True
+        worker.start()
+        deadline = time.time() + 15
+        try:
+            while not self.session.waiting_for_human and time.time() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(self.session.waiting_for_human,
+                            "спектакль так и не дошёл до живой реплики")
+            self.session.moderator_message = "Вердикт: 8 из 10"
+            while self.session.moderator_message is not None and time.time() < deadline:
+                time.sleep(0.05)
+        finally:
+            self.session.moderator_finished = True
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive(), "спектакль не остановился")
+        self.assertEqual(self.session.posts[-1]["role"], "judge")
 
 
 # ---------------------------------------------------------------- VRAM
@@ -812,6 +1177,53 @@ class TestTuningPanel(unittest.TestCase):
                          "список чисел в пульте должен быть один — PARAM_KEYS")
 
 
+class TestScenePanel(unittest.TestCase):
+    """Пульт должен уметь всё, что умеет сцена: добавить, убрать, переставить, роль.
+
+    Проверяется по разметке, как TestTuningPanel: сервер про такую потерю не
+    скажет ничего — он просто не получит запроса.
+    """
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+
+    def test_every_scene_action_has_a_control(self):
+        for control in ("addCast()", "removeCast(", "moveCast(", "setCastRole(",
+                        "resetCast()"):
+            with self.subTest(control=control):
+                self.assertIn(control, self.page, f"в пульте нет управления {control}")
+
+    def test_the_role_list_matches_the_server(self):
+        match = re.search(r"const CAST_ROLES = \[(.*?)\];", self.page, re.DOTALL)
+        self.assertIsNotNone(match, "в пульте не нашёлся список ролей")
+        self.assertEqual(re.findall(r"value: '([^']+)'", match.group(1)),
+                         list(show.CAST_ROLES),
+                         "пульт и сервер разошлись в списке ролей")
+
+    def test_the_editor_sends_the_place_id_and_the_role(self):
+        """Без cast_id перестановка уехала бы к соседу, а роль было бы не сменить."""
+        start = self.page.index("function collectCast()")
+        body = self.page[start:self.page.index("function saveCast()", start)]
+        self.assertIn("cast_id: p.cast_id", body)
+        self.assertIn("role: roleOf(p)", body)
+
+    def test_an_unchosen_model_is_not_silently_replaced(self):
+        """Пустое место — это «модель ещё не выбрана», а не «первая модель Ollama».
+
+        Без явного пустого варианта браузер сам показывал первую модель из списка,
+        и перестановка соседа тихо записывала её в участника.
+        """
+        start = self.page.index("function modelOptions(")
+        body = self.page[start:self.page.index("function collectCast()", start)]
+        self.assertIn("— выберите модель —", body)
+
+    def test_the_new_controls_use_the_routes_that_exist(self):
+        for route in ("/api/participants/draft", "/api/participants/reset"):
+            with self.subTest(route=route):
+                self.assertIn(route, self.page)
+                self.assertIn(route, {rule.rule for rule in web_app.app.url_map.iter_rules()})
+
+
 # ---------------------------------------------------------------- страница
 
 class TestOfflinePage(unittest.TestCase):
@@ -871,6 +1283,14 @@ class TestRoutes(unittest.TestCase):
             patcher = mock.patch.object(app_module_of(name), name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # Правка состава сохраняет сцену в файл настроек: без подмены тест
+        # переписал бы настоящий .theatre_settings.json проекта
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        patcher = mock.patch.object(settings, "SETTINGS_FILE",
+                                    Path(self.tmpdir.name) / "settings.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.client = web_app.app.test_client()
 
     def test_empty_topic_field_uses_the_one_on_the_server(self):
@@ -994,7 +1414,7 @@ class TestRoutes(unittest.TestCase):
 
     def test_participants_post_reports_errors_as_json(self):
         data = self.client.post("/api/participants",
-                                json={"participants": [{}]}).get_json()
+                                json={"participants": []}).get_json()
         self.assertFalse(data["success"])
         self.assertIn("error", data)
 
@@ -1003,6 +1423,37 @@ class TestRoutes(unittest.TestCase):
         payload["participants"][0]["display_name"] = "Проверка Имени"
         data = self.client.post("/api/participants", json=payload).get_json()
         self.assertTrue(data["success"], data.get("error"))
+
+    def test_draft_route_gives_a_place_and_keeps_the_cast(self):
+        before = [p["display_name"] for p in self.session.runtime_participants]
+        data = self.client.post("/api/participants/draft", json={}).get_json()
+
+        self.assertTrue(data["success"])
+        self.assertTrue(data["participant"]["display_name"].strip())
+        self.assertTrue(data["participant"]["model"])
+        self.assertEqual([p["display_name"] for p in self.session.runtime_participants], before)
+
+    def test_reset_route_takes_the_cast_from_participants(self):
+        payload = cast_payload(self.session)[1:]
+        self.client.post("/api/participants", json={"participants": payload})
+        self.assertEqual(len(self.session.runtime_participants), len(payload))
+
+        data = self.client.post("/api/participants/reset", json={}).get_json()
+
+        self.assertTrue(data["success"])
+        self.assertIsNone(self.session.scene)
+        self.assertEqual(len(data["participants"]), len(settings.PARTICIPANTS))
+
+    def test_participants_post_returns_the_same_view_as_get(self):
+        """После «Применить состав» пульт должен получить те же числа, что и при загрузке."""
+        payload = {"participants": cast_payload(self.session)}
+        data = self.client.post("/api/participants", json=payload).get_json()
+
+        for person in data["participants"]:
+            self.assertIn("role", person)
+            if person.get("model") != "human":
+                self.assertIn("effective_options", person)
+                self.assertIn("model_defaults", person)
 
     def test_participants_get_explains_effective_options(self):
         data = self.client.get("/api/participants").get_json()
