@@ -2057,10 +2057,10 @@ HTML_TEMPLATE = """
                         <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()">Завершить спектакль</button>
                     </div>
                     <div style="display:flex; gap:10px; align-items:center; margin-bottom:15px;">
-                        <input id="topicChangeInput" type="text" style="flex:1; padding:10px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif;" placeholder="Сменить тему обсуждения..." onkeydown="if (event.key === 'Enter') { event.preventDefault(); changeTopic(); }">
+                        <textarea id="topicChangeInput" rows="2" style="flex:1; padding:10px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; resize:vertical; line-height:1.4;" placeholder="Текущая тема — отредактируйте и примените" onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); changeTopic(); }"></textarea>
                         <button class="btn btn-secondary" onclick="changeTopic()" style="margin:0;">🎯 Сменить тему</button>
                     </div>
-                    <div style="margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки • смена темы сразу попадает в системные промпты участников</div>
+                    <div style="margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки реплики • смена темы — Ctrl+Enter в поле темы (сразу попадает в системные промпты участников)</div>
                     
                     <!-- Панель редактирования инструкций и руководств -->
                     <div style="border-top:1px solid #000; padding-top:20px; margin-top:20px;">
@@ -2495,6 +2495,9 @@ HTML_TEMPLATE = """
                 if (data.topic) document.getElementById('topicDisplay').textContent = data.topic;
                 if (data.waiting_for_human) {
                     if (moderatorPanel.style.display !== 'block') { moderatorPanel.style.display = 'block'; const mi = document.getElementById('moderatorInput'); if (mi && !mi.value.trim()) mi.focus(); }
+                    // Поле «Сменить тему»: если пустое — подставляем текущую
+                    const tci = document.getElementById('topicChangeInput');
+                    if (tci && !tci.value.trim() && data.topic) tci.value = data.topic;
                     const finishBtn = document.getElementById('finishBtn');
                     if (finishBtn) finishBtn.style.display = data.current_participant_is_moderator ? 'inline-block' : 'none';
                     statusDiv.classList.add('active');
@@ -2551,7 +2554,7 @@ HTML_TEMPLATE = """
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        input.value = '';
+                        input.value = data.topic;  // показываем актуальную тему
                         document.getElementById('topicDisplay').textContent = data.topic;
                         alert('✅ Тема изменена: ' + data.topic);
                     } else {
