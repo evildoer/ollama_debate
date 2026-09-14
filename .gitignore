@@ -79,4 +79,8 @@ Thumbs.db
 
 # Служебные файлы приложения: измеренные размеры моделей и правила судьи
 .vram_cache.json
-.theatre_settings.json
+#.theatre_settings.json
+
+# Аватары
+/avatars/*
+!/avatars/.gitkeep
