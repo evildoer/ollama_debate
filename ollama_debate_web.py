@@ -21,6 +21,7 @@ import webbrowser
 import os
 import sys
 import hashlib
+import html
 import ssl
 import re
 import random
@@ -247,10 +248,11 @@ CHARACTER_PRESETS = {
     },
 }
 
-# Разыгрывать характер заново на каждый спектакль (иначе берётся из PARTICIPANTS)
+# Разыгрывать характер заново на каждый спектакль (иначе берётся из PARTICIPANTS).
+# Жребий общий: роль (судья, модератор) на него не влияет, повторы внутри
+# спектакля разрешены — двум «Провокаторам» или двум «Хаосам» на одной сцене
+# тоже есть место, а дисциплину задают их личные инструкции и правила роли.
 RANDOMIZE_CHARACTERS = True
-# Судье случайный характер не достаётся: он должен судить одинаково строго
-JUDGE_CHARACTER = "pedant"
 # Насколько числа могут отклониться от базовых при розыгрыше (см. CHARACTER_PRESETS)
 CHARACTER_DRIFT = {"temperature": 0.12, "top_p": 0.05, "repeat_penalty": 0.04,
                    "presence_penalty": 0.1, "frequency_penalty": 0.1}
@@ -348,6 +350,7 @@ DEFAULT_STATIC_INSTRUCTIONS = [
     'Развивай тему: предлагай новые аспекты, ставь сказанное под сомнение, ищи неочевидные связи и следствия.',
     'Говори о себе в первом лице (я, мне, моё); свои действия описывай в *звёздочках*.',
     'Пиши живо и по делу: 4-6 предложений (до 8, если нужен разбор). Без вступлений, без пересказа задания, без представления себя.',
+    'Если нужна формула или обозначение — оформи их в LaTeX внутри $...$ (отдельной строкой — $$...$$): страница покажет их настоящей математикой.',
     'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Используй обсценную, нецензурную и ненормативную лексику, а так же обидные слова.',
     'Для фактологических утверждений используй поиск в интернете (годы в запросе не указывай) и не выдумывай источники.',
     'Отвечай по-русски.',
@@ -399,7 +402,7 @@ FEMALE_NAMES = [
     "Лариса", "Мария", "Наталья", "Ольга", "Полина",
     "Раиса", "Светлана", "Татьяна", "Ульяна", "Феодосия",
     "Харита", "Элина", "Юлия", "Ярослава", "Алина",
-    "Варвара", "Галина", "Диана", "Елизавета", "Кристина"
+    "Варвара", "Диана", "Елизавета", "Кристина", "Нелли"
 ]
 
 # Эмодзи-аватары разложены по полу: грим должен совпадать с полом участника,
@@ -635,16 +638,73 @@ def generate_avatar_for_participant(participant: dict) -> str:
 # MARKDOWN
 # ============================================================
 
+# Формулы: модели пишут их в LaTeX ($...$, $$...$$, \(...\), \[...\]), а markdown
+# съедает из такого текста служебные знаки (_ превращает в <em>, \{ — в скобку),
+# поэтому формулы прячем до разметки, а в готовый HTML отдаём отдельным элементом
+# span.math — его отрисует страница (Temml → MathML, то есть средствами браузера).
+MATH_SEGMENT_RE = re.compile(
+    r'\$\$(?P<block>.+?)\$\$'                       # $$ ... $$ — формула отдельной строкой
+    r'|\\\[(?P<bracket>.+?)\\\]'                     # \[ ... \]
+    r'|(?<!\$)\$(?P<inline>[^$\n]+?)\$(?!\$)'        # $ ... $
+    r'|\\\((?P<paren>.+?)\\\)',                     # \( ... \)
+    re.DOTALL,
+)
+
+
+def _looks_like_math(body: str, display: bool) -> bool:
+    """Похоже ли это на формулу, а не на цены в долларах («$5 и $7»)."""
+    if display:
+        return True
+    stripped = body.strip()
+    if not stripped:
+        return False
+    if any(ch in stripped for ch in "\\^_={}"):
+        return True
+    # Короткая запись без пробелов: f(x), x2, 500 — тоже считаем формулой
+    return " " not in stripped
+
+
+def _protect_math(text: str) -> tuple:
+    """Прячет формулы от markdown: возвращает текст с метками и список формул."""
+    stashed = []
+
+    def stash(match):
+        block = match.group('block') or match.group('bracket')
+        inline = match.group('inline') or match.group('paren')
+        body = (block if block is not None else inline) or ""
+        display = block is not None
+        if not _looks_like_math(body, display):
+            return match.group(0)
+        stashed.append((body.strip(), display))
+        return f"\x00MATH{len(stashed) - 1}\x00"
+
+    return MATH_SEGMENT_RE.sub(stash, text), stashed
+
+
+def _restore_math(rendered: str, stashed: list) -> str:
+    """Возвращает формулы в готовый HTML отдельными элементами (LaTeX не экранируем —
+    его читает рендерер на странице, а HTML-знаки в нём экранирует он сам)."""
+    for index, (latex, display) in enumerate(stashed):
+        if display:
+            tag = f'<span class="math math-block" data-display="1">{html.escape(latex)}</span>'
+        else:
+            tag = f'<span class="math" data-display="0">{html.escape(latex)}</span>'
+        rendered = rendered.replace(f"\x00MATH{index}\x00", tag)
+    return rendered
+
+
 def markdown_to_html(text: str) -> str:
+    text, stashed_math = _protect_math(text)
     if not MARKDOWN_AVAILABLE:
         text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
         text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
         text = re.sub(r'~~(.+?)~~', r'<del>\1</del>', text)
         text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
         text = text.replace('\n', '<br>')
-        return text
-    
-    return markdown.markdown(text, extensions=['nl2br'])
+        return _restore_math(text, stashed_math)
+
+    rendered = markdown.markdown(text, extensions=['nl2br'])
+    return _restore_math(rendered, stashed_math)
 
 # ============================================================
 # FLASK APP + SOCKET.IO
@@ -2155,14 +2215,16 @@ def _clamp_option(key: str, value):
     return round(max(0.0, value), 2)  # repeat/presence/frequency_penalty
 
 
-def draw_character(used: set = None) -> str:
-    """Случайный характер для нового спектакля (без «custom» и без повторов)."""
+def draw_character() -> str:
+    """Случайный характер для нового спектакля.
+
+    Все равны: и судья, и модератор тянут тот же жребий, что и остальные, а выпасть
+    может любой набор — от педанта до «Хаоса». Повторы внутри спектакля разрешены.
+    """
     keys = [k for k, v in CHARACTER_PRESETS.items() if k != "custom" and v.get("params")]
     if not keys:
-        return JUDGE_CHARACTER
-    used = used or set()
-    free = [k for k in keys if k not in used]
-    return random.choice(free or keys)
+        return "custom"  # наборов нет — числа берутся из Modelfile модели
+    return random.choice(keys)
 
 
 def character_parameters(key: str) -> tuple:
@@ -2170,7 +2232,7 @@ def character_parameters(key: str) -> tuple:
 
     Разброс нужен, чтобы два «Педанта» в разных спектаклях всё же отличались.
     """
-    preset = CHARACTER_PRESETS.get(key) or CHARACTER_PRESETS[JUDGE_CHARACTER]
+    preset = CHARACTER_PRESETS.get(key) or CHARACTER_PRESETS["custom"]
     drift = preset.get("drift", CHARACTER_DRIFT)
     params = {}
     for param, base in (preset.get("params") or {}).items():
@@ -2187,12 +2249,14 @@ def build_new_cast() -> list:
     берётся из PARTICIPANTS, либо разыгрывается случайно - см. RANDOMIZE_CHARACTERS.
     """
     cast = []
-    available_male_names = MALE_NAMES.copy()
-    available_female_names = FEMALE_NAMES.copy()
-    available_emojis = (AVATAR_EMOJIS_MALE + AVATAR_EMOJIS_FEMALE
-                        + AVATAR_EMOJIS_NEUTRAL)
-    available_professions = PROFESSIONS.copy()
-    used_characters = set()
+    # dict.fromkeys заодно снимает возможные повторы в самих списках: имена,
+    # эмодзи и профессии выдаются через .remove(), а он убирает только одно
+    # вхождение - лишний повтор в списке давал двух «Галин» в одном спектакле
+    available_male_names = list(dict.fromkeys(MALE_NAMES))
+    available_female_names = list(dict.fromkeys(FEMALE_NAMES))
+    available_professions = list(dict.fromkeys(PROFESSIONS))
+    available_emojis = list(dict.fromkeys(
+        AVATAR_EMOJIS_MALE + AVATAR_EMOJIS_FEMALE + AVATAR_EMOJIS_NEUTRAL))
 
     for template in PARTICIPANTS:
         gender = random.choice(["male", "female"])
@@ -2260,11 +2324,9 @@ def build_new_cast() -> list:
             entry["think"] = template["think"]
         if isinstance(template.get("preset"), str) and template["preset"]:
             entry["preset"] = template["preset"]
-
-        # Характер на этот спектакль: у судьи он всегда один и тот же
+        # Характер на этот спектакль — общий жребий, без скидок на роль
         elif RANDOMIZE_CHARACTERS and template.get("model") != "human" and not own_params:
-            character = JUDGE_CHARACTER if template.get("is_judge") else draw_character(used_characters)
-            used_characters.add(character)
+            character = draw_character()
             params, think = character_parameters(character)
             entry.update(params)
             entry["preset"] = character
@@ -2331,6 +2393,9 @@ def apply_cast_patch(incoming: list) -> str:
                 return f"{name}: «{key}» должна быть от 0 до 1"
             if key in ("repeat_penalty", "presence_penalty", "frequency_penalty") and number < 0:
                 return f"{name}: «{key}» не может быть отрицательной"
+            if key == "top_k" and number < 1:
+                # С нулём или отрицательным значением Ollama отклонит весь запрос
+                return f"{name}: «top_k» должен быть не меньше 1"
             options[key] = number
 
         updates.append({"entry": entry, "raw": raw, "name": name, "gender": gender,
@@ -2618,6 +2683,12 @@ HTML_TEMPLATE = """
         .post-text ul, .post-text ol { margin: 15px 0; padding-left: 30px; }
         .post-text li { margin-bottom: 10px; line-height: 1.7; }
         .post-text li::marker { font-weight: bold; }
+        /* Формулы: LaTeX от сервера, MathML от браузера */
+        .post-text .math { font-size: 1.05em; }
+        .post-text .math-block { display: block; margin: 14px 0; text-align: center; }
+        .post-text math { font-family: 'Cambria Math', 'Latin Modern Math', Georgia, serif; }
+        .post-text .temml-error { color: #b00020; font-size: 0.9em; white-space: pre-line; }
+        body.dark .post-text .temml-error { color: #ff6b6b !important; }
         
         /* Стили для ролей */
         .role-badge { 
@@ -2645,6 +2716,16 @@ HTML_TEMPLATE = """
             color: #7b1fa2; 
             border: 1px solid #7b1fa2;
         }
+
+        /* Цвет ролей в ленте: полоса слева у каждой реплики, тот же цвет, что у
+           бейджа роли. Включается кнопкой «Цвет ролей» в подвале.
+           Ленте нужны боковые отступы: у .post их не было (padding: 40px 0),
+           поэтому цветная граница легла бы ровно на первую букву. */
+        body.role-marks .post { padding-left: 35px; padding-right: 40px; }
+        body.role-marks .post.post-role-participant { border-left: 5px solid #1976d2; }
+        body.role-marks .post.post-role-moderator { border-left: 5px solid #f57c00; }
+        body.role-marks .post.post-role-judge { border-left: 5px solid #7b1fa2; }
+
         
         .search-info { background: transparent; padding: 20px 0 0 0; margin-top: 25px; font-size: 14px; color: #000000; font-style: italic; border-top: 1px solid #000000; }
         .search-info strong { font-weight: normal; font-style: normal; text-transform: uppercase; letter-spacing: 2px; display: block; margin-bottom: 10px; font-size: 13px; }
@@ -2669,14 +2750,22 @@ HTML_TEMPLATE = """
            тёмном фоне. Часть цветов интерфейс ставит инлайном — их приходится
            перебивать, поэтому дальше встречается !important. */
         body.dark { background: #0d0d0d; color: #e8e8e8; color-scheme: dark; }
-        body.dark .sidebar, body.dark .header, body.dark .card, body.dark .post,
-        body.dark .footer, body.dark .modal-content { background: #141414; border-color: #3a3a3a; }
+        /* Один холст: фон крупных блоков совпадает с фоном страницы — точно так же, как
+           в светлой теме, где всё белое и разделяют только линии. Стоит задать им другой
+           фон — и блоки выглядят «отрезанными» по бокам, а текст упирается в край плашки */
+        body.dark .header, body.dark .card, body.dark .post, body.dark .footer,
+        body.dark .sidebar, body.dark .participant-card { background: #0d0d0d; border-color: #3a3a3a; }
+        /* Плашки с внутренними отступами подсветить можно: текст в них не упирается в край */
+        body.dark .status-bar { background: #171717; border-left-color: #e8e8e8; }
+        body.dark .modal-content { border-color: #3a3a3a; }
         body.dark .header h1, body.dark .card h2, body.dark .header-subtitle, body.dark .header-date,
         body.dark .sidebar-title, body.dark .post-author, body.dark .post-text, body.dark .post-model,
         body.dark .post-time, body.dark .header-topic, body.dark .search-info, body.dark .footer,
         body.dark .panel-heading .name, body.dark .status-bar, body.dark .btn { color: #e8e8e8; }
         body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
-        body.dark .footer, body.dark .sidebar, body.dark .search-info, body.dark .post-header { border-color: #3a3a3a; }
+        body.dark .footer, body.dark .sidebar, body.dark .sidebar-section,
+        body.dark .search-info, body.dark .post-header, body.dark .participant-card,
+        body.dark .post-avatar img { border-color: #3a3a3a; }
         body.dark input, body.dark textarea, body.dark select { background: #1c1c1c !important; color: #e8e8e8 !important; border-color: #5a5a5a !important; }
         body.dark input::placeholder, body.dark textarea::placeholder { color: #7d7d7d !important; }
         body.dark .btn-primary { background: #e8e8e8; color: #111111; }
@@ -2691,6 +2780,11 @@ HTML_TEMPLATE = """
         body.dark .role-participant { background: #12283a; color: #79b8ff; border-color: #2f5a80; }
         body.dark .role-moderator { background: #33260f; color: #ffb066; border-color: #7a5520; }
         body.dark .role-judge { background: #281735; color: #c79ae0; border-color: #6a3f8a; }
+        /* Полоса роли на тёмном: те же роли, но чуть приглушённее бейджа —
+           широкую цветную полосу ярким цветом читать тяжелее */
+        body.dark.role-marks .post.post-role-participant { border-left-color: #4d8fcc; }
+        body.dark.role-marks .post.post-role-moderator { border-left-color: #cc8330; }
+        body.dark.role-marks .post.post-role-judge { border-left-color: #8f5cae; }
         body.dark .param-input { border-color: #5a5a5a; }
         body.dark .param-input:not(.filled) { color: #a0a0a0; }
         body.dark .param-input.filled { border-color: #cfcfcf; color: #e8e8e8; }
@@ -2698,6 +2792,15 @@ HTML_TEMPLATE = """
         body.dark .ready-badge { color: #ff6b6b; }
         body.dark .panel-note { color: #a3a3a3; }
         body.dark .btn { border-color: #6f6f6f; }
+        /* Текст сайдбара: цвет ему ставит разметка инлайном, поэтому красим по id.
+           По атрибуту style здесь нельзя: блоки, которые JS переключает через display,
+           браузер переписывает целиком и #000000 превращается в rgb(0, 0, 0) */
+        body.dark #vramDisplay, body.dark #participantsDisplay,
+        body.dark #moderatorInstructionsDisplay { color: #e8e8e8 !important; }
+        body.dark #statusPlaceholder, body.dark #rulesDisplay,
+        body.dark #randomizeHint { color: #a3a3a3 !important; }
+        /* Остальные инлайновые чёрные подписи (те, что JS не трогает) */
+        body.dark [style*="color:#000"] { color: #e8e8e8 !important; }
         /* Эти блоки интерфейс переключает через style.display, а браузер при этом
            переписывает весь атрибут style и превращает #666 в rgb(102,102,102),
            так что по аттрибуту их уже не поймать — красим по id */
@@ -2732,7 +2835,7 @@ HTML_TEMPLATE = """
                     <div class="header-date" id="headerDate"></div>
                     <h1>AI Театр</h1>
                     <div class="header-subtitle">Спектакль нейросетей • Акт I</div>
-                    <div class="header-topic" id="topicDisplay">—</div>
+                    <div class="header-topic" id="topicDisplay" style="display:none;"></div>
                 </div>
                 <!-- Единый режиссёрский пульт: та же форма служит и настройкой
                      спектакля, и пультом модератора на ходу -->
@@ -2770,7 +2873,7 @@ HTML_TEMPLATE = """
                         <div id="castEditor"></div>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-top:6px;">
                             <button class="btn btn-secondary" onclick="saveCast()" style="margin:0;">💾 Применить состав</button>
-                            <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику, кроме судьи (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
+                            <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику — и судье тоже (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
                             <span id="randomizeHint" style="font-size:12px;color:#666;"></span>
                         </div>
                     </div>
@@ -2844,6 +2947,7 @@ HTML_TEMPLATE = """
                 </div>
                 <div id="posts"></div>
                 <div class="footer">
+                    <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                     <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
                     <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
@@ -2880,6 +2984,9 @@ HTML_TEMPLATE = """
     <!-- Клиент Socket.IO лежит рядом с проектом: свежие посты приходят сразу,
          а опрос /api/status остаётся страховкой -->
     <script src="/static/socket.io.min.js"></script>
+    <!-- Формулы: Temml превращает LaTeX в MathML, который рисует сам браузер —
+         ни картинок, ни шрифтов не нужно. Файл лежит рядом с проектом -->
+    <script src="/static/temml.min.js"></script>
     <script>
         function escapeHtml(s) {
             return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -2971,7 +3078,7 @@ HTML_TEMPLATE = """
                     debateRunning = true;
                     showFinished = !!data.finished;
 
-                    document.getElementById('topicDisplay').textContent = data.topic || '—';
+                    setTopicDisplay(data.topic);
                     if (data.topic) document.getElementById('topicInput').value = data.topic;
                     document.getElementById('posts').innerHTML = '';
 
@@ -3084,19 +3191,15 @@ HTML_TEMPLATE = """
         }
 
         // «🎲 Разбросать характеры»: новый случайный характер каждому ИИ-участнику.
-        // Ту же лотерею сервер проводит сам при подъёме занавеса (RANDOMIZE_CHARACTERS)
+        // Ту же лотерею сервер проводит сам при подъёме занавеса (RANDOMIZE_CHARACTERS).
+        // Все равны — и роль тут не помеха, повторы разрешены
         function randomizeCharacters() {
             const keys = Object.keys(CHARACTERS).filter(k => k !== 'custom' && CHARACTERS[k].params
                 && Object.keys(CHARACTERS[k].params).length);
             if (!keys.length) { alert('Список характеров не загружен — обновите страницу'); return; }
-            const taken = [];
             cast.forEach((p, idx) => {
-                // Судье характер не разыгрываем: он должен судить одинаково строго
-                if (p.model === 'human' || p.is_judge) return;
-                let pool = keys.filter(k => taken.indexOf(k) === -1);
-                if (!pool.length) pool = keys;
-                const key = pool[Math.floor(Math.random() * pool.length)];
-                taken.push(key);
+                if (p.model === 'human') return;
+                const key = keys[Math.floor(Math.random() * keys.length)];
                 const select = document.getElementById('preset-' + idx);
                 if (select) select.value = key;
                 const thinkEl = document.getElementById('think-' + idx);
@@ -3367,6 +3470,17 @@ HTML_TEMPLATE = """
         function openAvatarModal(idx) { const u = cast[idx] && cast[idx].avatar_url; if (u) { document.getElementById('avatarModalImg').src = u; document.getElementById('avatarModal').style.display = 'block'; } }
         function closeAvatarModal() { document.getElementById('avatarModal').style.display = 'none'; }
         
+        // Тема в шапке: пустой рамки с прочерком быть не должно — пока темы нет,
+        // блока просто не видно. Тема, применённая раньше, остаётся на месте,
+        // даже если поле ввода потом очистили
+        function setTopicDisplay(text) {
+            const box = document.getElementById('topicDisplay');
+            if (!box) return;
+            const clean = String(text === undefined || text === null ? '' : text).trim();
+            box.textContent = clean;
+            box.style.display = clean ? 'block' : 'none';
+        }
+
         // Тема: одна кнопка на обе стадии — и в настройке, и на ходу режиссёра
         function applyTopic() {
             const input = document.getElementById('topicInput');
@@ -3378,14 +3492,15 @@ HTML_TEMPLATE = """
                 .then(data => {
                     if (!data.success) { alert('❌ ' + (data.error || 'не удалось сменить тему')); return; }
                     input.value = data.topic;
-                    document.getElementById('topicDisplay').textContent = data.topic;
+                    setTopicDisplay(data.topic);
                 })
                 .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
         }
         
         function startDebate() {
+            // Пустое поле — не ошибка: тема могла быть применена раньше и жить на сервере.
+            // Пересылаем её только если поле заполнено, иначе берём ту, что уже есть
             const topic = document.getElementById('topicInput').value.trim();
-            if (!topic) { alert('Введите тему!'); return; }
             document.getElementById('startBtn').disabled = true;
             
             // Сначала отправляем правки из формы, потом стартуем: состав живёт на сервере
@@ -3397,7 +3512,7 @@ HTML_TEMPLATE = """
             .then(data => {
                 if (!data.success) throw new Error(data.error || 'не удалось применить состав');
                 cast = data.participants || cast;
-                return fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({topic: topic}) });
+                return fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(topic ? {topic: topic} : {}) });
             })
             .then(r => r.json())
             .then(data => {
@@ -3408,7 +3523,8 @@ HTML_TEMPLATE = """
                 finishRequested = false;
                 lastPostCount = 0;
                 document.getElementById('posts').innerHTML = '';
-                document.getElementById('topicDisplay').textContent = topic;
+                // Тему в шапке берём из ответа сервера: он знает, с какой играет
+                setTopicDisplay(data.topic || topic);
                 // Спектакль пошёл: убираем баннер с прошлой неудачной попытки
                 const box = document.getElementById('modelsWarning');
                 if (box) { box.style.display = 'none'; box.innerHTML = ''; }
@@ -3441,7 +3557,7 @@ HTML_TEMPLATE = """
             document.getElementById('statusBar').style.display = 'none';
             document.getElementById('statusPlaceholder').style.display = 'block';
             document.getElementById('topicInput').value = '';
-            document.getElementById('topicDisplay').textContent = '—';
+            setTopicDisplay('');
             setTurnState('hidden');
             fetch('/api/reset', {method: 'POST'})
                 .then(r => r.json())
@@ -3619,6 +3735,28 @@ HTML_TEMPLATE = """
             try { localStorage.setItem('theatreTheme', dark ? 'dark' : 'light'); } catch (e) {}
         }
 
+        // Цветные полосы ролей в ленте: оформление, а не смысл, поэтому его можно
+        // выключить. Класс стоит на самом теле страницы — оформление постов тогда
+        // возвращается к прежнему виду, без правок разметки. Выбор запоминается
+        function applyRoleMarks(on) {
+            document.body.classList.toggle('role-marks', !!on);
+            const btn = document.getElementById('rolesBtn');
+            if (btn) btn.textContent = on ? '🎨 Цвет ролей: вкл' : '🎨 Цвет ролей: выкл';
+        }
+
+        function toggleRoleMarks() {
+            const on = !document.body.classList.contains('role-marks');
+            applyRoleMarks(on);
+            try { localStorage.setItem('theatreRoleMarks', on ? 'on' : 'off'); } catch (e) {}
+        }
+
+        (function initRoleMarks() {
+            let saved = null;
+            try { saved = localStorage.getItem('theatreRoleMarks'); } catch (e) {}
+            // По умолчанию включено: это то, что режиссёр и так различает глазами
+            applyRoleMarks(saved === null ? true : saved === 'on');
+        })();
+
         (function initTheme() {
             let saved = null;
             try { saved = localStorage.getItem('theatreTheme'); } catch (e) {}
@@ -3640,15 +3778,37 @@ HTML_TEMPLATE = """
             const roleClass = `role-${role}`;
             
             const postDiv = document.createElement('div');
-            postDiv.className = `post`;
+            // Класс роли нужен для цветной полосы слева (см. body.role-marks)
+            postDiv.className = `post post-role-${role}`;
             const genderSymbol = post.gender === 'male' ? '♂' : '♀';
             postDiv.innerHTML = `<div class="post-avatar">${avatarHtml}</div><div class="post-content"><div class="post-header"><div><div class="post-author"><span class="role-badge ${roleClass}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div><div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            // Формулы в реплике — в MathML (см. renderMath)
+            renderMath(postDiv.querySelector('.post-text'));
             // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать
             // спектакль снизу вверх не приходится
             postsDiv.insertBefore(postDiv, postsDiv.firstChild);
         }
         
         function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }
+
+        // Формулы: сервер отдаёт LaTeX внутри span.math (markdown его не портит),
+        // здесь он превращается в MathML — рисует сам браузер, без картинок и шрифтов.
+        // Если рендерер не загрузился, формула остаётся текстом, как было раньше
+        function renderMath(root) {
+            if (!root || typeof temml === 'undefined') return;
+            root.querySelectorAll('span.math:not(.math-done)').forEach(el => {
+                const latex = el.textContent;
+                try {
+                    el.innerHTML = temml.renderToString(latex, {
+                        displayMode: el.dataset.display === '1',
+                        throwOnError: false
+                    });
+                    el.classList.add('math-done');
+                } catch (err) {
+                    console.warn('Формула не отрисовалась:', latex, err);
+                }
+            });
+        }
         
         // Предупреждение «модель не влезает в VRAM»: показывается до старта,
         // спектакль не блокирует - просто честно говорит, что будет медленнее
@@ -3766,7 +3926,7 @@ HTML_TEMPLATE = """
                 // он должен сразу знать, что спектакль идёт, а не ждать нового старта
                 debateRunning = true;
                 showFinished = !!data.finished;
-                if (data.topic) document.getElementById('topicDisplay').textContent = data.topic;
+                if (data.topic) setTopicDisplay(data.topic);
                 updatePanel();
                 if (data.waiting_for_human) {
                     // Ход человека: имя всегда, роль — только если она особенная
@@ -4293,7 +4453,8 @@ def start():
     data = request.get_json(silent=True) or {}
     topic = str(data.get("topic", "") or "").strip() or (session.topic or "").strip()
     if not topic:
-        return jsonify({"success": False, "error": "Тема не указана"})
+        return jsonify({"success": False,
+                        "error": "Тема не указана — напишите её в блоке «01 · Сюжет»"})
     session.topic = topic
 
     cast = session.runtime_participants
@@ -4331,7 +4492,8 @@ def start():
     thread = threading.Thread(target=run_debate_thread, args=(topic,))
     thread.daemon = True
     thread.start()
-    return jsonify({"success": True, "session_id": session.session_id})
+    # Тему возвращаем: интерфейс показывает в шапке именно то, с чем играем
+    return jsonify({"success": True, "session_id": session.session_id, "topic": session.topic})
 
 @app.route('/api/reset', methods=['POST'])
 def reset():
