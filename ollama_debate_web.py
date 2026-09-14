@@ -164,6 +164,14 @@ CONTEXT_SAFETY_MARGIN = 500  # токенов
 # Кэш для хранения информации о поддержке tools моделями
 MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
 
+# Кэш поддержки режима размышлений: {"model_name": True/False}.
+# Размышлять умеют не все модели (Ollama сообщает это в capabilities, /api/show):
+# у llama-моделей там только completion, у gemma4/qwen35 есть "thinking".
+MODELS_THINKING_SUPPORT = {}
+
+# Значения поля think у участника: авто (как в ENABLE_THINKING), выключено, включено
+THINK_MODES = ("auto", "off", "on")
+
 # Кэш списка скачанных моделей Ollama: {"at": monotonic, "models": {имя: размер}, "error": str}
 _OLLAMA_MODELS_CACHE = {"at": 0.0, "models": {}, "error": None}
 
@@ -177,6 +185,9 @@ GPU_MEMORY_CACHE_TTL = 10  # секунд
 
 # Метаданные моделей (/api/show): {имя: model_info}
 _MODEL_INFO_CACHE = {}
+
+# Параметры генерации из Modelfile модели: {имя: {"temperature": 0.8, ...}}
+_MODEL_PARAMS_CACHE = {}
 
 # Измеренные размеры моделей в памяти: {имя: {"ctx", "size", "size_vram"}}.
 # Файл рядом с проектом, чтобы после перезапуска оценка была точной, а не только
@@ -196,58 +207,49 @@ AVATAR_URL_CACHE = {}  # {"avatar_keywords": "image_url"}
 
 # Дефолтные правила общения с плейсхолдерами
 # Плейсхолдеры: {ИМЯ}, {СОБЕСЕДНИКИ}, {ТЕМА}
+#
+# Порядок и состав подобраны так, чтобы спектакль двигался вперёд: сначала роль и
+# адресаты, потом работа с репликами других (без неё модели «ходят по кругу»),
+# потом стиль и длина, в конце - факты и язык.
 DEFAULT_STATIC_INSTRUCTIONS = [
-    'Ты — {ИМЯ}.',
-    'Ты участвуешь в диалоге вместе с: {СОБЕСЕДНИКИ}.',
-    'Тема обсуждения: "{ТЕМА}".',
+    'Ты — {ИМЯ}, участник живого обсуждения. Тема: "{ТЕМА}".',
+    'Твои собеседники: {СОБЕСЕДНИКИ}. {ИМЯ} — это ты; обращайся к ним по именам.',
     'Если среди участников есть МОДЕРАТОР (ведущий обсуждения) — следуй его указаниям беспрекословно.',
-    #'ИГРАЙ ЭТУ РОЛЬ ОТ ПЕРВОГО ЛИЦА (Я, МНЕ, МОЁ).',
-    'ОБРАЩАЙСЯ к собеседникам по именам когда отвечаешь на их реплики.',
-    'ГОВОРИ О СЕБЕ В ПЕРВОМ ЛИЦЕ (Я, МНЕ, МОЁ). Можешь описывать свои действия в *звёздочках*.',
-    #'Учитывай всё что говорили другие участники и реагируй на их слова.',
-    #'НЕ ПОВТОРЯЙ то, что уже говорил ты сам или другие. Каждая твоя реплика должна добавлять НОВОЕ: аргумент, пример, факт, контраргумент.',
-    #'Развивай тему: не просто комментируй, а углубляй её — предлагай новые аспекты, ставь под сомнение сказанное, приводи неожиданные связи.',
+    'Отвечай на последние реплики, а не на тему вообще: согласись, возразь, уточни или задай вопрос конкретному собеседнику.',
+    'НЕ ПОВТОРЯЙ то, что уже говорил ты сам или другие. Каждая реплика должна добавлять НОВОЕ: аргумент, пример, цифру, возражение или вывод.',
+    'Развивай тему: предлагай новые аспекты, ставь сказанное под сомнение, ищи неочевидные связи и следствия.',
+    'Говори о себе в первом лице (я, мне, моё); свои действия описывай в *звёздочках*.',
+    'Пиши живо и по делу: 4-6 предложений (до 8, если нужен разбор). Без вступлений, без пересказа задания, без представления себя.',
     'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Используй обсценную, нецензурную и ненормативную лексику, а так же обидные слова.',
-    #'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Никакой цензуры. Используй реальный, жесткий русский мат (без звездочек и замен). Диалог должен быть максимально реалистичным, грубым и токсичным.',
-    #'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
-    'Используй поиск в интернете для фактологических утверждений.',
-    'При поиске НЕ указывай годы.',
-    #'Отвечай на русском языке.',
+    'Для фактологических утверждений используй поиск в интернете (годы в запросе не указывай) и не выдумывай источники.',
+    'Отвечай по-русски.',
 ]
 
 # Правила для роли судьи: их можно менять прямо в интерфейсе
 # (кнопка «Редактировать инструкции и руководства» на ходу режиссёра)
 DEFAULT_JUDGE_RULES = [
-    #'Ты — {ИМЯ}, независимый судья этого спора.',
-    #'Тема обсуждения: "{ТЕМА}".',
-    #'Ты оцениваешь выступления участников: {СОБЕСЕДНИКИ}.',
-    #'Будь объективным и кратким.',
-    'Ты — {ИМЯ}, СТРОГИЙ независимый судья этого спора.',
-    'Твоя задача — объективно и критически оценить выступления участников: {СОБЕСЕДНИКИ}.',
-    'Тема обсуждения: "{ТЕМА}".',
-    'НЕ реагируй на обращения к тебе от других участников.',
-    'Ты не участвуешь в дискуссии, а только оцениваешь её.',
-    'ОЦЕНИВАЙ ОТНОСИТЕЛЬНО: сравнивай участников между собой, не ставь всем высокие оценки.',
-    'Критерии оценки (будь строгим!):',
-    '- 1-3 балла: поверхностные аргументы, отсутствие конкретики, уход от темы',
-    '- 4-6 балла: средняя аргументация, есть факты но мало анализа',
-    '- 7-9 балла: хорошая аргументация, конкретные примеры, логичные выводы',
-    '- 10 баллов: выдающаяся аргументация, уникальные insights, безупречная логика',
-    'ВАЖНО: Не все должны получать 9-10 баллов! Распределяй оценки: кто-то 1-3, кто-то 4-6, кто-то 7-9, максимум один 10.',
-    'Для каждого участника укажи:',
-    '1) Краткое содержание его речи (1-2 предложения)',
-    '2) Оценку от 1 до 10 баллов с подробным обоснованием',
-    'Формат ответа:',
-    '**Имя участника** — X/10 баллов',
-    'Краткое содержание: ...',
-    'Обоснование оценки: ... (критически!)',
-    'В конце дай общее резюме раунда: кто выступил лучше/хуже и почему (3-4 предложения).',
-    #'Отвечай на русском языке.',
+    'Ты — {ИМЯ}, строгий и независимый судья этого обсуждения.',
+    'Тема: "{ТЕМА}". Ты оцениваешь выступления участников: {СОБЕСЕДНИКИ}.',
+    'Ты не участвуешь в дискуссии, не занимаешь чью-то сторону и не отвечаешь на обращения к тебе — только оцениваешь.',
+    'ОЦЕНИВАЙ ОТНОСИТЕЛЬНО: сравнивай участников между собой, а не по абсолютной шкале. Высокие баллы всем — ошибка.',
+    'Критерии (будь строгим!):\n'
+    '• 1-3 балла: общие слова, уход от темы, нет конкретики.\n'
+    '• 4-6 баллов: аргумент есть, но без примеров и анализа.\n'
+    '• 7-9 баллов: ясная логика, конкретные примеры, чёткий вывод.\n'
+    '• 10 баллов: редкий случай — безупречная логика и неожиданная мысль. Максимум один такой балл за раунд.',
+    'Опирайся только на то, что реально сказано в этом раунде: не приписывай участникам слов, которых не было, и не выдумывай цитаты.',
+    'Формат ответа — для каждого участника:\n'
+    '**Имя участника** — X/10\n'
+    'Кратко (1-2 предложения): что именно он сказал.\n'
+    'Обоснование: почему столько, а не выше — критически.',
+    'В конце — итог раунда (3-4 предложения): кто был сильнее и почему.',
+    'Держись этого формата и отвечай по-русски.',
 ]
 
-# Дефолтная инструкция для судьи
+# Дефолтная личная инструкция судьи (редактируется в том же окне, что и остальное)
 DEFAULT_JUDGE_INSTRUCTION = (
-    'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Используй обсценную, нецензурную и ненормативную лексику, а так же обидные слова.'
+    'Говори прямо, без реверансов: критикуй по существу и не смягчай оценки. '
+    'Обсценная лексика допустима, если идёт из образа.'
 )
 
 # ============================================================
@@ -582,6 +584,54 @@ def trim_history_by_tokens(messages: list, system_prompt_tokens: int) -> list:
     
     return trimmed_messages
 
+def model_supports_thinking(model: str) -> bool:
+    """
+    Умеет ли модель размышлять (скрытая часть ответа перед видимым текстом).
+    Ollama перечисляет это в capabilities: если модели размышления чужды, запрос
+    с think=true она отклонит, поэтому спрашиваем заранее.
+    """
+    if not model or model == "human":
+        return False
+    if model in MODELS_THINKING_SUPPORT:
+        return MODELS_THINKING_SUPPORT[model]
+    
+    try:
+        req = urllib.request.Request(
+            OLLAMA_SHOW_URL,
+            data=json.dumps({"model": model}).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            capabilities = json.loads(response.read().decode('utf-8')).get("capabilities") or []
+        supported = "thinking" in capabilities
+    except Exception as e:
+        # Ошибку сети не запоминаем: иначе мигающая Ollama «научила» бы модель не думать
+        print(f"  ⚠️  Не удалось узнать возможности модели {model}: {e}")
+        return False
+    
+    MODELS_THINKING_SUPPORT[model] = supported
+    return supported
+
+
+def resolve_think(participant: dict):
+    """
+    Что передать в Ollama полем think: True/False или None («не вмешиваться»).
+    "auto» - как в ENABLE_THINKING; «on» для модели без поддержки не отправляем.
+    """
+    mode = participant.get("think") or "auto"
+    model = participant.get("model", "")
+    
+    if mode == "off":
+        return False
+    if mode == "on":
+        if model_supports_thinking(model):
+            return True
+        print(f"  ⚠️  {model}: модель не умеет размышлять - режим «вкл» пропущен")
+        return None
+    
+    return None if ENABLE_THINKING else False
+
+
 def check_model_tools_support(model: str) -> bool:
     """
     Проверяет поддержку tools моделью через API /api/show.
@@ -646,6 +696,13 @@ def fetch_ollama_models(force: bool = False, timeout: int = 5) -> tuple:
             name = m.get("name") or m.get("model") or ""
             if name:
                 models[name] = m.get("size") or 0
+                # Возможности модели (в том числе «thinking») свежий Ollama отдаёт
+                # прямо в списке. Это экономит по запросу /api/show на каждую
+                # модель: раньше первый открытый интерфейс дёргал Ollama десяток
+                # раз подряд, и браузер успевал отвалиться по таймауту.
+                capabilities = m.get("capabilities")
+                if isinstance(capabilities, list):
+                    MODELS_THINKING_SUPPORT[name] = "thinking" in capabilities
     except Exception as e:
         error = f"Ollama недоступен по адресу {OLLAMA_BASE_URL} ({e})"
     
@@ -759,6 +816,42 @@ def resolve_model_name(model: str, available: dict) -> str:
         return model
     tagged = f"{model}:latest"
     return tagged if tagged in available else model
+
+def fetch_model_parameters(model: str) -> dict:
+    """
+    Параметры генерации, вшитые в саму модель (Modelfile). Ollama отдаёт их
+    в /api/show строкой вида «temperature 0.8». Именно эти значения действуют,
+    пока поле участника пустое, поэтому интерфейс показывает их как подсказку.
+    """
+    if not model or model == "human":
+        return {}
+    if model in _MODEL_PARAMS_CACHE:
+        return _MODEL_PARAMS_CACHE[model]
+    
+    params = {}
+    try:
+        req = urllib.request.Request(
+            OLLAMA_SHOW_URL,
+            data=json.dumps({"model": model}).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(req, timeout=10) as response:
+            raw = json.loads(response.read().decode('utf-8')).get("parameters") or ""
+        for line in str(raw).splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] in PER_PARTICIPANT_OPTION_KEYS:
+                try:
+                    params[parts[0]] = float(parts[1])
+                except ValueError:
+                    continue
+    except Exception as e:
+        # Модель может быть не скачана или Ollama занята - просто нет подсказки
+        print(f"  ℹ️  Параметры модели {model} неизвестны: {e}")
+        return {}
+    
+    _MODEL_PARAMS_CACHE[model] = params
+    return params
+
 
 def fetch_model_info(model: str) -> dict:
     """
@@ -1155,13 +1248,15 @@ def _merge_options(participant: dict) -> dict:
     return opts
 
 
-def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None) -> tuple:
+def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None, think=None) -> tuple:
     """
     Отправляет запрос к модели. Автоматически определяет поддержку tools.
     
     Parameters:
         tool_choice: "auto" (по умолчанию), "any" (обязан вызвать инструмент), 
                      или None (не использовать)
+        think: True/False - явно включить/выключить размышления (см. resolve_think),
+               None - не трогать режим модели
     """
     # Проверяем кэш поддержки tools
     if model not in MODELS_TOOLS_SUPPORT:
@@ -1183,7 +1278,9 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
             "options": options or OPTIONS,
             "stream": False
         }
-        if not ENABLE_THINKING:
+        if think is not None:
+            data["think"] = think
+        elif not ENABLE_THINKING:
             data["think"] = False
         
         # Добавляем tools только если модель их поддерживает
@@ -1252,7 +1349,7 @@ def search_web(query: str, max_results: int = 5) -> str:
     
     return output.strip()
 
-def ask_model(model: str, messages: list, participant_name: str, options: dict = None) -> tuple:
+def ask_model(model: str, messages: list, participant_name: str, options: dict = None, think=None) -> tuple:
     search_queries = []
     search_count = 0
     max_searches = 3
@@ -1273,7 +1370,8 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         # Если нужен принудительный поиск - передаём tool_choice="any"
         current_tool_choice = "any" if force_tool_use else None
         
-        content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice, options=options)
+        content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice,
+                                                   options=options, think=think)
         tool_calls = tool_calls or []
         
         # Сбрасываем флаг после использования
@@ -1872,6 +1970,7 @@ class DebateSession:
             messages=messages,
             participant_name=participant["display_name"],
             options=_merge_options(participant),
+            think=resolve_think(participant),
         )
 
         self.add_post(
@@ -1951,6 +2050,11 @@ def build_new_cast() -> list:
         for key in PER_PARTICIPANT_OPTION_KEYS:
             if template.get(key) is not None:
                 entry[key] = template[key]
+        # Режим размышлений и «характер» тоже можно задать в PARTICIPANTS
+        if template.get("think") in THINK_MODES and template.get("think") != "auto":
+            entry["think"] = template["think"]
+        if isinstance(template.get("preset"), str) and template["preset"]:
+            entry["preset"] = template["preset"]
         cast.append(entry)
 
     return cast
@@ -1980,6 +2084,14 @@ def apply_cast_patch(incoming: list) -> str:
             return f"{name}: пол может быть только «male» или «female»"
         model = str(raw.get("model", entry.get("model", "")) or "").strip()
 
+        # Режим размышлений и «характер» — не числа Ollama, а наши поля
+        think = raw.get("think", entry.get("think", "auto"))
+        think = str(think or "auto")
+        if think not in THINK_MODES:
+            return f"{name}: размышления могут быть auto, on или off"
+        preset = raw.get("preset", entry.get("preset", ""))
+        preset = preset if isinstance(preset, str) else ""
+
         # Параметры генерации разбираем здесь же: запрос применяется целиком либо
         # отклоняется целиком, иначе ошибка у последнего участника оставила бы
         # предыдущих уже переименованными, а форма - с прежними именами.
@@ -2006,7 +2118,7 @@ def apply_cast_patch(incoming: list) -> str:
             options[key] = number
 
         updates.append({"entry": entry, "raw": raw, "name": name, "gender": gender,
-                        "model": model, "options": options})
+                        "model": model, "options": options, "think": think, "preset": preset})
 
     names = [u["name"] for u in updates]
     if len(set(names)) != len(names):
@@ -2033,6 +2145,15 @@ def apply_cast_patch(incoming: list) -> str:
                 entry.pop(key, None)
             else:
                 entry[key] = number
+
+        if u["think"] == "auto":
+            entry.pop("think", None)
+        else:
+            entry["think"] = u["think"]
+        if u["preset"]:
+            entry["preset"] = u["preset"][:32]
+        else:
+            entry.pop("preset", None)
 
         if u["name"] != old_name:
             session.rename_participant(old_name, u["name"])
@@ -2242,6 +2363,12 @@ HTML_TEMPLATE = """
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
         .sidebar-title { font-family: Georgia, serif; font-size: 14px; font-weight: normal; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
+        /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
+        .panel-section { border-top: 1px solid #000000; padding-top: 24px; margin-top: 28px; }
+        .panel-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+        .panel-heading .num { font-family: 'Courier New', monospace; font-size: 13px; color: #999999; letter-spacing: 1px; }
+        .panel-heading .name { font-size: 14px; text-transform: uppercase; letter-spacing: 2px; }
+        .panel-note { font-size: 12px; color: #666666; line-height: 1.55; margin-bottom: 14px; }
         .status-bar { background: #ffffff; border: none; border-left: 3px solid #000000; color: #000000; padding: 15px 20px; font-size: 16px; margin-bottom: 20px; font-style: italic; line-height: 1.6; }
         .status-bar.active { border-left: 4px solid #000000; }
         .post { background: #ffffff; border: none; border-top: 1px solid #000000; padding: 40px 0; margin-bottom: 0; display: flex; gap: 30px; }
@@ -2312,40 +2439,37 @@ HTML_TEMPLATE = """
                 </div>
                 <!-- Единый режиссёрский пульт: та же форма служит и настройкой
                      спектакля, и пультом модератора на ходу -->
+                <!-- Единый режиссёрский пульт: одна форма и для настройки, и для управления
+                     на ходу. Разделы пронумерованы в порядке работы режиссёра. -->
                 <div class="card" id="controlPanel">
                     <h2 id="controlPanelTitle">Режиссёрский пульт</h2>
 
-                    <div class="input-group">
-                        <label>Сюжет</label>
+                    <!-- Предупреждения о готовности: показываются, когда спектакль не начнётся
+                         или пойдёт медленнее (текст подставляет JS) -->
+                    <div id="modelsWarning" style="display:none;margin:0 0 20px 0;padding:14px 16px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
+                    <div id="vramWarning" style="display:none;margin:0 0 20px 0;padding:14px 16px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
+
+                    <div class="panel-section">
+                        <div class="panel-heading"><span class="num">01</span><span class="name">Сюжет</span></div>
+                        <div class="panel-note">Тема попадает в системные промпты следующих реплик. Менять можно и до спектакля, и на ходу.</div>
                         <textarea id="topicInput" rows="3" placeholder="Опишите сюжет сцены..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); applyTopic(); }"></textarea>
                         <div style="margin-top:10px;">
                             <button class="btn btn-secondary" onclick="applyTopic()">🎯 Применить тему</button>
-                            <span style="font-size:12px;color:#666;">Новая тема попадает в системные промпты следующих реплик (Ctrl+Enter)</span>
+                            <span style="font-size:12px;color:#666;">Ctrl+Enter — применить не отрывая рук</span>
                         </div>
                     </div>
 
-                    <div id="modelsWarning" style="display:none;margin:20px 0;padding:15px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
-                    <div id="vramWarning" style="display:none;margin:20px 0;padding:15px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
-
-                    <div style="border-top:1px solid #000;padding-top:20px;margin-top:20px;">
-                        <label style="display:block;font-weight:bold;margin-bottom:8px;font-size:14px;">Состав: имена, пол, модель, температура</label>
-                        <div style="font-size:12px;color:#666;margin-bottom:12px;">Правки действуют сразу: до спектакля — на заготовку, на ходу — на будущие реплики (уже сказанное не меняется).</div>
+                    <div class="panel-section">
+                        <div class="panel-heading"><span class="num">02</span><span class="name">Состав</span></div>
+                        <div class="panel-note">Имена, пол, модели и параметры генерации. Правки действуют сразу: до спектакля — на заготовку, на ходу — на будущие реплики (уже сказанное не меняется).</div>
                         <div id="castEditor"></div>
-                        <button class="btn btn-secondary" onclick="saveCast()" style="margin-top:10px;">💾 Применить состав</button>
+                        <button class="btn btn-secondary" onclick="saveCast()" style="margin-top:6px;">💾 Применить состав</button>
                     </div>
 
-                    <div id="turnSection" style="display:none;border-top:1px solid #000;padding-top:20px;margin-top:20px;">
-                        <label id="turnTitle" style="display:block;font-weight:bold;margin-bottom:8px;font-size:14px;">Ваша реплика</label>
-                        <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
-                        <div style="display:flex; gap:15px; align-items:center;">
-                            <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
-                            <span style="font-size:12px;color:#666;font-style:italic;">Пустое сообщение = пропуск действия • Ctrl+Enter для отправки</span>
-                        </div>
-                    </div>
-
-                    <div style="border-top:1px solid #000;padding-top:20px;margin-top:20px;">
-                        <label style="display:block;font-weight:bold;margin-bottom:8px;font-size:14px;">Правила и инструкции</label>
-                        <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Редактировать правила и инструкции</button>
+                    <div class="panel-section">
+                        <div class="panel-heading"><span class="num">03</span><span class="name">Правила и инструкции</span></div>
+                        <div class="panel-note">Общие правила общения, руководства модератора, правила судьи и личные инструкции участников. Работают одинаково до и во время спектакля.</div>
+                        <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Открыть редактор</button>
 
                         <div id="instructionsEditor" style="display:none;">
                             <div style="font-size:13px;color:#333;margin-bottom:15px;padding:10px;background:#f9f9f9;border:1px solid #ddd;">
@@ -2383,10 +2507,24 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <div style="border-top:1px solid #000;padding-top:20px;margin-top:20px;display:flex;gap:15px;flex-wrap:wrap;">
-                        <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
-                        <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
-                        <button class="btn btn-secondary" id="newBtn" onclick="newShow()" style="display:none;">🎭 Новый спектакль</button>
+                    <div class="panel-section" id="turnSection" style="display:none;">
+                        <div class="panel-heading"><span class="num">04</span><span class="name" id="turnTitle">Ваша реплика</span></div>
+                        <div class="panel-note">Пустое сообщение = пропуск действия. Ctrl+Enter — отправить.</div>
+                        <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
+                        <div style="display:flex; gap:15px; align-items:center;">
+                            <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
+                            <span style="font-size:12px;color:#666;font-style:italic;">Реплика станет постом от вашего имени</span>
+                        </div>
+                    </div>
+
+                    <div class="panel-section">
+                        <div class="panel-heading"><span class="num">05</span><span class="name">Управление спектаклем</span></div>
+                        <div class="panel-note">«Завершить» опускает занавес, но не закрывает театр: после него можно собрать новый состав и играть дальше. Сервер останавливает «Покинуть театр».</div>
+                        <div style="display:flex;gap:15px;flex-wrap:wrap;">
+                            <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
+                            <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
+                            <button class="btn btn-secondary" id="newBtn" onclick="newShow()" style="display:none;">🎭 Новый спектакль</button>
+                        </div>
                     </div>
                 </div>
                 <div id="posts"></div>
@@ -2435,6 +2573,7 @@ HTML_TEMPLATE = """
         // поэтому страница не держит вторую (свою) копию настроек
         let cast = [];
         let models = [];               // скачанные модели Ollama для выбора в составе
+        let thinkingModels = [];       // из них те, что умеют размышлять (capabilities Ollama)
         let debateRunning = false;
         let pollInterval = null;
         let lastPostCount = 0;
@@ -2453,6 +2592,7 @@ HTML_TEMPLATE = """
             .then(r => r.json())
             .then(data => {
                 models = data.models || [];
+                thinkingModels = data.thinking_models || [];
                 if (data.error) console.warn('Список моделей недоступен: ' + data.error);
                 renderCastEditor();
             })
@@ -2518,7 +2658,86 @@ HTML_TEMPLATE = """
                 .catch(() => {});
         }
 
+        // «Характер» — готовые наборы параметров генерации. Числа управляют не смыслом
+        // реплик (его задаёт личная инструкция), а тем, насколько участник предсказуем,
+        // склонен повторяться и размышляет ли перед ответом.
+        const PRESETS = {
+            custom:  {label: '🎚 Свой — сам выберу', hint: 'числа не трогаются'},
+            pedant:  {label: '⚖️ Педант', hint: 'предсказуемо, по делу, без размышлений',
+                      params: {temperature: 0.2, top_p: 0.5, repeat_penalty: 1.10,
+                               presence_penalty: 0.05, frequency_penalty: 0.05, think: 'off'}},
+            analyst: {label: '🧠 Аналитик', hint: 'строго, но с обоснованием',
+                      params: {temperature: 0.4, top_p: 0.8, repeat_penalty: 1.15,
+                               presence_penalty: 0.3, frequency_penalty: 0.2, think: 'auto'}},
+            talker:  {label: '💬 Собеседник', hint: 'живая речь, средняя свобода',
+                      params: {temperature: 0.9, top_p: 0.9, repeat_penalty: 1.10,
+                               presence_penalty: 0.4, frequency_penalty: 0.3, think: 'auto'}},
+            dreamer: {label: '🎭 Фантазёр', hint: 'неожиданные связи, меньше логики',
+                      params: {temperature: 1.25, top_p: 0.95, repeat_penalty: 1.15,
+                               presence_penalty: 0.6, frequency_penalty: 0.5, think: 'off'}},
+            brawler: {label: '🔥 Провокатор', hint: 'резко, с наездом, без повторов',
+                      params: {temperature: 1.45, top_p: 0.9, repeat_penalty: 1.2,
+                               presence_penalty: 0.7, frequency_penalty: 0.6, think: 'off'}},
+        };
+
+        // Числовые параметры, которыми управляет пульт (остальные берутся из Modelfile модели)
+        const PARAM_KEYS = ['temperature', 'top_p', 'repeat_penalty', 'presence_penalty', 'frequency_penalty'];
+
+        // Пересчитывает строку «Уйдёт в модель» по текущим полям формы — чтобы
+        // не приходилось сохранять состав, чтобы понять, что применится
+        function refreshEffective(idx) {
+            const box = document.getElementById('effective-' + idx);
+            if (!box) return;
+            const defaults = (cast[idx] && cast[idx].model_defaults) || {};
+            const parts = PARAM_KEYS.map(key => {
+                const el = document.getElementById(key + '-' + idx);
+                const raw = el ? el.value : '';
+                const own = raw !== '';
+                const value = own ? raw : (defaults[key] === undefined ? '—' : defaults[key]);
+                return key + ' <strong>' + value + '</strong>'
+                    + (own ? '' : ' <span style="color:#999;">(как в модели)</span>');
+            });
+            box.innerHTML = '<strong>Уйдёт в модель:</strong> ' + parts.join(' · ')
+                + '<br>Пустое поле — параметр вообще не отправляется: действует значение из Modelfile модели.';
+        }
+
+        // «q1» и «q1:latest» — одна и та же модель
+        function modelSupportsThinking(name) {
+            if (!name || !thinkingModels.length) return false;
+            const base = n => String(n).split(':')[0];
+            return thinkingModels.some(m => base(m) === base(name));
+        }
+
+        // Пресет просто заполняет поля — дальше их можно править руками
+        function applyPreset(idx) {
+            const name = document.getElementById('preset-' + idx).value;
+            const preset = PRESETS[name];
+            const hint = document.getElementById('preset-hint-' + idx);
+            if (hint) hint.textContent = preset.hint || '';
+            if (!preset.params) { refreshEffective(idx); return; }
+
+            Object.entries(preset.params).forEach(([key, value]) => {
+                const el = document.getElementById(key + '-' + idx);
+                if (el) el.value = value;
+            });
+
+            // Модель без поддержки размышлений не получит think=true — показываем честно
+            const thinkEl = document.getElementById('think-' + idx);
+            if (thinkEl && thinkEl.value === 'on' && thinkEl.dataset.supportsThinking === '0') {
+                thinkEl.value = 'off';
+            }
+            refreshEffective(idx);
+        }
+
         // Состав — одна и та же форма и для настройки спектакля, и для правок на ходу
+        // Выбор значения для селекта: «q1» и «q1:latest» — одна модель
+        function selectIf(value, current) {
+            return String(value) === String(current) ? 'selected' : '';
+        }
+
+        // Состав — одна и та же форма и для настройки спектакля, и для правок на ходу.
+        // Параметры генерации видны сразу: у пустого поля подсказкой стоит значение из
+        // OPTIONS, а под ними написано, что именно уйдёт в модель.
         function renderCastEditor() {
             const container = document.getElementById('castEditor');
             if (!cast.length) {
@@ -2536,52 +2755,108 @@ HTML_TEMPLATE = """
                     borderColor = '#7b1fa2';
                 }
                 const avatar = p.avatar_url
-                    ? `<img src="${escapeHtml(p.avatar_url)}">`
+                    ? '<img src="' + escapeHtml(p.avatar_url) + '">'
                     : (p.avatar_emoji || '📣');
-                // У человека и модель, и температура — не поля, а сама роль
+                const fieldLabel = text => '<label style="font-size:11px;text-transform:uppercase;letter-spacing:1px;">' + text + '</label>';
+                const fieldStyle = 'width:100%;padding:7px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;';
+
+                // У человека нет ни модели, ни параметров: это сама роль
                 const modelField = isHuman
-                    ? '<label style="font-size:12px;text-transform:uppercase;">Модель</label><div style="font-size:13px;color:#666;padding:8px 0;">живой участник</div>'
-                    : `<label style="font-size:12px;text-transform:uppercase;">Модель</label>
-                       <select id="model-${idx}" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">${modelOptions(p.model)}</select>`;
-                const tempField = isHuman ? '' : `
-                    <div>
-                        <label style="font-size:12px;text-transform:uppercase;">Температура</label>
-                        <input type="number" id="temperature-${idx}" step="0.1" min="0" max="2"
-                               value="${p.temperature === undefined || p.temperature === null ? '' : p.temperature}"
-                               title="Насколько свободно выбираются слова. 0-0.3 — предсказуемо и по делу (судья, аналитик); 0.8-1.2 — живая речь; 1.5-2 — поток сознания, текст часто рассыпается. Выше 2.0 не принимается."
-                               placeholder="как в OPTIONS" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">
-                        <div style="font-size:11px;color:#666;margin-top:4px;">0 — по делу, 1 — в меру, 2 — вразнос</div>
-                    </div>`;
-                return `
-                <div data-participant-index="${idx}" style="margin-bottom:18px;padding:12px;border:1px solid ${borderColor};background:#ffffff;">
-                    <div style="display:flex;gap:15px;align-items:flex-start;">
-                        <div class="avatar-preview" id="avatar-preview-${idx}" style="width:90px;height:90px;font-size:44px;flex-shrink:0;" onclick="openAvatarModal(${idx})">${avatar}</div>
-                        <div style="flex:1;display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;">
-                            <div>
-                                <label style="font-size:12px;text-transform:uppercase;">Имя</label>
-                                <input type="text" id="name-${idx}" value="${escapeHtml(p.display_name || '')}" placeholder="Введите имя" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:16px;">
-                            </div>
-                            <div>
-                                <label style="font-size:12px;text-transform:uppercase;">Пол</label>
-                                <select id="gender-${idx}" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">
-                                    <option value="male" ${p.gender === 'male' ? 'selected' : ''}>♂ Мужской</option>
-                                    <option value="female" ${p.gender === 'female' ? 'selected' : ''}>♀ Женский</option>
-                                </select>
-                            </div>
-                            <div>${modelField}</div>
-                            ${tempField}
-                            <div>
-                                <label style="font-size:12px;text-transform:uppercase;">Ключевые слова для аватара</label>
-                                <input type="text" id="keywords-${idx}" value="${escapeHtml(p.avatar_keywords || '')}" placeholder="Например: философ учёный" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">
-                            </div>
-                        </div>
-                    </div>
-                    <div style="margin-top:12px;display:flex;gap:15px;align-items:center;flex-wrap:wrap;">
-                        ${roleBadge}
-                        <button class="btn btn-secondary" onclick="searchAvatar(${idx})" style="padding:6px 15px;font-size:14px;margin:0;">🔍 Найти аватар</button>
-                    </div>
-                </div>`;
+                    ? fieldLabel('Модель') + '<div style="font-size:13px;color:#666;padding:8px 0;">живой участник</div>'
+                    : fieldLabel('Модель') + '<select id="model-' + idx + '" style="' + fieldStyle + '">' + modelOptions(p.model) + '</select>';
+
+                const supportsThinking = modelSupportsThinking(p.model);
+                const thinkValue = p.think || 'auto';
+                const presetValue = PRESETS[p.preset] ? p.preset : 'custom';
+                const own = p.own_options || [];
+
+                // Одно числовое поле: пусто = параметр не отправляется вообще,
+                // действует значение из Modelfile модели (оно же стоит подсказкой)
+                const defaults = p.model_defaults || {};
+                const paramField = (key, label, step, min, max, hint) => {
+                    const value = (p[key] === undefined || p[key] === null) ? '' : p[key];
+                    const ownValue = own.indexOf(key) !== -1;
+                    const fallback = ownValue ? '' : (defaults[key] === undefined ? 'как в модели' : defaults[key]);
+                    const range = (min === null ? '' : ' min="' + min + '"') + (max === null ? '' : ' max="' + max + '"');
+                    return '<div>' + fieldLabel(label)
+                        + '<input type="number" id="' + key + '-' + idx + '" step="' + step + '"' + range
+                        + ' value="' + value + '" placeholder="' + fallback + '" title="' + hint + '"'
+                        + ' oninput="refreshEffective(' + idx + ')"'
+                        + ' style="width:100%;padding:6px;border:1px solid ' + (ownValue ? '#000000' : '#cccccc')
+                        + ';font-size:13px;' + (ownValue ? '' : 'color:#555;') + '">'
+                        + '</div>';
+                };
+
+                const paramsBlock = isHuman ? '' : ''
+                    + '<div style="grid-column:1/-1;margin-top:14px;padding-top:12px;border-top:1px dotted #cccccc;">'
+                    +   '<div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">'
+                    +     '<div style="min-width:210px;">' + fieldLabel('Характер (заполнить набором)')
+                    +       '<select id="preset-' + idx + '" onchange="applyPreset(' + idx + ')" style="' + fieldStyle + '"'
+                    +         ' title="Готовый набор параметров генерации. Числа управляют тем, КАК участник говорит, а что он говорит — задаёт его личная инструкция.">'
+                    +         Object.entries(PRESETS).map(([key, v]) =>
+                                '<option value="' + key + '" ' + selectIf(key, presetValue) + '>' + v.label + '</option>').join('')
+                    +       '</select>'
+                    +     '</div>'
+                    +     '<div style="min-width:210px;">' + fieldLabel('Размышления')
+                    +       '<select id="think-' + idx + '" data-supports-thinking="' + (supportsThinking ? 1 : 0) + '" style="' + fieldStyle + '"'
+                    +         ' title="Скрытое рассуждение модели перед ответом. Умеют не все модели — у остальных этот режим недоступен.">'
+                    +         '<option value="auto" ' + selectIf('auto', thinkValue) + '>Авто (как в ENABLE_THINKING)</option>'
+                    +         '<option value="off" ' + selectIf('off', thinkValue) + '>Выключены — отвечает сразу</option>'
+                    +         '<option value="on" ' + selectIf('on', thinkValue) + (supportsThinking ? '' : ' disabled') + '>Включены — сначала думает</option>'
+                    +       '</select>'
+                    +     '</div>'
+                    +     '<div id="preset-hint-' + idx + '" style="font-size:11px;color:#666;max-width:250px;padding-top:20px;line-height:1.5;">'
+                    +       (PRESETS[presetValue].hint || '') + (supportsThinking ? '' : '<br>размышления этой модели недоступны')
+                    +     '</div>'
+                    +   '</div>'
+                    +   '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;">'
+                    +     paramField('temperature', 'Температура', '0.1', 0, 2,
+                                'Насколько свободно выбираются слова: 0-0.3 предсказуемо, 0.8-1.2 живая речь, выше 1.5 текст рассыпается. Выше 2 не принимается.')
+                    +     paramField('top_p', 'top_p', '0.05', 0, 1,
+                                'Отсекает маловероятные слова: меньше — предсказуемее. Делает почти то же, что температура, поэтому крутить надо что-то одно.')
+                    +     paramField('repeat_penalty', 'repeat_penalty', '0.05', 0, null,
+                                'Штраф за повторы: 1.1-1.3 спасает от зацикливания, выше 1.6 ломает грамматику.')
+                    +     paramField('presence_penalty', 'presence_penalty', '0.1', 0, null,
+                                'Подталкивает к новым темам, а не к пересказу сказанного: 0.3-0.6.')
+                    +     paramField('frequency_penalty', 'frequency_penalty', '0.1', 0, null,
+                                'Режет частые слова, мягче чем repeat_penalty: 0.3-0.6.')
+                    +   '</div>'
+                    // Содержимое дособерёт refreshEffective(idx) ниже: так строка
+                    // не разойдётся с подсказками в самих полях
+                    +   '<div id="effective-' + idx + '" style="font-size:11px;color:#666;margin-top:9px;line-height:1.6;"></div>'
+                    + '</div>';
+
+                return ''
+                + '<div data-participant-index="' + idx + '" style="margin-bottom:18px;padding:14px;border:1px solid ' + borderColor + ';background:#ffffff;">'
+                +   '<div style="display:flex;gap:15px;align-items:flex-start;">'
+                +     '<div class="avatar-preview" id="avatar-preview-' + idx + '" style="width:90px;height:90px;font-size:44px;flex-shrink:0;" onclick="openAvatarModal(' + idx + ')">' + avatar + '</div>'
+                +     '<div style="flex:1;">'
+                +       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;">'
+                +         '<div>' + fieldLabel('Имя')
+                +           '<input type="text" id="name-' + idx + '" value="' + escapeHtml(p.display_name || '') + '" placeholder="Введите имя" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:16px;">'
+                +         '</div>'
+                +         '<div>' + fieldLabel('Пол (влияет только на аватар)')
+                +           '<select id="gender-' + idx + '" style="' + fieldStyle + '">'
+                +             '<option value="male" ' + selectIf('male', p.gender) + '>♂ Мужской</option>'
+                +             '<option value="female" ' + selectIf('female', p.gender) + '>♀ Женский</option>'
+                +           '</select>'
+                +         '</div>'
+                +         '<div>' + modelField + '</div>'
+                +         '<div>' + fieldLabel('Ключевые слова для аватара')
+                +           '<input type="text" id="keywords-' + idx + '" value="' + escapeHtml(p.avatar_keywords || '') + '" placeholder="Например: философ учёный" style="' + fieldStyle + '">'
+                +         '</div>'
+                +       '</div>'
+                +       paramsBlock
+                +     '</div>'
+                +   '</div>'
+                +   '<div style="margin-top:14px;display:flex;gap:15px;align-items:center;flex-wrap:wrap;">'
+                +     roleBadge
+                +     '<button class="btn btn-secondary" onclick="searchAvatar(' + idx + ')" style="padding:6px 15px;font-size:14px;margin:0;">🔍 Найти аватар</button>'
+                +   '</div>'
+                + '</div>';
             }).join('');
+            // У людей параметров нет, у моделей строка «Уйдёт в модель» собирается по полям
+            cast.forEach((p, idx) => { if (p.model !== 'human') refreshEffective(idx); });
         }
         
         function modelOptions(current) {
@@ -2604,8 +2879,14 @@ HTML_TEMPLATE = """
                 };
                 if (p.model !== 'human') {
                     entry.model = pick(`model-${idx}`, p.model);
-                    const temp = pick(`temperature-${idx}`, '');
-                    entry.temperature = temp === '' ? null : temp;   // пусто = как в OPTIONS
+                    // Пустая строка = «как в OPTIONS»: сервер убирает такое поле у участника
+                    ['temperature', 'top_p', 'repeat_penalty',
+                     'presence_penalty', 'frequency_penalty'].forEach(key => {
+                        const raw = pick(`${key}-${idx}`, '');
+                        entry[key] = raw === '' ? null : raw;
+                    });
+                    entry.think = pick(`think-${idx}`, p.think || 'auto');
+                    entry.preset = pick(`preset-${idx}`, p.preset || 'custom');
                 }
                 return entry;
             });
@@ -3334,8 +3615,11 @@ def get_static_instructions():
 def get_models():
     """Скачанные модели Ollama: ими заполняется список выбора модели в составе."""
     models, error = fetch_ollama_models(force=True)
+    names = sorted(models.keys()) if models else []
     return jsonify({
-        "models": sorted(models.keys()) if models else [],
+        "models": names,
+        # Кто из моделей умеет размышлять: интерфейс не даст включить это там, где нельзя
+        "thinking_models": [n for n in names if model_supports_thinking(n)],
         "error": error or "",
     })
 
@@ -3361,8 +3645,23 @@ def participants():
         return jsonify({"success": True, "participants": session.runtime_participants})
 
     models = [p.get("model", "") for p in session.runtime_participants]
+    # Пустое поле участника значит «взять из OPTIONS». Чтобы это не приходилось
+    # держать в голове, отдаём интерфейсу действующие значения и их источник.
+    cast = []
+    for p in session.runtime_participants:
+        item = dict(p)
+        if p.get("model") != "human":
+            merged = _merge_options(p)
+            item["effective_options"] = {
+                k: merged[k] for k in PER_PARTICIPANT_OPTION_KEYS if merged.get(k) is not None
+            }
+            item["own_options"] = [k for k in PER_PARTICIPANT_OPTION_KEYS if p.get(k) is not None]
+            # Пока поле пустое, работают параметры из самого Modelfile модели
+            item["model_defaults"] = fetch_model_parameters(p.get("model", ""))
+        cast.append(item)
     return jsonify({
-        "participants": session.runtime_participants,
+        "participants": cast,
+        "option_keys": list(PER_PARTICIPANT_OPTION_KEYS),
         "running": session.running,
         "finished": session.finished,
         "topic": session.topic,
