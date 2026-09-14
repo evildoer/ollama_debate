@@ -1408,12 +1408,14 @@ class TestScenePanel(unittest.TestCase):
     def test_an_unchosen_model_is_not_silently_replaced(self):
         """Пустое место — это «модель ещё не выбрана», а не «первая модель Ollama».
 
-        Без явного пустого варианта браузер сам показывал первую модель из списка,
-        и перестановка соседа тихо записывала её в участника.
+        Раньше поле было списком, и браузер сам подставлял первую модель, когда
+        подходящего варианта не находилось: перестановка соседа тихо записывала её
+        в участника. Теперь поле — текст: браузеру подставлять нечего, и пустое
+        значение так и остаётся пустым.
         """
-        start = self.page.index("function modelOptions(")
-        body = self.page[start:self.page.index("function collectCast()", start)]
-        self.assertIn("— выберите модель —", body)
+        self.assertIn('<input type="text" id="model-', self.page)
+        self.assertIn("— выберите модель —", self.page)
+        self.assertNotIn('<select id="model-', self.page)
 
     def test_the_sidebar_shows_whether_the_judge_is_public(self):
         """Судья-публичный меняет спектакль на ходу — это должно быть видно сразу."""
@@ -1537,7 +1539,10 @@ class TestCloudGateway(unittest.TestCase):
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop(settings.CLOUD_KEY_ENV, None)
+        # Ключ может лежать в настоящем окружении или быть поднят из .env при
+        # импорте: для чистоты опыта убираем все имена, под которыми он заводится
+        for name in ("CLOUD_API_KEY", settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV"):
+            os.environ.pop(name, None)
         self.addCleanup(self._clear_cache)
         # Никаких зависимостей от запущенной Ollama: список местных моделей,
         # проверка «умеет ли модель размышлять» (у каждой модели это /api/show!)
@@ -1636,6 +1641,34 @@ class TestCloudGateway(unittest.TestCase):
         self.assertIn("нет-такой-модели", message)
         self.assertNotIn("ollama pull", message, "скачивать облачную модель бессмысленно")
 
+    def test_the_key_is_read_from_the_environment_under_any_known_name(self):
+        """Ключ принимается под всеми именами, что встречались в документации."""
+        for name in ("CLOUD_API_KEY", settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV"):
+            with self.subTest(name=name):
+                os.environ[name] = self.KEY
+                self.assertEqual(cloud.api_key(), self.KEY,
+                                 f"ключ из переменной {name} не подхватился")
+                del os.environ[name]
+
+    def test_dotenv_lines_are_parsed_without_touching_the_environment(self):
+        parsed = cloud._parse_dotenv(
+            "# комментарий\n\nCLOUD_API_KEY=\"в кавычках\"\n"
+            "CLOUD_BASE_URL = https://example.test/v1  \n")
+        self.assertEqual(parsed, {"CLOUD_API_KEY": "в кавычках",
+                                  "CLOUD_BASE_URL": "https://example.test/v1"})
+        # Реальная переменная окружения важнее строки из .env: ключ, заданный
+        # в системе, файл перекрывать не должен
+        os.environ["CLOUD_BASE_URL"] = "http://real-env/v1"
+        self.assertEqual(cloud.base_url(), "http://real-env/v1")
+
+    def test_the_gateway_is_not_conducted_through_the_local_proxy(self):
+        """Шлюз — сам прокси до OpenAI: вести его ещё и через свой прокси = ломать запрос."""
+        os.environ["HTTP_PROXY"] = "http://127.0.0.1:1"    # мёртвый порт: достучаться нельзя
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:1"
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertEqual(content, "Канберра.")
+        self.assertEqual(self.gateway.last_request()["path"], "/v1/chat/completions")
+
     def test_without_a_key_a_cloud_participant_is_not_ready(self):
         settings.CLOUD_API_KEY = ""
         status = ollama_api.check_models_available([self.MODEL])
@@ -1679,14 +1712,24 @@ class TestCloudPanel(unittest.TestCase):
     def setUp(self):
         self.page = page.HTML_TEMPLATE
 
-    def model_options(self) -> str:
-        start = self.page.index("function modelOptions(")
+    def suggestions(self) -> str:
+        start = self.page.index("function renderModelSuggestions()")
         return self.page[start:self.page.index("function collectCast()", start)]
 
-    def test_the_model_list_tells_local_from_cloud(self):
-        body = self.model_options()
+    def test_the_suggestion_list_tells_local_from_cloud(self):
+        body = self.suggestions()
         self.assertIn("cloudModels", body)
-        self.assertIn("optgroup", body, "иначе не видно, уйдёт ли реплика в интернет")
+        self.assertIn("☁️", body, "по значку видно, что реплика уйдёт в интернет")
+
+    def test_the_suggestions_are_one_list_for_the_whole_cast(self):
+        """У шлюза сотни моделей: своя копия списка в каждой карточке — тысячи строк разметки."""
+        self.assertEqual(self.page.count('<datalist id="modelList">'), 1)
+        self.assertIn('list="modelList"', self.page)
+
+    def test_the_model_can_be_typed_in_by_hand(self):
+        """Поле — текст, а не строгий список: вписать cloud:вендор/модель можно всегда."""
+        self.assertIn('<input type="text" id="model-', self.page)
+        self.assertIn("впишите cloud:", self.page)
 
     def test_the_cloud_models_come_to_the_page(self):
         self.assertIn("data.cloud_models", self.page)

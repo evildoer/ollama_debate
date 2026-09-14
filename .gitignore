@@ -52,6 +52,7 @@ ENV/
 .env
 .env.local
 *.env.*
+!.env.example
 
 # Coverage
 .coverage

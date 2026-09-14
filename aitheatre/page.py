@@ -281,6 +281,10 @@ HTML_TEMPLATE = """
                         <div class="panel-heading"><span class="num">02</span><span class="name">Состав</span></div>
                         <div class="panel-note">Сцена: кто играет, в каком порядке и в какой роли. Правки действуют сразу и работают до и на ходу — уже сказанное не меняется. Порядок карточек — очередь реплик, поэтому участников можно переставлять, а место может быть любым из трёх ролей. Характер (температура и прочее) на каждый спектакль разыгрывается случайно.</div>
                         <div id="castEditor"></div>
+                        <!-- Общие подсказки для поля модели всего состава: у шлюза
+                             сотни моделей, и своя копия списка в каждой карточке
+                             раздувала бы разметку в тысячи строк -->
+                        <datalist id="modelList"></datalist>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-top:6px;">
                             <button class="btn btn-secondary" onclick="saveCast()" style="margin:0;">💾 Применить состав</button>
                             <button class="btn btn-secondary" onclick="addCast()" style="margin:0;" title="Добавить место в конец сцены: имя, эмодзи и профессия придумаются сами, а модель будет как у соседа. Потом место можно настроить как любое другое">➕ Добавить участника</button>
@@ -433,6 +437,7 @@ HTML_TEMPLATE = """
             .then(data => {
                 models = data.models || [];
                 cloudModels = data.cloud_models || [];
+                renderModelSuggestions();
                 thinkingModels = data.thinking_models || [];
                 if (data.error) console.warn('Список моделей недоступен: ' + data.error);
                 // Облако без ключа — не ошибка, а «ещё не настроено»: скажем об этом
@@ -801,7 +806,16 @@ HTML_TEMPLATE = """
                 // У человека нет ни модели, ни параметров: это сама роль
                 const modelField = isHuman
                     ? fieldLabel('Модель') + '<div style="font-size:13px;color:#666;padding:8px 0;">живой участник</div>'
-                    : fieldLabel('Модель') + '<select id="model-' + idx + '" style="' + fieldStyle + '">' + modelOptions(p.model) + '</select>';
+                    : fieldLabel('Модель')
+                      // Поле — текст с подсказками (datalist), а не жёсткий список:
+                      // облачную модель можно вписать рукой — «cloud:вендор/модель» —
+                      // например, если её только что добавили на шлюз
+                      + '<input type="text" id="model-' + idx + '" list="modelList"'
+                      + ' value="' + escapeHtml(p.model || '') + '"'
+                      + ' placeholder="— выберите модель — или впишите cloud:…"'
+                      + ' style="' + fieldStyle + '" onchange="refreshEffective(' + idx + ')"'
+                      + ' title="Начните набирать — список отфильтруется. Облачную модель можно вписать целиком: cloud:вендор/модель'
+                      + (cloudHint ? ' (облако: ' + cloudHint + ')' : '') + '">';
 
                 const supportsThinking = modelSupportsThinking(p.model);
                 const thinkValue = p.think || 'auto';
@@ -970,37 +984,25 @@ HTML_TEMPLATE = """
             }).join('');
             // У людей параметров нет, у моделей строка «Уйдёт в модель» собирается по полям
             cast.forEach((p, idx) => { if (p.model !== 'human') refreshEffective(idx); });
+            renderModelSuggestions();
         }
         
-        function modelOptions(current) {
-            const local = models.slice();
-            const remote = cloudModels.slice();
-            // Модель из PARTICIPANTS может быть с тегом: показываем её, даже если список иной
-            const known = name => local.includes(name) || remote.includes(name);
-            if (current && !known(current)) {
-                (current.indexOf('cloud:') === 0 ? remote : local).unshift(current);
-            }
-            const option = name => `<option value="${escapeHtml(name)}" ${name === current ? 'selected' : ''}>${escapeHtml(name)}</option>`;
-            // Место без модели — это «ещё не выбрана», а не «первая в списке».
-            // Раньше подходящего варианта не находилось, и браузер сам показывал
-            // первую модель: перестановка или удаление соседа молча записывали её
-            // в участника, а сайдбар показывал чужую модель вместо прочерка
-            const blank = current ? '' : '<option value="" selected>— выберите модель —</option>';
-            if (!local.length && !remote.length) {
-                return `<option value="${escapeHtml(current || '')}" selected>${escapeHtml(current || 'нет моделей')}</option>`;
-            }
-            // Две группы, а не один список: с одного взгляда видно, играет ли
-            // участник на этом компьютере (и займёт видеопамять) или в интернете
-            const localGroup = local.length
-                ? '<optgroup label="💻 На этом компьютере (Ollama)">' + local.map(option).join('') + '</optgroup>'
-                : '';
-            const cloudLabel = cloudHint
-                ? '☁️ Облако — ' + cloudHint
-                : '☁️ Облако (' + remote.length + ')';
-            const cloudGroup = remote.length
-                ? '<optgroup label="' + escapeHtml(cloudLabel) + '">' + remote.map(option).join('') + '</optgroup>'
-                : (cloudHint ? '<optgroup label="' + escapeHtml(cloudLabel) + '"></optgroup>' : '');
-            return blank + localGroup + cloudGroup;
+        // Подсказки для поля модели — одни на весь состав. Поле теперь текст,
+        // а не строгий список: так можно вписать модель, которой в подсказках нет
+        // (например, только что добавленную на шлюзе). Облачные помечаем ☁️ —
+        // по значку видно, что реплика уйдёт в интернет.
+        function renderModelSuggestions() {
+            const box = document.getElementById('modelList');
+            if (!box) return;
+            const option = name => '<option value="' + escapeHtml(name) + '">'
+                + escapeHtml(cloudModels.includes(name) ? '☁️ ' + name : name) + '</option>';
+            const names = models.concat(cloudModels);
+            // Модель из PARTICIPANTS может быть с тегом: показываем и её, даже
+            // если такого имени в списках нет
+            cast.forEach(p => {
+                if (p.model && p.model !== 'human' && !names.includes(p.model)) names.unshift(p.model);
+            });
+            box.innerHTML = names.map(option).join('');
         }
         
         function collectCast() {

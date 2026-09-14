@@ -144,6 +144,21 @@ BUGS = {
          "    if False:\n"
          "        return name"),
     ],
+    "запрос к шлюзу снова ведётся через локальный прокси": [
+        ("aitheatre/cloud.py",
+         "    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))",
+         "    opener = urllib.request.build_opener()"),
+    ],
+    "значения из .env стали пустыми": [
+        ("aitheatre/cloud.py",
+         "        parsed[key] = value",
+         '        parsed[key] = ""'),
+    ],
+    "поле модели снова строгий список, вписать облачную нельзя": [
+        ("aitheatre/page.py",
+         "                      + '<input type=\"text\" id=\"model-' + idx + '\" list=\"modelList\"'",
+         "                      + '<select id=\"model-' + idx + '\" data-typing=\"no\"'"),
+    ],
     "облачные модели пропали из списка в пульте": [
         ("aitheatre/page.py",
          "                cloudModels = data.cloud_models || [];",

@@ -36,6 +36,54 @@ from . import settings
 _MODELS_CACHE = {"at": 0.0, "names": [], "error": None}
 
 
+# ── ФАЙЛ .env ────────────────────────────────────────────────────────────────
+# Ключ не должен жить ни в коде, ни в git: файл .env рядом с проектом уже
+# в .gitignore, и все настройки облака можно держать там. Парсер свой, без
+# зависимостей — файл простой: строки КЛЮЧ=ЗНАЧЕНИЕ, комментарии с решётки.
+
+def _parse_dotenv(text: str) -> dict:
+    """Строки КЛЮЧ=ЗНАЧЕНИЕ из .env: комментарии и пустые строки пропускаются.
+
+    Кавычки вокруг значения снимаются. Значение может быть пустым — оно
+    просто не ставится.
+    """
+    parsed = {}
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("\ufeff"):
+            line = line[1:].strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not value:
+            continue
+        if value[0] in "\"'" and value[-1] == value[0]:
+            value = value[1:-1]
+        parsed[key] = value
+    return parsed
+
+
+def _load_dotenv() -> None:
+    """Прочитать .env из корня проекта в окружение процесса.
+
+    setdefault — настоящая переменная окружения важнее файла: ключ, заданный
+    в системе, файл не перекроет.
+    """
+    dotenv_file = settings.PROJECT_ROOT / ".env"
+    if not dotenv_file.is_file():
+        return
+    try:
+        for key, value in _parse_dotenv(dotenv_file.read_text(encoding="utf-8")).items():
+            os.environ.setdefault(key, value)
+    except OSError:
+        pass    # файл пропал в момент чтения — ничего страшного
+
+
+_load_dotenv()
+
+
 # ── ЧТО СЧИТАЕТСЯ ОБЛАЧНОЙ МОДЕЛЬЮ ──────────────────────────────────────────
 
 def is_cloud_model(model: str) -> bool:
@@ -65,14 +113,25 @@ def cloud_model_id(name: str) -> str:
 
 # ── КЛЮЧ ────────────────────────────────────────────────────────────────────
 
+# Имена переменных окружения, под которыми может лежать ключ, по убыванию
+# приоритета. Основное — CLOUD_API_KEY (так предлагает .env.example), но
+# подхватываются и варианты из документации приложения: THEATRE_CLOUD_API_KEY
+# и простое CLOUD_KEY_ENV — кто-то уже положил ключ под этим именем
+_KEY_ENV_NAMES = ("CLOUD_API_KEY", settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV")
+
+
 def api_key() -> str:
-    """Ключ из переменной окружения, иначе из settings. Пусто — не настроено.
+    """Ключ: переменная окружения (в т.ч. из .env), иначе settings. Пусто — не настроено.
 
     Ключ часто копируют из документации вместе с кавычками: «Bearer sk-...»
     или “sk-...” — лишнее отрезаем, иначе шлюз ответит 401, и никто не поймёт почему.
     """
-    from_env = os.environ.get(settings.CLOUD_KEY_ENV, "") if settings.CLOUD_KEY_ENV else ""
-    key = (from_env or settings.CLOUD_API_KEY or "").strip()
+    key = ""
+    for name in _KEY_ENV_NAMES:
+        if name and os.environ.get(name):
+            key = os.environ[name]
+            break
+    key = key or settings.CLOUD_API_KEY or ""
     # В каком бы порядке ни пришло: «Bearer sk-...», «“sk-...”» или всё сразу
     for _ in range(2):
         key = key.strip().strip('"\'').strip()
@@ -90,8 +149,9 @@ def key_problem() -> str:
     """
     key = api_key()
     if not key:
-        return ("ключ облачного шлюза не задан: впишите его в settings.CLOUD_API_KEY "
-                f"или положите в переменную окружения {settings.CLOUD_KEY_ENV}")
+        return ("ключ облачного шлюза не задан: положите его в файл .env рядом с проектом "
+                "(строка CLOUD_API_KEY=ваш-ключ) или в переменную окружения "
+                f"{settings.CLOUD_KEY_ENV}")
     if not key.isascii() or any(symbol.isspace() for symbol in key):
         return ("ключ облачного шлюза выглядит странно: в нём есть пробелы или "
                 "не латинские символы. Скопируйте его заново — в ключе только "
@@ -117,8 +177,17 @@ def hide_key(text: str) -> str:
     return str(text).replace(key, "***")
 
 
+def base_url() -> str:
+    """Адрес шлюза: настройка settings или строка CLOUD_BASE_URL в .env.
+
+    Адрес — вещь подвижная (у шлюзов бывают зеркала), поэтому его можно
+    переопределить, не трогая код.
+    """
+    return (os.environ.get("CLOUD_BASE_URL") or settings.CLOUD_BASE_URL).rstrip("/")
+
+
 def _url(path: str) -> str:
-    return f"{settings.CLOUD_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    return f"{base_url()}/{path.lstrip('/')}"
 
 
 def _request(path: str, payload=None, method: str = "GET", timeout: int = None):
@@ -139,8 +208,12 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None):
         headers["Content-Type"] = "application/json"
 
     request = urllib.request.Request(_url(path), data=data, headers=headers, method=method)
+    # Шлюз — сам прокси до OpenAI и других API, в этом его смысл. Вести его ещё
+    # и через свой локальный прокси (как поиск в интернете) значило бы замедлить
+    # запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(request, timeout=timeout or settings.CLOUD_TIMEOUT) as response:
+        with opener.open(request, timeout=timeout or settings.CLOUD_TIMEOUT) as response:
             body = response.read().decode("utf-8")
         return json.loads(body), None
     except urllib.error.HTTPError as e:
@@ -153,7 +226,7 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None):
             e.close()   # иначе Python ругается на не закрытый ответ ошибки
         return None, hide_key(f"шлюз ответил HTTP {e.code} {e.reason}: {detail}".strip())
     except Exception as e:
-        return None, hide_key(f"шлюз недоступен по адресу {settings.CLOUD_BASE_URL}: {e}")
+        return None, hide_key(f"шлюз недоступен по адресу {base_url()}: {e}")
 
 
 # ── ПЕРЕВОД ЧИСЕЛ УЧАСТНИКА ─────────────────────────────────────────────────
@@ -279,8 +352,8 @@ def fetch_models(force: bool = False, timeout: int = 20) -> tuple:
 def status() -> dict:
     """Состояние облака для раздела «00 · Готовность» и списка моделей."""
     if not is_configured():
-        return {"configured": False, "base_url": settings.CLOUD_BASE_URL,
+        return {"configured": False, "base_url": base_url(),
                 "models": [], "error": ""}
     models, error = fetch_models()
-    return {"configured": True, "base_url": settings.CLOUD_BASE_URL,
+    return {"configured": True, "base_url": base_url(),
             "models": models, "error": error or ""}
