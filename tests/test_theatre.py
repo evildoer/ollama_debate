@@ -698,6 +698,31 @@ class TestSceneEditing(unittest.TestCase):
         self.assertEqual(show.cast_role(cast[0]), "moderator")
         self.assertEqual(cast[0]["model"], "другая-модель")
 
+    def test_a_place_appears_with_a_model_even_in_an_empty_cast(self):
+        """Состав можно собрать с нуля: соседа нет — берётся первая скачанная модель.
+
+        Иначе место появлялось бы без модели, и его пришлось бы выбирать руками `
+        в единственном случае, когда подсказать некому.
+        """
+        with mock.patch.object(settings, "PARTICIPANTS", []):
+            self.session.load_new_cast()
+            self.assertEqual(self.session.runtime_participants, [])
+            with mock.patch.object(ollama_api, "fetch_ollama_models",
+                                   mock.Mock(return_value=(
+                                       {"zz-модель": {}, "aa-модель": {}}, None))):
+                draft = show.draft_cast_entry()
+        self.assertEqual(draft["model"], "aa-модель")
+
+    def test_without_any_model_the_place_stays_without_one(self):
+        """Нет Ollama или ничего не скачано — место без модели, а не выдуманная модель."""
+        with mock.patch.object(settings, "PARTICIPANTS", []):
+            self.session.load_new_cast()
+            with mock.patch.object(ollama_api, "fetch_ollama_models",
+                                   mock.Mock(return_value=({}, "Ollama недоступна"))):
+                draft = show.draft_cast_entry()
+        self.assertEqual(draft["model"], "")
+        self.assertTrue(draft["display_name"].strip(), "имя всё равно должно быть")
+
     def test_the_draft_place_does_not_touch_the_cast(self):
         before = [p["display_name"] for p in self.session.runtime_participants]
         draft = show.draft_cast_entry()

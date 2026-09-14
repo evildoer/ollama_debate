@@ -101,6 +101,11 @@ BUGS = {
          '                    and own.strip() == settings.DEFAULT_JUDGE_INSTRUCTION.strip():',
          "            elif False:"),
     ],
+    "новому месту не находится модель, когда соседа нет": [
+        ("aitheatre/show.py",
+         "    models, _error = ollama_api.fetch_ollama_models()",
+         "    models, _error = None, None"),
+    ],
     "пульт не отправляет опознавательное место": [
         ("aitheatre/page.py",
          "                    cast_id: p.cast_id || '',",

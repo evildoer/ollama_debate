@@ -781,7 +781,16 @@ def scene_from_cast(cast: list) -> list:
 
 
 def default_cast_model(cast: list, places: list = None) -> str:
-    """Модель для нового места: как у соседа по сцене, иначе как в PARTICIPANTS."""
+    """
+    Модель для нового места — по очереди: как у соседа по сцене, иначе как
+    в PARTICIPANTS, иначе первая скачанная модель Ollama.
+
+    Последняя попытка нужна для состава, собранного с нуля: соседа ещё нет,
+    а список PARTICIPANTS пуст или в нём одни живые люди (их модель — «human»,
+    её в участника не подставишь). Читать список моделей не страшно: он кэшируется,
+    а в пульте это одно нажатие «➕». Нет Ollama или ничего не скачано — место
+    честно останется без модели, и пульт скажет об этом в разделе «Готовность».
+    """
     for participant in reversed(cast or []):
         model = participant.get("model", "")
         if model and model != "human":
@@ -790,7 +799,8 @@ def default_cast_model(cast: list, places: list = None) -> str:
         model = place.get("model", "")
         if model and model != "human":
             return model
-    return ""
+    models, _error = ollama_api.fetch_ollama_models()
+    return next(iter(sorted(models or {})), "")
 
 
 def sanitize_scene(raw) -> list:
