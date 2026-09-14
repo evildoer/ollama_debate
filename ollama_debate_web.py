@@ -184,6 +184,10 @@ _MODEL_INFO_CACHE = {}
 _VRAM_MEASUREMENTS = {}
 VRAM_MEASUREMENTS_FILE = Path(__file__).resolve().parent / ".vram_cache.json"
 
+# Настройки, которые не должны теряться при перезапуске. Имена персонажей каждый
+# спектакль новые, поэтому здесь только то, что привязано к роли: правила судьи.
+SETTINGS_FILE = Path(__file__).resolve().parent / ".theatre_settings.json"
+
 # Чтобы не повторять одно и то же предупреждение на каждом опросе статуса
 _RAM_SPILL_WARNED = set()
 
@@ -840,6 +844,30 @@ def save_vram_measurements():
     except Exception as e:
         print(f"  ⚠️  Не сохраняется {VRAM_MEASUREMENTS_FILE.name}: {e}")
 
+def load_theatre_settings():
+    """
+    Возвращает правила судьи, сохранённые в прошлых запусках: имена участников
+    каждый спектакль новые, а правила судьи — общая настройка роли.
+    """
+    try:
+        if SETTINGS_FILE.exists():
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            rules = data.get("judge_rules") if isinstance(data, dict) else None
+            if isinstance(rules, list) and rules:
+                session.judge_rules = [str(r) for r in rules]
+                print(f"⚖️  Загружены сохранённые правила судьи: {len(session.judge_rules)} пунктов")
+    except Exception as e:
+        print(f"  ⚠️  Не читается {SETTINGS_FILE.name}: {e}")
+
+def save_theatre_settings():
+    """Сохраняет правила судьи рядом с проектом (файл в .gitignore)."""
+    try:
+        SETTINGS_FILE.write_text(
+            json.dumps({"judge_rules": session.judge_rules}, ensure_ascii=False, indent=1),
+            encoding="utf-8")
+    except Exception as e:
+        print(f"  ⚠️  Не сохраняется {SETTINGS_FILE.name}: {e}")
+
 def record_vram_measurement(name: str, ctx: int, size: int, size_vram: int):
     """
     Запоминает реальный размер модели в памяти при известном контексте.
@@ -1330,6 +1358,12 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             break
     
     if (not content or not content.strip()) and not session.moderator_finished:
+        # Пустой content у «думающих» моделей - это почти всегда размышления,
+        # съевшие весь num_predict (done_reason: "length"). Просить финальный
+        # ответ снова С размышлениями бесполезно: они опять займут бюджет.
+        # Поэтому второй запрос идёт с think=False - тогда ответ приходит сразу.
+        print(f"  ⚠️  {participant_name}: пустой ответ (размышления заняли весь бюджет) - "
+              f"прошу финальный ответ без размышлений")
         messages.append({
             "role": "user",
             "content": "Дай свой финальный ответ на русском языке.",
@@ -1341,10 +1375,9 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                 "model": model,
                 "messages": messages,
                 "options": options or OPTIONS,
-                "stream": False
+                "stream": False,
+                "think": False
             }
-            if not ENABLE_THINKING:
-                data["think"] = False
             
             req = urllib.request.Request(
                 OLLAMA_URL,
@@ -1439,7 +1472,6 @@ class DebateSession:
         self.finished = False
         self.avatars = {}
         self.avatar_emojis = {}
-        self.instructions = {}
         self.static_instructions = []
         self.judge_rules = list(DEFAULT_JUDGE_RULES)
         self.moderator_guidelines = []
@@ -1449,8 +1481,52 @@ class DebateSession:
         self.runtime_participants = []
         self.conversation_history = []
 
-    def reset(self, topic, runtime_participants, avatars, instructions,
-              avatar_emojis=None, static_instructions=None, judge_rules=None):
+    # ------------------------------------------------------------
+    # Состав: единственный источник правды
+    # ------------------------------------------------------------
+    # До старта это заготовка следующего спектакля, после старта - живой состав.
+    # Поэтому режиссёрский пульт правит одни и те же данные в любой момент,
+    # а не дублирует форму настройки отдельной формой модератора.
+
+    def load_new_cast(self):
+        """Новый состав: роли и модели из PARTICIPANTS, свежие имена, эмодзи, профессии."""
+        self.runtime_participants = build_new_cast()
+        self.sync_cast_media()
+
+    def sync_cast_media(self):
+        """
+        avatars/avatar_emojis - производные от состава: аватар и эмодзи лежат в самом
+        участнике, поэтому переименование их не теряет.
+        """
+        self.avatars = {}
+        self.avatar_emojis = {}
+        for participant in self.runtime_participants:
+            name = participant.get("display_name", "")
+            if not name:
+                continue
+            if participant.get("avatar_url"):
+                self.avatars[name] = participant["avatar_url"]
+            self.avatar_emojis[name] = participant.get("avatar_emoji", "📣")
+
+    def rename_participant(self, old_name: str, new_name: str):
+        """
+        Переименование на ходу. Уже опубликованные посты остаются как были (они уже
+        отрисованы), но история для промптов и «кто сейчас на сцене» переезжают на
+        новое имя - иначе модель считала бы прошлые реплики чужими.
+        """
+        if not old_name or old_name == new_name:
+            return
+        for post in self.conversation_history:
+            if post.get("display_name") == old_name:
+                post["display_name"] = new_name
+        if self.current_participant == old_name:
+            self.current_participant = new_name
+
+    def start_show(self, topic: str):
+        """
+        Старт спектакля. Состав, правила, инструкции и тема уже лежат в сессии -
+        начинаем с них, а не пересылаем всё заново из формы.
+        """
         self.running = True
         self.session_id = uuid.uuid4().hex[:8]
         self.topic = topic
@@ -1460,22 +1536,22 @@ class DebateSession:
         self.current_action = None
         self.search_query = None
         self.finished = False
-        self.avatars = avatars
-        self.avatar_emojis = avatar_emojis or {}
-        self.instructions = instructions
-        self.static_instructions = static_instructions or []
-        self.judge_rules = list(judge_rules) if judge_rules else (self.judge_rules or list(DEFAULT_JUDGE_RULES))
         self.waiting_for_human = False
         self.moderator_message = None
         self.moderator_finished = False
-        self.runtime_participants = runtime_participants
         self.conversation_history = []
+        self.sync_cast_media()
 
-    def clear(self):
-        """Полный сброс (кнопка «Новый спектакль»)."""
+    def new_show(self):
+        """«Новый спектакль»: новый состав, настройки роли сохраняем."""
         guidelines = list(self.moderator_guidelines)
+        judge_rules = list(self.judge_rules)
+        static_instructions = list(self.static_instructions)
         self.__init__()
         self.moderator_guidelines = guidelines
+        self.judge_rules = judge_rules
+        self.static_instructions = static_instructions
+        self.load_new_cast()
 
     # ------------------------------------------------------------
     # Работа с постами
@@ -1650,7 +1726,7 @@ class DebateSession:
             n for n in self._get_participants_list()
             if n != participant.get("display_name")
         ]
-        custom = self.instructions.get(participant.get("display_name", ""), "")
+        custom = participant.get("instruction", "") or ""
         if not (custom and custom.strip()) and participant.get("is_judge"):
             custom = DEFAULT_JUDGE_INSTRUCTION
         if not (custom and custom.strip()):
@@ -1813,8 +1889,186 @@ class DebateSession:
         return response, search_count, search_queries
 
 
+def build_new_cast() -> list:
+    """
+    Состав спектакля: роли и модели из PARTICIPANTS, новые имена, эмодзи и ключевые
+    слова для аватара. Личные параметры генерации (температура и прочее из
+    PARTICIPANTS) едут в том же словаре - иначе они до модели не доходили.
+    """
+    cast = []
+    available_male_names = MALE_NAMES.copy()
+    available_female_names = FEMALE_NAMES.copy()
+    available_emojis = AVATAR_EMOJIS.copy()
+    available_professions = PROFESSIONS.copy()
+
+    for template in PARTICIPANTS:
+        gender = random.choice(["male", "female"])
+
+        # Уникальное имя по полу, с запасным вариантом из другого списка
+        if gender == "male":
+            if available_male_names:
+                name = random.choice(available_male_names)
+                available_male_names.remove(name)
+            elif available_female_names:
+                name = random.choice(available_female_names)
+                available_female_names.remove(name)
+            else:
+                name = "Участник"
+        else:
+            if available_female_names:
+                name = random.choice(available_female_names)
+                available_female_names.remove(name)
+            elif available_male_names:
+                name = random.choice(available_male_names)
+                available_male_names.remove(name)
+            else:
+                name = "Участник"
+
+        if available_emojis:
+            emoji = random.choice(available_emojis)
+            available_emojis.remove(emoji)
+        else:
+            emoji = "📣"
+
+        if available_professions:
+            profession = random.choice(available_professions)
+            available_professions.remove(profession)
+        else:
+            profession = "человек"
+
+        entry = {
+            "model": template["model"],
+            "display_name": name,
+            "avatar_keywords": profession,
+            "avatar_emoji": emoji,
+            "avatar_url": None,
+            "gender": gender,
+            "is_moderator": template.get("is_moderator", False),
+            "is_judge": template.get("is_judge", False),
+            "instruction": DEFAULT_JUDGE_INSTRUCTION if template.get("is_judge") else "",
+        }
+        # Персональные параметры генерации из PARTICIPANTS (temperature и другие)
+        for key in PER_PARTICIPANT_OPTION_KEYS:
+            if template.get(key) is not None:
+                entry[key] = template[key]
+        cast.append(entry)
+
+    return cast
+
+
+def apply_cast_patch(incoming: list) -> str:
+    """
+    Правка состава по индексам: имя, пол, модель, ключевые слова, аватар и параметры
+    генерации. Одинаково работает и для заготовки, и для идущего спектакля: прошлые
+    реплики не трогаются, меняется только то, что будет сказано дальше.
+    Возвращает текст ошибки либо пустую строку.
+    """
+    cast = session.runtime_participants
+    if len(incoming) != len(cast):
+        return f"В составе {len(cast)} участников, получено {len(incoming)}"
+
+    updates = []
+    for index, raw in enumerate(incoming):
+        if not isinstance(raw, dict):
+            return "Каждый участник должен быть объектом"
+        entry = cast[index]
+        name = str(raw.get("display_name", entry.get("display_name", "")) or "").strip()
+        if not name:
+            return "У всех участников должны быть имена"
+        gender = str(raw.get("gender", entry.get("gender", "male")) or "male")
+        if gender not in ("male", "female"):
+            return f"{name}: пол может быть только «male» или «female»"
+        model = str(raw.get("model", entry.get("model", "")) or "").strip()
+
+        # Параметры генерации разбираем здесь же: запрос применяется целиком либо
+        # отклоняется целиком, иначе ошибка у последнего участника оставила бы
+        # предыдущих уже переименованными, а форма - с прежними именами.
+        options = {}
+        for key in PER_PARTICIPANT_OPTION_KEYS:
+            if key not in raw:
+                continue
+            value = raw.get(key)
+            if value is None or value == "":
+                options[key] = None      # пусто = как в глобальных OPTIONS
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return f"{name}: «{key}» должен быть числом"
+            if key in ("top_k", "seed"):
+                number = int(number)
+            if key == "temperature" and not 0.0 <= number <= 2.0:
+                return f"{name}: температура должна быть от 0 до 2"
+            if key in ("top_p", "min_p") and not 0.0 <= number <= 1.0:
+                return f"{name}: «{key}» должна быть от 0 до 1"
+            if key in ("repeat_penalty", "presence_penalty", "frequency_penalty") and number < 0:
+                return f"{name}: «{key}» не может быть отрицательной"
+            options[key] = number
+
+        updates.append({"entry": entry, "raw": raw, "name": name, "gender": gender,
+                        "model": model, "options": options})
+
+    names = [u["name"] for u in updates]
+    if len(set(names)) != len(names):
+        return "Имена участников должны быть разными"
+
+    # Модели можно менять на ходу: проверяем все сразу, до применения.
+    # Недоступная Ollama не мешает сохранить состав - модели ещё проверятся на старте.
+    models = sorted({u["model"] for u in updates if u["model"] and u["model"] != "human"})
+    models_status = check_models_available(models, force=True)
+    if models_status["missing"] and not models_status["error"]:
+        return models_problem_message(models_status)
+    if models_status["error"]:
+        print(f"⚠️  Модели не проверены ({models_status['error']}), состав сохраняю как есть")
+
+    old_models = {p.get("model", "") for p in cast if p.get("model")}
+    busy = session.current_action == "thinking"
+
+    for u in updates:
+        entry, raw = u["entry"], u["raw"]
+        old_name = entry.get("display_name", "")
+
+        for key, number in u["options"].items():
+            if number is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = number
+
+        if u["name"] != old_name:
+            session.rename_participant(old_name, u["name"])
+            entry["display_name"] = u["name"]
+        entry["gender"] = u["gender"]
+        # Роль (человек или модель) не меняется: у людей модель остаётся "human"
+        if entry.get("model") != "human" and u["model"] and u["model"] != "human":
+            entry["model"] = u["model"]
+        if raw.get("avatar_keywords") is not None:
+            entry["avatar_keywords"] = str(raw["avatar_keywords"])
+        if raw.get("avatar_emoji"):
+            entry["avatar_emoji"] = str(raw["avatar_emoji"])
+        if "avatar_url" in raw:
+            entry["avatar_url"] = raw.get("avatar_url") or None
+
+    session.sync_cast_media()
+
+    # Заменённые модели этому спектаклю больше не нужны - освобождаем память
+    # (но не ту, что прямо сейчас считает реплику)
+    if not busy:
+        used = {p.get("model", "") for p in cast if p.get("model")}
+        for model in sorted(old_models - used):
+            if model and model != "human":
+                unload_model(model)
+
+    return ""
+
+
 # Глобальный экземпляр сессии
 session = DebateSession()
+
+# Правила судьи из прошлых запусков (редактируются на ходу режиссёра)
+load_theatre_settings()
+
+# Состав заготовлен заранее: режиссёрский пульт правит его и до старта спектакля
+session.load_new_cast()
 
 
 def run_debate_thread(topic: str):
@@ -1829,10 +2083,12 @@ def run_debate_thread(topic: str):
         session.running = False
         return
     
-    # Модели этого спектакля: их выгружаем по окончании и держим по одной в памяти
-    show_models = {p.get("model", "") for p in runtime_participants
-                   if p.get("model") and p.get("model") != "human"}
-    
+    # Модели спектакля: их выгружаем по окончании и держим по одной в памяти.
+    # Состав берём из сессии, а не из снимка - модели можно менять на ходу.
+    def show_model_names() -> set:
+        return {p.get("model", "") for p in session.runtime_participants
+                if p.get("model") and p.get("model") != "human"}
+
     print("\n🎭 Используем подготовленный грим и костюмы...")
     for participant in runtime_participants:
         display_name = participant.get("display_name", "")
@@ -1907,7 +2163,8 @@ def run_debate_thread(topic: str):
                         break
                 else:
                     # В памяти оставляем только того, кто сейчас говорит
-                    unload_other_show_models(participant.get("model", ""), show_models)
+                    # (модель могла быть заменена режиссёром на ходу)
+                    unload_other_show_models(participant.get("model", ""), show_model_names())
                     
                     session.current_action = "thinking"
                     
@@ -1936,7 +2193,7 @@ def run_debate_thread(topic: str):
         session.current_action = None
         
         if UNLOAD_AFTER_DEBATE:
-            for model in show_models:
+            for model in show_model_names():
                 unload_model(model)
 
 # ============================================================
@@ -2053,85 +2310,88 @@ HTML_TEMPLATE = """
                     <div class="header-subtitle">Спектакль нейросетей • Акт I</div>
                     <div class="header-topic" id="topicDisplay">—</div>
                 </div>
-                <div class="card" id="setupCard">
-                    <h2>Персонажи</h2>
-                    <div class="participants-grid" id="participantsSetup"></div>
-                </div>
-                <div class="card" id="topicCard">
-                    <h2>Сюжет</h2>
+                <!-- Единый режиссёрский пульт: та же форма служит и настройкой
+                     спектакля, и пультом модератора на ходу -->
+                <div class="card" id="controlPanel">
+                    <h2 id="controlPanelTitle">Режиссёрский пульт</h2>
+
                     <div class="input-group">
-                        <textarea id="topicInput" rows="3" placeholder="Опишите сюжет сцены..."></textarea>
+                        <label>Сюжет</label>
+                        <textarea id="topicInput" rows="3" placeholder="Опишите сюжет сцены..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); applyTopic(); }"></textarea>
+                        <div style="margin-top:10px;">
+                            <button class="btn btn-secondary" onclick="applyTopic()">🎯 Применить тему</button>
+                            <span style="font-size:12px;color:#666;">Новая тема попадает в системные промпты следующих реплик (Ctrl+Enter)</span>
+                        </div>
                     </div>
-                    <div id="modelsWarning" style="display:none;margin-bottom:20px;padding:15px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
-                    <div id="vramWarning" style="display:none;margin-bottom:20px;padding:15px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
-                    <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
-                    <button class="btn btn-secondary" id="newBtn" onclick="resetDebate()" style="display:none;">🎭 Новый спектакль</button>
-                    <div style="margin-top:10px;font-size:12px;color:#666;">Ctrl+Enter для отправки</div>
-                </div>
-                <div class="card" id="staticInstructionsCard">
-                    <h2>Правила общения</h2>
-                    <p style="font-size:14px;color:#666;margin-bottom:15px;font-style:italic;">Эти правила будут добавлены в системный промпт для всех участников. Вы можете использовать плейсхолдеры:</p>
-                    <div style="font-size:13px;color:#333;margin-bottom:15px;padding:10px;background:#f9f9f9;border:1px solid #ddd;">
-                        <strong>Доступные плейсхолдеры:</strong><br>
-                        <code>{ИМЯ}</code> — имя текущего участника<br>
-                        <code>{СОБЕСЕДНИКИ}</code> — список других участников через запятую<br>
-                        <code>{ТЕМА}</code> — тема обсуждения
+
+                    <div id="modelsWarning" style="display:none;margin:20px 0;padding:15px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
+                    <div id="vramWarning" style="display:none;margin:20px 0;padding:15px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
+
+                    <div style="border-top:1px solid #000;padding-top:20px;margin-top:20px;">
+                        <label style="display:block;font-weight:bold;margin-bottom:8px;font-size:14px;">Состав: имена, пол, модель, температура</label>
+                        <div style="font-size:12px;color:#666;margin-bottom:12px;">Правки действуют сразу: до спектакля — на заготовку, на ходу — на будущие реплики (уже сказанное не меняется).</div>
+                        <div id="castEditor"></div>
+                        <button class="btn btn-secondary" onclick="saveCast()" style="margin-top:10px;">💾 Применить состав</button>
                     </div>
-                    <div id="staticInstructionsList"></div>
-                    <button class="btn btn-secondary" onclick="addStaticInstruction()" style="margin-top:10px;">➕ Добавить правило</button>
-                </div>
-                <div id="posts"></div>
-                <div id="moderatorPanel" style="display:none; margin-top:30px; padding:20px; border:2px solid #000000;">
-                    <h3 id="moderatorPanelTitle" style="margin:0 0 15px 0; font-size:20px; text-transform:uppercase; letter-spacing:2px;">Ваша реплика</h3>
-                    <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..."></textarea>
-                    <div style="display:flex; gap:15px; margin-bottom:20px;">
-                        <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
-                        <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()">Завершить спектакль</button>
+
+                    <div id="turnSection" style="display:none;border-top:1px solid #000;padding-top:20px;margin-top:20px;">
+                        <label id="turnTitle" style="display:block;font-weight:bold;margin-bottom:8px;font-size:14px;">Ваша реплика</label>
+                        <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
+                        <div style="display:flex; gap:15px; align-items:center;">
+                            <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
+                            <span style="font-size:12px;color:#666;font-style:italic;">Пустое сообщение = пропуск действия • Ctrl+Enter для отправки</span>
+                        </div>
                     </div>
-                    <div id="topicChangeBlock" style="display:none; gap:10px; align-items:center; margin-bottom:15px;">
-                        <textarea id="topicChangeInput" rows="2" style="flex:1; padding:10px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; resize:vertical; line-height:1.4;" placeholder="Текущая тема — отредактируйте и примените" onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); changeTopic(); }"></textarea>
-                        <button class="btn btn-secondary" onclick="changeTopic()" style="margin:0;">🎯 Сменить тему</button>
-                    </div>
-                    <div id="moderatorHint" style="display:none; margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки реплики • смена темы — Ctrl+Enter в поле темы (сразу попадает в системные промпты участников)</div>
-                    
-                    <!-- Панель редактирования инструкций и руководств (только для модератора) -->
-                    <div id="instructionsSection" style="display:none; border-top:1px solid #000; padding-top:20px; margin-top:20px;">
-                        <h4 style="margin:0 0 10px 0; font-size:16px; text-transform:uppercase; letter-spacing:1px;">📋 Управление инструкциями</h4>
-                        <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Редактировать инструкции и руководства</button>
-                        
+
+                    <div style="border-top:1px solid #000;padding-top:20px;margin-top:20px;">
+                        <label style="display:block;font-weight:bold;margin-bottom:8px;font-size:14px;">Правила и инструкции</label>
+                        <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Редактировать правила и инструкции</button>
+
                         <div id="instructionsEditor" style="display:none;">
+                            <div style="font-size:13px;color:#333;margin-bottom:15px;padding:10px;background:#f9f9f9;border:1px solid #ddd;">
+                                <strong>Доступные плейсхолдеры:</strong>
+                                <code>{ИМЯ}</code> — имя текущего участника,
+                                <code>{СОБЕСЕДНИКИ}</code> — остальные через запятую,
+                                <code>{ТЕМА}</code> — тема обсуждения
+                            </div>
+
                             <div style="margin-bottom:20px;">
                                 <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Правила общения (для всех участников):</label>
-                                <div style="font-size:12px;color:#666;margin-bottom:10px;">Плейсхолдеры: <code>{ИМЯ}</code>, <code>{СОБЕСЕДНИКИ}</code>, <code>{ТЕМА}</code></div>
                                 <div id="staticInstructionsEditor"></div>
                                 <button class="btn btn-secondary" onclick="addStaticInstructionEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить правило</button>
                             </div>
-                            
+
                             <div style="margin-bottom:20px;">
                                 <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Руководства (указания модератора):</label>
                                 <div id="moderatorMessagesEditor"></div>
                                 <button class="btn btn-secondary" onclick="addModeratorMessageEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить руководство</button>
                             </div>
-                            
+
                             <div style="margin-bottom:20px;">
                                 <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">⚖️ Правила для роли судьи:</label>
-                                <div style="font-size:12px;color:#666;margin-bottom:10px;">Плейсхолдеры: <code>{ИМЯ}</code>, <code>{СОБЕСЕДНИКИ}</code>, <code>{ТЕМА}</code></div>
                                 <div id="judgeRulesEditor"></div>
                                 <button class="btn btn-secondary" onclick="addJudgeRuleEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить правило судьи</button>
                                 <div style="font-size:12px;color:#666;margin-top:10px;font-style:italic;">Личный системный промпт судьи — ниже, в блоке «Индивидуальные инструкции».</div>
                             </div>
-                            
+
                             <div style="margin-bottom:20px;">
                                 <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Индивидуальные инструкции участников:</label>
                                 <div id="participantInstructionsEditor"></div>
                             </div>
-                            
+
                             <button class="btn btn-primary" onclick="saveInstructions()" style="margin-top:10px;">💾 Применить изменения</button>
                         </div>
                     </div>
+
+                    <div style="border-top:1px solid #000;padding-top:20px;margin-top:20px;display:flex;gap:15px;flex-wrap:wrap;">
+                        <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
+                        <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
+                        <button class="btn btn-secondary" id="newBtn" onclick="newShow()" style="display:none;">🎭 Новый спектакль</button>
+                    </div>
                 </div>
+                <div id="posts"></div>
                 <div class="footer">
-                    <button class="btn btn-secondary" onclick="shutdownServer(false)">Покинуть театр</button>
+                    <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
             </div>
         </div>
@@ -2171,19 +2431,46 @@ HTML_TEMPLATE = """
             return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
         }
         
-        let participants = [];
+        // Состав спектакля. У сервера он один и тот же и до старта, и на сцене,
+        // поэтому страница не держит вторую (свою) копию настроек
+        let cast = [];
+        let models = [];               // скачанные модели Ollama для выбора в составе
         let debateRunning = false;
         let pollInterval = null;
         let lastPostCount = 0;
-        let staticInstructions = [];
         let instructionsTick = 0;
         let defaultJudgePrompt = '';  // им заполняется пустое поле промпта судьи
         let mySessionId = null;        // id текущей сессии; следим за сменой на сервере
+        let showFinished = false;      // спектакль идёт или уже завершён (но не новый спектакль)
+        let finishRequested = false;   // занавес заказан, ждём, пока модель доиграет реплику
+        // Счётчик для строк, добавленных кнопками «➕»: индекс по длине контейнера
+        // повторялся после удаления строки выше, и ❌ у новой строки удалял чужую
+        let editorRowSeq = 0;
         
-        // Загружаем участников и статичные инструкции
-        fetch('/api/participants')
+        // Состав и список моделей
+        loadCast().then(() => { updatePanel(); updateSidebarParticipants(); tryRestoreSession(); });
+        fetch('/api/models')
             .then(r => r.json())
-            .then(data => { participants = data.participants; renderParticipantsSetup(); renderModelsWarning(data.models_status); renderVramWarning(data.vram_status); tryRestoreSession(); });
+            .then(data => {
+                models = data.models || [];
+                if (data.error) console.warn('Список моделей недоступен: ' + data.error);
+                renderCastEditor();
+            })
+            .catch(err => console.warn('Не удалось получить список моделей:', err));
+        
+        function loadCast() {
+            return fetch('/api/participants', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(data => {
+                    cast = data.participants || [];
+                    renderCastEditor();
+                    renderModelsWarning(data.models_status);
+                    renderVramWarning(data.vram_status);
+                    if (data.topic) document.getElementById('topicInput').value = data.topic;
+                    return data;
+                })
+                .catch(err => { console.error('Не удалось загрузить состав:', err); return {}; });
+        }
         
         refreshMemory();  // сразу видно, что уже загружено в Ollama (могут быть чужие модели)
         
@@ -2202,13 +2489,8 @@ HTML_TEMPLATE = """
             }
         }
         
-        fetch('/api/static_instructions')
-            .then(r => r.json())
-            .then(data => { staticInstructions = data.static_instructions; renderStaticInstructions(); });
-        
-        // Восстановление активной сессии при загрузке страницы.
-        // Если сервер уже играет спектакль — переключаемся в режим просмотра,
-        // а не показываем setup. Решает случай «случайно закрыл вкладку».
+        // Восстановление активной сессии при загрузке страницы: спектакль идёт
+        // (или уже отыгран) — возвращаемся к нему, а не начинаем новый.
         function tryRestoreSession() {
             fetch('/api/status?lastPostCount=0', {cache: 'no-store'})
                 .then(r => r.json())
@@ -2219,12 +2501,10 @@ HTML_TEMPLATE = """
 
                     mySessionId = data.session_id;
                     debateRunning = true;
-                    renderParticipantsSetup();
+                    showFinished = !!data.finished;
 
-                    document.getElementById('setupCard').style.display = 'none';
-                    document.getElementById('topicCard').style.display = 'none';
-                    document.getElementById('staticInstructionsCard').style.display = 'none';
                     document.getElementById('topicDisplay').textContent = data.topic || '—';
+                    if (data.topic) document.getElementById('topicInput').value = data.topic;
                     document.getElementById('posts').innerHTML = '';
 
                     (data.new_posts || []).forEach(post => addPost(post));
@@ -2238,28 +2518,113 @@ HTML_TEMPLATE = """
                 .catch(() => {});
         }
 
-        function renderStaticInstructions() {
-            const container = document.getElementById('staticInstructionsList');
-            container.innerHTML = staticInstructions.map((instr, idx) => `
-                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
-                    <textarea id="static-instr-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" onchange="updateStaticInstruction(${idx}, this.value)">${instr}</textarea>
-                    <button class="btn btn-secondary" onclick="removeStaticInstruction(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-                </div>
-            `).join('');
+        // Состав — одна и та же форма и для настройки спектакля, и для правок на ходу
+        function renderCastEditor() {
+            const container = document.getElementById('castEditor');
+            if (!cast.length) {
+                container.innerHTML = '<div style="color:#666;font-style:italic;font-size:13px;">Состав пуст</div>';
+                return;
+            }
+            container.innerHTML = cast.map((p, idx) => {
+                const isHuman = p.model === 'human';
+                let roleBadge = '<span class="role-badge role-participant">🎭 УЧАСТНИК</span>';
+                let borderColor = '#000000';
+                if (p.is_moderator) {
+                    roleBadge = '<span class="role-badge role-moderator">🎬 МОДЕРАТОР</span>';
+                } else if (p.is_judge) {
+                    roleBadge = '<span class="role-badge role-judge">⚖️ СУДЬЯ</span>';
+                    borderColor = '#7b1fa2';
+                }
+                const avatar = p.avatar_url
+                    ? `<img src="${escapeHtml(p.avatar_url)}">`
+                    : (p.avatar_emoji || '📣');
+                // У человека и модель, и температура — не поля, а сама роль
+                const modelField = isHuman
+                    ? '<label style="font-size:12px;text-transform:uppercase;">Модель</label><div style="font-size:13px;color:#666;padding:8px 0;">живой участник</div>'
+                    : `<label style="font-size:12px;text-transform:uppercase;">Модель</label>
+                       <select id="model-${idx}" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">${modelOptions(p.model)}</select>`;
+                const tempField = isHuman ? '' : `
+                    <div>
+                        <label style="font-size:12px;text-transform:uppercase;">Температура</label>
+                        <input type="number" id="temperature-${idx}" step="0.1" min="0" max="2"
+                               value="${p.temperature === undefined || p.temperature === null ? '' : p.temperature}"
+                               title="Насколько свободно выбираются слова. 0-0.3 — предсказуемо и по делу (судья, аналитик); 0.8-1.2 — живая речь; 1.5-2 — поток сознания, текст часто рассыпается. Выше 2.0 не принимается."
+                               placeholder="как в OPTIONS" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">
+                        <div style="font-size:11px;color:#666;margin-top:4px;">0 — по делу, 1 — в меру, 2 — вразнос</div>
+                    </div>`;
+                return `
+                <div data-participant-index="${idx}" style="margin-bottom:18px;padding:12px;border:1px solid ${borderColor};background:#ffffff;">
+                    <div style="display:flex;gap:15px;align-items:flex-start;">
+                        <div class="avatar-preview" id="avatar-preview-${idx}" style="width:90px;height:90px;font-size:44px;flex-shrink:0;" onclick="openAvatarModal(${idx})">${avatar}</div>
+                        <div style="flex:1;display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;">
+                            <div>
+                                <label style="font-size:12px;text-transform:uppercase;">Имя</label>
+                                <input type="text" id="name-${idx}" value="${escapeHtml(p.display_name || '')}" placeholder="Введите имя" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:16px;">
+                            </div>
+                            <div>
+                                <label style="font-size:12px;text-transform:uppercase;">Пол</label>
+                                <select id="gender-${idx}" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">
+                                    <option value="male" ${p.gender === 'male' ? 'selected' : ''}>♂ Мужской</option>
+                                    <option value="female" ${p.gender === 'female' ? 'selected' : ''}>♀ Женский</option>
+                                </select>
+                            </div>
+                            <div>${modelField}</div>
+                            ${tempField}
+                            <div>
+                                <label style="font-size:12px;text-transform:uppercase;">Ключевые слова для аватара</label>
+                                <input type="text" id="keywords-${idx}" value="${escapeHtml(p.avatar_keywords || '')}" placeholder="Например: философ учёный" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;">
+                            </div>
+                        </div>
+                    </div>
+                    <div style="margin-top:12px;display:flex;gap:15px;align-items:center;flex-wrap:wrap;">
+                        ${roleBadge}
+                        <button class="btn btn-secondary" onclick="searchAvatar(${idx})" style="padding:6px 15px;font-size:14px;margin:0;">🔍 Найти аватар</button>
+                    </div>
+                </div>`;
+            }).join('');
         }
         
-        function updateStaticInstruction(idx, value) {
-            staticInstructions[idx] = value;
+        function modelOptions(current) {
+            const list = models.slice();
+            // Модель из PARTICIPANTS может быть с тегом: показываем её, даже если список иной
+            if (current && !list.includes(current)) list.unshift(current);
+            if (!list.length) return `<option value="${escapeHtml(current || '')}" selected>${escapeHtml(current || 'нет моделей')}</option>`;
+            return list.map(name => `<option value="${escapeHtml(name)}" ${name === current ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
         }
         
-        function addStaticInstruction() {
-            staticInstructions.push('Новая инструкция...');
-            renderStaticInstructions();
+        function collectCast() {
+            return cast.map((p, idx) => {
+                const pick = (id, fallback) => { const el = document.getElementById(id); return el ? el.value : fallback; };
+                const entry = {
+                    display_name: pick(`name-${idx}`, p.display_name).trim(),
+                    gender: pick(`gender-${idx}`, p.gender),
+                    avatar_keywords: pick(`keywords-${idx}`, p.avatar_keywords),
+                    avatar_emoji: p.avatar_emoji,
+                    avatar_url: p.avatar_url || null,
+                };
+                if (p.model !== 'human') {
+                    entry.model = pick(`model-${idx}`, p.model);
+                    const temp = pick(`temperature-${idx}`, '');
+                    entry.temperature = temp === '' ? null : temp;   // пусто = как в OPTIONS
+                }
+                return entry;
+            });
         }
         
-        function removeStaticInstruction(idx) {
-            staticInstructions.splice(idx, 1);
-            renderStaticInstructions();
+        function saveCast() {
+            fetch('/api/participants', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({participants: collectCast()})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { alert('❌ ' + (data.error ||'не удалось применить состав')); return; }
+                cast = data.participants || cast;
+                renderCastEditor();
+                updateSidebarParticipants();
+                loadCast();   // заодно обновляем проверки моделей и видеопамяти
+            })
+            .catch(err => { console.error('Ошибка правки состава:', err); alert('❌ ' + err.message); });
         }
         
         function renderModelsWarning(status) {
@@ -2279,125 +2644,89 @@ HTML_TEMPLATE = """
             box.style.display = 'block';
         }
         
-        function renderParticipantsSetup() {
-            const container = document.getElementById('participantsSetup');
-            container.innerHTML = participants.map((p, idx) => {
-                // Определяем роль и стиль
-                let roleBadge = '';
-                if (p.is_moderator) {
-                    roleBadge = '<span class="role-badge role-moderator" style="position:absolute;top:10px;right:10px;">🎬 МОДЕРАТОР</span>';
-                } else if (p.is_judge) {
-                    roleBadge = '<span class="role-badge role-judge" style="position:absolute;top:10px;right:10px;">⚖️ СУДЬЯ</span>';
-                } else {
-                    roleBadge = '<span class="role-badge role-participant" style="position:absolute;top:10px;right:10px;">🎭 УЧАСТНИК</span>';
-                }
-                
-                return `
-                <div class="participant-card" style="position:relative;">
-                    ${roleBadge}
-                    <div class="avatar-container">
-                        <div class="avatar-preview" id="avatar-preview-${idx}" onclick="openAvatarModal(${idx})">
-                            ${p.avatar_url ? `<img src="${p.avatar_url}">` : (p.avatar_emoji || (p.is_moderator ? '🎬' : (p.is_judge ? '⚖️' : '📣')))}
-                        </div>
-                    </div>
-                    <div class="input-group">
-                        <label>Имя</label>
-                        <input type="text" id="name-${idx}" value="${p.display_name || ''}" ${debateRunning ? 'readonly' : ''} placeholder="Введите имя" onchange="updateParticipant(${idx}, 'display_name', this.value)">
-                    </div>
-                    <div class="input-group">
-                        <label>Пол</label>
-                        <select id="gender-${idx}" ${debateRunning ? 'disabled' : ''} onchange="updateParticipant(${idx}, 'gender', this.value)" style="width:100%; padding:10px; border:1px solid #000000; font-size:18px; background:#ffffff; color:#000000; font-family:Georgia,serif;">
-                            <option value="male" ${p.gender === 'male' ? 'selected' : ''}>♂ Мужской</option>
-                            <option value="female" ${p.gender === 'female' ? 'selected' : ''}>♀ Женский</option>
-                        </select>
-                    </div>
-                    <div class="input-group">
-                        <label>Ключевые слова для аватара</label>
-                        <input type="text" id="keywords-${idx}" value="${p.avatar_keywords || ''}" ${debateRunning ? 'readonly' : ''} placeholder="Например: философ учёный" onchange="updateParticipant(${idx}, 'avatar_keywords', this.value)">
-                    </div>
-                    <button class="btn btn-secondary" onclick="searchAvatar(${idx})" ${debateRunning ? 'disabled' : ''}>🔍 Найти аватар</button>
-                    <div class="input-group" style="margin-top:15px;">
-                        <label>Инструкция</label>
-                        <textarea id="instruction-${idx}" ${debateRunning ? 'readonly' : ''} placeholder="Дополнительная инструкция..." onchange="updateParticipant(${idx}, 'instruction', this.value)">${p.instruction || ''}</textarea>
-                    </div>
-                    <div style="font-size:12px;color:#999;margin-top:10px;">Модель: ${p.model} | Пол: ${p.gender === 'male' ? '♂' : '♀'}</div>
-                </div>
-                `;
-            }).join('');
-        }
-        
-        function updateParticipant(idx, field, value) { participants[idx][field] = value; }
-        
         function searchAvatar(idx) {
-            const keywords = participants[idx].avatar_keywords || participants[idx].display_name;
+            const keywords = (document.getElementById(`keywords-${idx}`)?.value || '').trim()
+                || (cast[idx] ? cast[idx].display_name : '');
             if (!keywords) { alert('Сначала введите имя или ключевые слова для аватара'); return; }
             
             // Блокируем кнопку во время загрузки
             const btn = event.target;
             if (btn.disabled) return;
             btn.disabled = true;
-            btn.textContent = '⏳ Загрузка...';
+            btn.textContent = '⏳ Поиск...';
             
             const preview = document.getElementById(`avatar-preview-${idx}`);
-            const fallbackEmoji = participants[idx].avatar_emoji || (participants[idx].is_moderator ? '🎬' : '📣');
+            const fallbackEmoji = (cast[idx] && cast[idx].avatar_emoji) || '📣';
             preview.innerHTML = '⏳';
             
             fetch(`/api/avatar/${encodeURIComponent(keywords)}`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ keywords: keywords, participant_idx: idx })
             }).then(r => r.json()).then(data => {
-                if (data.avatar_url) { participants[idx].avatar_url = data.avatar_url; preview.innerHTML = `<img src="${data.avatar_url}">`; }
-                else { preview.innerHTML = '❌'; setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); }
+                if (data.avatar_url) {
+                    cast[idx].avatar_url = data.avatar_url;
+                    preview.innerHTML = `<img src="${escapeHtml(data.avatar_url)}">`;
+                } else {
+                    preview.innerHTML = '❌';
+                    setTimeout(() => preview.innerHTML = fallbackEmoji, 2000);
+                }
                 btn.disabled = false;
                 btn.textContent = '🔍 Найти аватар';
             }).catch(err => { console.error('Ошибка поиска аватара:', err); preview.innerHTML = '❌'; setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); btn.disabled = false; btn.textContent = '🔍 Найти аватар'; });
         }
         
-        function openAvatarModal(idx) { const u = participants[idx].avatar_url; if (u) { document.getElementById('avatarModalImg').src = u; document.getElementById('avatarModal').style.display = 'block'; } }
+        function openAvatarModal(idx) { const u = cast[idx] && cast[idx].avatar_url; if (u) { document.getElementById('avatarModalImg').src = u; document.getElementById('avatarModal').style.display = 'block'; } }
         function closeAvatarModal() { document.getElementById('avatarModal').style.display = 'none'; }
+        
+        // Тема: одна кнопка на обе стадии — и в настройке, и на ходу режиссёра
+        function applyTopic() {
+            const input = document.getElementById('topicInput');
+            const topic = input.value.trim();
+            if (!topic) { alert('Введите тему'); return; }
+            
+            fetch('/api/moderator/topic', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({topic: topic}) })
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) { alert('❌ ' + (data.error || 'не удалось сменить тему')); return; }
+                    input.value = data.topic;
+                    document.getElementById('topicDisplay').textContent = data.topic;
+                })
+                .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
+        }
         
         function startDebate() {
             const topic = document.getElementById('topicInput').value.trim();
             if (!topic) { alert('Введите тему!'); return; }
-            participants.forEach((p, idx) => { const n = document.getElementById(`name-${idx}`); const k = document.getElementById(`keywords-${idx}`); if (n) p.display_name = n.value.trim(); if (k) p.avatar_keywords = k.value.trim(); });
-            if (participants.filter(p => !p.display_name).length > 0) { alert('У всех участников должны быть имена!'); return; }
-            debateRunning = true;
             document.getElementById('startBtn').disabled = true;
-            document.getElementById('newBtn').style.display = 'none';
-            document.getElementById('posts').innerHTML = '';
-            document.getElementById('setupCard').style.display = 'none';
-            document.getElementById('topicCard').style.display = 'none';
-            document.getElementById('staticInstructionsCard').style.display = 'none';
-            renderParticipantsSetup();
-            const instructions = {};
-            participants.forEach(p => { const el = document.getElementById(`instruction-${participants.indexOf(p)}`); if (el && el.value.trim()) instructions[p.display_name] = el.value.trim(); });
-            lastPostCount = 0;
-            document.getElementById('topicDisplay').textContent = topic;
-            // Пол и роль рисует общий рендер сайдбара: раньше здесь был свой вариант
-            // без бейджа роли, и сайдбар «переключался» только со следующим опросом
-            updateSidebarParticipants();
-            const avatars = {}; participants.forEach(p => { if (p.avatar_url) avatars[p.display_name] = p.avatar_url; });
-            // Собираем статичные инструкции из формы
-            const currentStaticInstructions = [];
-            staticInstructions.forEach((_, idx) => {
-                const el = document.getElementById(`static-instr-${idx}`);
-                if (el && el.value.trim()) currentStaticInstructions.push(el.value.trim());
-            });
             
-            fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ topic, instructions, participants, avatars, static_instructions: currentStaticInstructions }) })
-            .then(r => r.json()).then(data => { 
-                if (data.success) {
-                    if (data.session_id) mySessionId = data.session_id;
-                    // Спектакль пошёл: убираем баннер с прошлой неудачной попытки,
-                    // иначе он висел бы с устаревшим текстом до перезагрузки
-                    const box = document.getElementById('modelsWarning');
-                    if (box) { box.style.display = 'none'; box.innerHTML = ''; }
-                    pollInterval = setInterval(updatePosts, 3000);
-                    updateSidebarParticipants(); // Обновляем сайдбар при старте
-                } else {
-                    // Откатываем интерфейс и объясняем причину, а не оставляем его заблокированным
-                    showStartError(data.error || 'неизвестная ошибка');
-                }
+            // Сначала отправляем правки из формы, потом стартуем: состав живёт на сервере
+            fetch('/api/participants', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({participants: collectCast()})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) throw new Error(data.error || 'не удалось применить состав');
+                cast = data.participants || cast;
+                return fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({topic: topic}) });
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { showStartError(data.error || 'неизвестная'); return; }
+                if (data.session_id) mySessionId = data.session_id;
+                debateRunning = true;
+                showFinished = false;
+                finishRequested = false;
+                lastPostCount = 0;
+                document.getElementById('posts').innerHTML = '';
+                document.getElementById('topicDisplay').textContent = topic;
+                // Спектакль пошёл: убираем баннер с прошлой неудачной попытки
+                const box = document.getElementById('modelsWarning');
+                if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+                pollInterval = setInterval(updatePosts, 3000);
+                renderCastEditor();
+                updateSidebarParticipants();
+                updatePanel();
             })
             .catch(err => { console.error('Ошибка запуска:', err); showStartError(err.message); });
         }
@@ -2405,37 +2734,60 @@ HTML_TEMPLATE = """
         function showStartError(message) {
             debateRunning = false;
             document.getElementById('startBtn').disabled = false;
-            document.getElementById('setupCard').style.display = 'block';
-            document.getElementById('topicCard').style.display = 'block';
-            document.getElementById('staticInstructionsCard').style.display = 'block';
-            document.getElementById('posts').innerHTML = '';
-            document.getElementById('newBtn').style.display = 'none';
-            renderParticipantsSetup();
-            
             const box = document.getElementById('modelsWarning');
-            if (box) { box.innerHTML = `⚠️ Не удалось начать спектакль: ${message}`; box.style.display = 'block'; }
+            if (box) { box.innerHTML = `⚠️ Не удалось начать спектакль: ${escapeHtml(message)}`; box.style.display = 'block'; }
+            updatePanel();
             alert('Не удалось начать спектакль: ' + message);
         }
         
-        function resetDebate() {
+        // «Новый спектакль»: сервер собирает новый состав, настройки роли остаются
+        function newShow() {
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
             debateRunning = false;
-            document.getElementById('startBtn').disabled = false;
-            document.getElementById('newBtn').style.display = 'none';
+            showFinished = false;
+            finishRequested = false;
+            lastPostCount = 0;
+            mySessionId = null;
             document.getElementById('posts').innerHTML = '';
             document.getElementById('statusBar').style.display = 'none';
             document.getElementById('statusPlaceholder').style.display = 'block';
             document.getElementById('topicInput').value = '';
-            document.getElementById('setupCard').style.display = 'block';
-            document.getElementById('topicCard').style.display = 'block';
-            document.getElementById('staticInstructionsCard').style.display = 'block';
-            document.getElementById('moderatorPanel').style.display = 'none';
-            const exitBtn = document.querySelector('.footer .btn'); if (exitBtn) exitBtn.style.display = 'inline-block';
             document.getElementById('topicDisplay').textContent = '—';
-            document.getElementById('participantsDisplay').innerHTML = '';
-            lastPostCount = 0;
-            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-            renderParticipantsSetup();
-            fetch('/api/reset', {method: 'POST'}).catch(err => console.error('Ошибка сброса:', err));
+            document.getElementById('turnSection').style.display = 'none';
+            fetch('/api/reset', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => { if (data.participants) cast = data.participants; return loadCast(); })
+                .then(() => { updateSidebarParticipants(); updatePanel(); })
+                .catch(err => console.error('Ошибка сброса:', err));
+        }
+        
+        // Кнопки пульта: до спектакля — настройка, во время — остановка, после занавеса —
+        // новый спектакль. «Завершить» доступна всё время спектакля: режиссёру не нужно
+        // ждать своей очереди, чтобы остановить действие.
+        function updatePanel() {
+            const startBtn = document.getElementById('startBtn');
+            const finishBtn = document.getElementById('finishBtn');
+            const newBtn = document.getElementById('newBtn');
+            const title = document.getElementById('controlPanelTitle');
+            if (debateRunning && !showFinished) {
+                startBtn.style.display = 'none';
+                newBtn.style.display = 'none';
+                // Пока сервер не подтвердил занавес, повторно не показываем: иначе
+                // кнопка мелькала бы обратно, пока модель доигрывает реплику
+                finishBtn.style.display = finishRequested ? 'none' : 'inline-block';
+                title.textContent = 'Режиссёрский пульт — спектакль идёт';
+            } else if (showFinished) {
+                startBtn.style.display = 'none';
+                newBtn.style.display = 'inline-block';
+                finishBtn.style.display = 'none';
+                title.textContent = 'Режиссёрский пульт — занавес';
+            } else {
+                startBtn.style.display = 'inline-block';
+                startBtn.disabled = false;
+                newBtn.style.display = 'none';
+                finishBtn.style.display = 'none';
+                title.textContent = 'Режиссёрский пульт — настройка';
+            }
         }
         
         function addPost(post) {
@@ -2559,59 +2911,50 @@ HTML_TEMPLATE = """
                     if (mySessionId === null) {
                         mySessionId = data.session_id;
                     } else if (mySessionId !== data.session_id) {
+                        // Спектакль начался в другой вкладке: переходим к просмотру
                         mySessionId = data.session_id;
-                        debateRunning = false;
+                        debateRunning = true;
                         lastPostCount = 0;
-                        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
                         document.getElementById('posts').innerHTML = '';
-                        document.getElementById('setupCard').style.display = 'block';
-                        document.getElementById('topicCard').style.display = 'block';
-                        document.getElementById('staticInstructionsCard').style.display = 'block';
-                        document.getElementById('moderatorPanel').style.display = 'none';
-                        document.getElementById('statusBar').style.display = 'none';
-                        document.getElementById('statusPlaceholder').style.display = 'block';
-                        document.getElementById('newBtn').style.display = 'none';
-                        document.getElementById('startBtn').disabled = false;
-                        const eb = document.querySelector('.footer .btn'); if (eb) eb.style.display = 'inline-block';
-                        renderParticipantsSetup();
+                        document.getElementById('turnSection').style.display = 'none';
+                        loadCast().then(() => { updateSidebarParticipants(); updatePanel(); });
                         return;
                     }
                 }
                 const statusDiv = document.getElementById('statusBar');
                 const statusPlaceholder = document.getElementById('statusPlaceholder');
-                const moderatorPanel = document.getElementById('moderatorPanel');
+                const turnSection = document.getElementById('turnSection');
                 statusDiv.style.display = 'block'; statusPlaceholder.style.display = 'none';
+                // Флаги ставим до отрисовки пульта: после перезагрузки страницы
+                // он должен сразу знать, что спектакль идёт, а не ждать нового старта
+                debateRunning = true;
+                showFinished = !!data.finished;
                 if (data.topic) document.getElementById('topicDisplay').textContent = data.topic;
+                updatePanel();
                 if (data.waiting_for_human) {
-                    if (moderatorPanel.style.display !== 'block') { moderatorPanel.style.display = 'block'; const mi = document.getElementById('moderatorInput'); if (mi && !mi.value.trim()) mi.focus(); }
-                    // Поле «Сменить тему»: если пустое — подставляем текущую
-                    const tci = document.getElementById('topicChangeInput');
-                    if (tci && !tci.value.trim() && data.topic) tci.value = data.topic;
+                    // Ход человека: показываем поле реплики
                     const isMod = !!data.current_participant_is_moderator;
-                    const finishBtn = document.getElementById('finishBtn');
-                    if (finishBtn) finishBtn.style.display = isMod ? 'inline-block' : 'none';
-                    const title = document.getElementById('moderatorPanelTitle');
-                    if (title) title.textContent = isMod ? 'Ваша реплика, режиссёр' : 'Ваша реплика';
-                    const topicBlock = document.getElementById('topicChangeBlock');
-                    if (topicBlock) topicBlock.style.display = isMod ? 'flex' : 'none';
-                    const instrSection = document.getElementById('instructionsSection');
-                    if (instrSection) instrSection.style.display = isMod ? 'block' : 'none';
-                    const modHint = document.getElementById('moderatorHint');
-                    if (modHint) modHint.style.display = isMod ? 'block' : 'none';
+                    if (turnSection.style.display !== 'block') {
+                        turnSection.style.display = 'block';
+                        const mi = document.getElementById('moderatorInput');
+                        if (mi && !mi.value.trim()) mi.focus();
+                    }
+                    const turnTitle = document.getElementById('turnTitle');
+                    if (turnTitle) turnTitle.textContent = isMod ? `Ход режиссёра: ${data.current_participant}` : `Ход: ${data.current_participant}`;
                     statusDiv.classList.add('active');
-                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${data.current_participant}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
-                } else { moderatorPanel.style.display = 'none'; }
+                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
+                } else { turnSection.style.display = 'none'; }
                 if (data.running && !data.waiting_for_human) {
                     statusDiv.classList.add('active');
                     let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
-                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${data.current_participant}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>`;
+                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>`;
                 } else if (data.finished) {
                     statusDiv.classList.remove('active');
                     statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>';
-                    document.getElementById('startBtn').disabled = false;
-                    document.getElementById('newBtn').style.display = 'inline-block';
-                    moderatorPanel.style.display = 'none';
-                    const eb = document.querySelector('.footer .btn'); if (eb) eb.style.display = 'none';
+                    turnSection.style.display = 'none';
+                    document.getElementById('finishBtn').style.display = 'none';
+                    // «Покинуть театр» оставляем: занавес больше не закрывает сервер,
+                    // и это единственная кнопка остановки приложения
                     clearInterval(pollInterval);
                     pollInterval = null;
                     settleMemoryPanel();
@@ -2641,37 +2984,16 @@ HTML_TEMPLATE = """
             .finally(() => { statusRequestInFlight = false; });
         }
         
-        // Смена темы на ходу режиссёра: сервер вернёт новую тему, её подхватят
-        // и системные промпты следующих реплик, и заголовок страницы
-        function changeTopic() {
-            const input = document.getElementById('topicChangeInput');
-            const topic = input.value.trim();
-            if (!topic) { alert('Введите новую тему'); return; }
-            
-            fetch('/api/moderator/topic', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({topic: topic}) })
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        input.value = data.topic;  // показываем актуальную тему
-                        document.getElementById('topicDisplay').textContent = data.topic;
-                        alert('✅ Тема изменена: ' + data.topic);
-                    } else {
-                        alert('❌ ' + (data.error || 'не удалось сменить тему'));
-                    }
-                })
-                .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
-        }
-        
         function sendModeratorMessage() {
             const input = document.getElementById('moderatorInput');
             fetch('/api/moderator/message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input.value}) })
-            .then(r => r.json()).then(data => { if (data.success) { input.value = ''; document.getElementById('moderatorPanel').style.display = 'none'; } else alert('Ошибка: ' + (data.error || 'неизвестная')); })
+            .then(r => r.json()).then(data => { if (data.success) { input.value = ''; document.getElementById('turnSection').style.display = 'none'; } else alert('Ошибка: ' + (data.error || 'неизвестная')); })
             .catch(err => { console.error('Ошибка:', err); alert('Ошибка: ' + err.message); });
         }
         
         function updateSidebarParticipants() {
             // Получаем актуальные инструкции с сервера
-            fetch('/api/moderator/instructions')
+            fetch('/api/moderator/instructions', {cache: 'no-store'})
             .then(r => r.json())
             .then(data => {
                 // Создаём словарь индивидуальных инструкций
@@ -2684,8 +3006,9 @@ HTML_TEMPLATE = """
                     });
                 }
                 
-                // Обновляем отображение персонажей в сайдбаре
-                document.getElementById('participantsDisplay').innerHTML = participants.map(p => {
+                // Состав у страницы и у сервера один и тот же (cast), поэтому сайдбар
+                // всегда совпадает со сценой: и в настройке, и после перезагрузки
+                document.getElementById('participantsDisplay').innerHTML = cast.map(p => {
                     const instruction = currentInstructions[p.display_name];
                     const genderSymbol = p.gender === 'male' ? '♂' : '♀';
                     
@@ -2701,9 +3024,9 @@ HTML_TEMPLATE = """
                     }
                     
                     // Как и в ленте: пол сразу после имени
-                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${p.display_name}</strong> ${genderSymbol}${roleLabel} <small>(${p.model})</small>`;
+                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${escapeHtml(p.display_name)}</strong> ${genderSymbol}${roleLabel} <small>(${escapeHtml(p.model)})</small>`;
                     if (instruction) {
-                        html += `<br><em style="margin-left:10px;">${instruction}</em>`;
+                        html += `<br><em style="margin-left:10px;">${escapeHtml(instruction)}</em>`;
                     }
                     return html + '</div>';
                 }).join('');
@@ -2713,7 +3036,7 @@ HTML_TEMPLATE = """
                 if (data.static_instructions && data.static_instructions.length > 0) {
                     rulesDisplay.innerHTML = data.static_instructions
                         .filter(rule => rule.trim())
-                        .map(rule => `<div style="margin-bottom:8px;">• ${rule}</div>`)
+                        .map(rule => `<div style="margin-bottom:8px;">• ${escapeHtml(rule)}</div>`)
                         .join('');
                 } else {
                     rulesDisplay.innerHTML = '<div style="color:#999;">Правила не заданы</div>';
@@ -2724,7 +3047,7 @@ HTML_TEMPLATE = """
                 if (data.moderator_messages && data.moderator_messages.length > 0) {
                     modInstructionsDisplay.innerHTML = data.moderator_messages
                         .filter(msg => msg.trim())
-                        .map(msg => `<div style="margin-bottom:8px;">• ${msg}</div>`)
+                        .map(msg => `<div style="margin-bottom:8px;">• ${escapeHtml(msg)}</div>`)
                         .join('');
                 } else {
                     modInstructionsDisplay.innerHTML = '<div style="color:#999;font-weight:normal;">Нет указаний от руководства</div>';
@@ -2793,32 +3116,30 @@ HTML_TEMPLATE = """
             });
         }
         
+        // «Завершить спектакль» опускает занавес, но НЕ закрывает театр: сервер остаётся
+        // живым, опрос видит finished и показывает «🎭 Новый спектакль». Остановка сервера -
+        // отдельная кнопка «Покинуть театр».
         function finishDebate() {
-            if (confirm('Завершить дебаты и выйти?')) {
-                // СРАЗУ обновляем UI, не дожидаясь сервера
-                document.getElementById('moderatorPanel').style.display = 'none';
-                
+            if (confirm('Опустить занавес? После этого можно собрать новый спектакль.')) {
+                finishRequested = true;
+                fetch('/api/moderator/finish', {method: 'POST'})
+                    .then(() => updatePosts())
+                    .catch(() => {});
+
+                // Немедленный отклик, не дожидаясь сервера
+                document.getElementById('turnSection').style.display = 'none';
+                document.getElementById('finishBtn').style.display = 'none';
+
                 const statusDiv = document.getElementById('statusBar');
                 statusDiv.style.display = 'block';
                 statusDiv.classList.remove('active');
-                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Спектакль завершён</div><div style="font-style:italic;">Режиссёр завершил представление</div>';
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Опускаю занавес…</div><div style="font-style:italic;">Режиссёр завершил представление</div>';
                 document.getElementById('statusPlaceholder').style.display = 'none';
-                
-                // СРАЗУ скрываем кнопку выхода
-                const exitBtn = document.querySelector('.footer .btn');
-                if (exitBtn) exitBtn.style.display = 'none';
-                
-                // Останавливаем polling
-                if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
-                
-                // Отправляем запросы на сервер (если он ещё жив)
-                fetch('/api/moderator/finish', {method: 'POST'}).catch(() => {});
-                shutdownServer(true);
             }
         }
         
-        function shutdownServer(skipConfirm = false) {
-            if (skipConfirm || confirm('Завершить работу сервера?')) {
+        function shutdownServer() {
+            if (confirm('Завершить работу сервера?')) {
                 // СРАЗУ останавливаем polling
                 if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
                 
@@ -2827,9 +3148,8 @@ HTML_TEMPLATE = """
                 if (exitBtn) exitBtn.style.display = 'none';
                 
                 // СРАЗУ обновляем UI
-                document.getElementById('setupCard').style.display = 'none';
-                document.getElementById('topicCard').style.display = 'none';
-                document.getElementById('moderatorPanel').style.display = 'none';
+                document.getElementById('turnSection').style.display = 'none';
+                document.getElementById('statusPlaceholder').style.display = 'none';
                 
                 const statusDiv = document.getElementById('statusBar');
                 statusDiv.style.display = 'block';
@@ -2897,12 +3217,12 @@ HTML_TEMPLATE = """
         
         function addJudgeRuleEditor() {
             const container = document.getElementById('judgeRulesEditor');
-            const idx = container.children.length;
+            const idx = 'new' + (++editorRowSeq);
             const div = document.createElement('div');
             div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
             div.innerHTML = `
                 <textarea id="judge-rule-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое правило судьи..."></textarea>
-                <button class="btn btn-secondary" onclick="removeJudgeRuleEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                <button class="btn btn-secondary" onclick="removeJudgeRuleEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
             `;
             container.appendChild(div);
         }
@@ -2948,24 +3268,24 @@ HTML_TEMPLATE = """
         
         function addStaticInstructionEditor() {
             const container = document.getElementById('staticInstructionsEditor');
-            const idx = container.children.length;
+            const idx = 'new' + (++editorRowSeq);
             const div = document.createElement('div');
             div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
             div.innerHTML = `
                 <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новая инструкция..."></textarea>
-                <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                <button class="btn btn-secondary" onclick="removeStaticInstructionEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
             `;
             container.appendChild(div);
         }
         
         function addModeratorMessageEditor() {
             const container = document.getElementById('moderatorMessagesEditor');
-            const idx = container.children.length;
+            const idx = 'new' + (++editorRowSeq);
             const div = document.createElement('div');
             div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
             div.innerHTML = `
                 <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое руководство..."></textarea>
-                <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                <button class="btn btn-secondary" onclick="removeModeratorMessageEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
             `;
             container.appendChild(div);
         }
@@ -3010,73 +3330,46 @@ def get_static_instructions():
     """Возвращает дефолтные статичные инструкции"""
     return jsonify({"static_instructions": DEFAULT_STATIC_INSTRUCTIONS})
 
-@app.route('/api/participants')
-def get_participants():
-    participants_data = []
-    
-    # Создаём копии списков для гарантии уникальности
-    available_male_names = MALE_NAMES.copy()
-    available_female_names = FEMALE_NAMES.copy()
-    available_emojis = AVATAR_EMOJIS.copy()
-    available_professions = PROFESSIONS.copy()
-    
-    for p in PARTICIPANTS:
-        # Случайно выбираем пол
-        gender = random.choice(["male", "female"])
-        
-        # Выбираем уникальное имя с правильной логикой
-        if gender == "male":
-            if available_male_names:
-                name = random.choice(available_male_names)
-                available_male_names.remove(name)
-            elif available_female_names:
-                # Если мужских имён нет, берём женское
-                name = random.choice(available_female_names)
-                available_female_names.remove(name)
-            else:
-                name = "Участник"
-        else:  # gender == "female"
-            if available_female_names:
-                name = random.choice(available_female_names)
-                available_female_names.remove(name)
-            elif available_male_names:
-                # Если женских имён нет, берём мужское
-                name = random.choice(available_male_names)
-                available_male_names.remove(name)
-            else:
-                name = "Участник"
-        
-        # Выбираем уникальную эмодзи
-        if available_emojis:
-            emoji = random.choice(available_emojis)
-            available_emojis.remove(emoji)
-        else:
-            emoji = "📣"
-        
-        # Выбираем уникальную профессию для ключевых слов
-        if available_professions:
-            profession = random.choice(available_professions)
-            available_professions.remove(profession)
-        else:
-            profession = "человек"
-        
-        participants_data.append({
-            "model": p["model"],
-            "display_name": name,
-            "avatar_keywords": profession,
-            "avatar_emoji": emoji,
-            "gender": gender,
-            "is_moderator": p.get("is_moderator", False),
-            "is_judge": p.get("is_judge", False),
-            "instruction": DEFAULT_JUDGE_INSTRUCTION if p.get("is_judge") else ""
-        })
-    
+@app.route('/api/models')
+def get_models():
+    """Скачанные модели Ollama: ими заполняется список выбора модели в составе."""
+    models, error = fetch_ollama_models(force=True)
     return jsonify({
-        "participants": participants_data,
+        "models": sorted(models.keys()) if models else [],
+        "error": error or "",
+    })
+
+@app.route('/api/participants', methods=['GET', 'POST'])
+def participants():
+    """
+    GET  - состав спектакля (пока он не начат – заготовка) плюс проверки моделей
+           и видеопамяти. Имена больше не генерируются на каждый запрос, поэтому
+           перезагрузка страницы не подменяет труппу.
+    POST - правка состава: {participants: [{display_name, gender, model, temperature, ...}]}.
+           Одинаково работает и в настройке, и на ходу режиссёра.
+    """
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        incoming = data.get("participants")
+        if not isinstance(incoming, list):
+            return jsonify({"success": False, "error": "Нужен список participants"})
+        error = apply_cast_patch(incoming)
+        if error:
+            print(f"⛔ Состав не изменён: {error}")
+            return jsonify({"success": False, "error": error})
+        print(f"🎭 Состав обновлён: {[p.get('display_name') for p in session.runtime_participants]}")
+        return jsonify({"success": True, "participants": session.runtime_participants})
+
+    models = [p.get("model", "") for p in session.runtime_participants]
+    return jsonify({
+        "participants": session.runtime_participants,
+        "running": session.running,
+        "finished": session.finished,
+        "topic": session.topic,
         # Сразу сообщаем интерфейсу, если нужных моделей нет в Ollama
-        "models_status": check_models_available([p["model"] for p in PARTICIPANTS]),
+        "models_status": check_models_available(models),
         # И если они не влезают в видеопамять при текущем num_ctx
-        "vram_status": check_vram_fit([p["model"] for p in PARTICIPANTS])
+        "vram_status": check_vram_fit(models),
     })
 
 @app.route('/api/avatar/<keywords>')
@@ -3094,11 +3387,9 @@ def refresh_avatar(keywords):
         participant_idx = data.get('participant_idx')
         print(f"📋 Индекс участника: {participant_idx}")
         
-        if participant_idx is None:
-            return jsonify({"error": "participant_idx не указан"}), 400
-        
-        if not PARTICIPANTS:
-            return jsonify({"error": "Нет моделей"}), 400
+        cast = session.runtime_participants
+        if not isinstance(participant_idx, int) or not 0 <= participant_idx < len(cast):
+            return jsonify({"error": "participant_idx вне состава"}), 400
         
         # generate_avatar_for_participant() работает только с именем и ключевыми словами
         participant = {
@@ -3111,6 +3402,10 @@ def refresh_avatar(keywords):
         
         avatar_url = generate_avatar_for_participant(participant)
         
+        # Аватар живёт в составе: его видит и следующий спектакль, и идущий
+        cast[participant_idx]["avatar_url"] = avatar_url or None
+        session.sync_cast_media()
+        
         if avatar_url:
             return jsonify({"avatar_url": avatar_url})
         return jsonify({"avatar_url": None})
@@ -3120,37 +3415,27 @@ def refresh_avatar(keywords):
 
 @app.route('/api/start', methods=['POST'])
 def start():
+    """
+    Начать спектакль тем составом, который уже собран в сессии. Тело запроса может
+    уточнить тему: {"topic": "..."} - остальное режиссёр всё равно правит через пульт.
+    """
     if session.running:
         return jsonify({"success": False, "error": "Уже запущено"})
-    
+
     data = request.get_json(silent=True) or {}
-    topic = data.get("topic", "") or ""
-    instructions = data.get("instructions", {}) or {}
-    participants_data = data.get("participants", []) or []
-    avatars = data.get("avatars", {}) or {}
-    static_instructions = data.get("static_instructions", []) or []
-    
-    if not isinstance(participants_data, list):
-        participants_data = []
-    participants_data = [p for p in participants_data if isinstance(p, dict)]
-    
-    # Собираем эмодзи из участников
-    avatar_emojis = {}
-    for p in participants_data:
-        name = p.get("display_name", "")
-        if name and p.get("avatar_emoji"):
-            avatar_emojis[name] = p["avatar_emoji"]
-    
+    topic = str(data.get("topic", "") or "").strip() or (session.topic or "").strip()
     if not topic:
         return jsonify({"success": False, "error": "Тема не указана"})
-    
-    if not participants_data:
+    session.topic = topic
+
+    cast = session.runtime_participants
+    if not cast:
         return jsonify({"success": False, "error": "Не выбрано ни одного участника"})
-    
+
     # Участник без модели не сможет говорить, а поток дебатов упал бы уже на сцене
     participants_without_model = [
         p.get("display_name") or "без имени"
-        for p in participants_data
+        for p in cast
         if p.get("model") != "human" and not p.get("model")
     ]
     if participants_without_model:
@@ -3158,10 +3443,10 @@ def start():
             "success": False,
             "error": f"У участников не указана модель: {', '.join(participants_without_model)}"
         })
-    
+
     # Живая проверка перед стартом: модели могли удалить, а Ollama - перезапустить
     models_status = check_models_available(
-        [p.get("model", "") for p in participants_data], force=True
+        [p.get("model", "") for p in cast], force=True
     )
     if not models_status["ok"]:
         problem = models_problem_message(models_status)
@@ -3169,14 +3454,12 @@ def start():
         # Сбрасываем running чтобы можно было попробовать снова
         session.running = False
         return jsonify({"success": False, "error": problem})
-    
-    print(f"🎭 Запускаем спектакль с {len(participants_data)} участниками")
-    session.reset(topic, participants_data, avatars, instructions, avatar_emojis, static_instructions)
-    
-    print(f"🎭 Готовые персонажи: {avatars}")
-    print(f"🎭 Эмодзи: {avatar_emojis}")
-    print(f"🎭 Статичные инструкции: {static_instructions}")
-    
+
+    print(f"🎭 Запускаем спектакль с {len(cast)} участниками")
+    session.start_show(topic)
+    print(f"🎭 Тема: {topic}")
+    print(f"🎭 Состав: {[(p.get('display_name'), p.get('model')) for p in cast]}")
+
     thread = threading.Thread(target=run_debate_thread, args=(topic,))
     thread.daemon = True
     thread.start()
@@ -3184,8 +3467,10 @@ def start():
 
 @app.route('/api/reset', methods=['POST'])
 def reset():
-    session.clear()
-    return jsonify({"success": True})
+    """«Новый спектакль»: новый состав, правила роли остаются."""
+    session.new_show()
+    print(f"🎭 Новый состав: {[p.get('display_name') for p in session.runtime_participants]}")
+    return jsonify({"success": True, "participants": session.runtime_participants})
 
 @app.route('/api/status')
 def status():
@@ -3282,17 +3567,18 @@ def moderator_finish():
 @app.route('/api/moderator/instructions', methods=['GET'])
 def get_moderator_instructions():
     """Возвращает текущие настройки редактора и индивидуальные инструкции участников"""
-    participant_instructions = []
-    for participant in session.runtime_participants:
-        if participant.get("model") != "human":
-            name = participant.get("display_name", "")
-            participant_instructions.append({
-                "name": name,
-                "instruction": session.instructions.get(name, ""),
-                "is_judge": participant.get("is_judge", False),
-            })
+    # Личные инструкции лежат прямо в составе: переименование их не теряет
+    participant_instructions = [
+        {
+            "name": participant.get("display_name", ""),
+            "instruction": participant.get("instruction", ""),
+            "is_judge": participant.get("is_judge", False),
+        }
+        for participant in session.runtime_participants
+        if participant.get("model") != "human"
+    ]
 
-    return jsonify({
+    response = jsonify({
         "static_instructions": session.static_instructions or DEFAULT_STATIC_INSTRUCTIONS,
         "moderator_messages": session.moderator_guidelines,
         "participant_instructions": participant_instructions,
@@ -3300,6 +3586,9 @@ def get_moderator_instructions():
         "default_judge_prompt": DEFAULT_JUDGE_INSTRUCTION or "",
         "default_static_instructions": DEFAULT_STATIC_INSTRUCTIONS,
     })
+    # Редактор должен видеть живой состав и правила, а не ответ из кэша браузера
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 @app.route('/api/moderator/instructions', methods=['POST'])
 def update_moderator_instructions():
@@ -3324,6 +3613,7 @@ def update_moderator_instructions():
     # Обновляем правила судьи если переданы
     if isinstance(data.get("judge_rules"), list):
         session.judge_rules = [str(instr) for instr in data["judge_rules"]]
+        save_theatre_settings()
         print(f"⚖️  Обновлены правила судьи: {len(session.judge_rules)} пунктов")
     
     # Обновляем индивидуальные инструкции участников если переданы
@@ -3333,12 +3623,16 @@ def update_moderator_instructions():
                 continue
             name = str(p_instr.get("name", "") or "")
             instruction = str(p_instr.get("instruction", "") or "")
-            if name:
-                session.instructions[name] = instruction
-                if instruction.strip():
-                    print(f"📝 Обновлена индивидуальная инструкция для {name}: {instruction[:50]}...")
-                else:
-                    print(f"📝 Удалена индивидуальная инструкция для {name}")
+            if not name:
+                continue
+            for participant in session.runtime_participants:
+                if participant.get("display_name") == name:
+                    participant["instruction"] = instruction
+                    break
+            if instruction.strip():
+                print(f"📝 Обновлена индивидуальная инструкция для {name}: {instruction[:50]}...")
+            else:
+                print(f"📝 Удалена индивидуальная инструкция для {name}")
     
     return jsonify({"success": True})
 
