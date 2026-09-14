@@ -1652,79 +1652,54 @@ class DebateSession:
             if not post.get("is_judge", False)
         ]
 
-        # Для судьи фильтруем только сообщения текущего раунда до него
+        # Для судьи: что оценивать — текущий раунд или всю историю
         if is_judge:
-            # Находим индекс ТЕКУЩЕГО судьи в списке участников
-            judge_idx = next(
-                (i for i, p in enumerate(self.runtime_participants) 
-                 if p["display_name"] == participant_name and p.get("is_judge", False)),
-                -1
-            )
-            
-            JUDGE_SEES_ALL_ROUNDS = True  # Все посты или только текущий раунд!
+            JUDGE_SEES_ALL_ROUNDS = True  # True = вся история, False = только текущий раунд
+
             if JUDGE_SEES_ALL_ROUNDS:
-                current_round_posts = list(non_moderator_history)
+                posts_to_evaluate = list(non_moderator_history)
             else:
-                # Получаем только посты текущего раунда (исключаем посты других судей)
-                current_round_posts = [
-                    post for post in non_moderator_history 
+                posts_to_evaluate = [
+                    post for post in non_moderator_history
                     if post.get("round", 0) == round_num
                 ]
-            
-            # Если судья первый в раунде - у него нет постов для оценки
-            if judge_idx <= 0:
-                # Судья первый - оценивает предыдущий раунд или говорит что нет данных
-                if not current_round_posts:
-                    messages.append({
-                        "role": "user",
-                        "content": f'Как {participant_name}, оцени предыдущий раунд. Если это первый раунд и никто ещё не говорил, скажи что оценивать нечего.',
-                        "name": participant_name_normalized
-                    })
-                    return messages
-            else:
-                # Судья не первый - берём посты до него в текущем раунде
-                # Находим посты участников которые идут до этого судьи
-                participants_before_judge = [
-                    p["display_name"] for i, p in enumerate(self.runtime_participants) 
-                    if i < judge_idx and not p.get("is_moderator", False) and not p.get("is_judge", False)
-                ]
-                
-                # Фильтруем посты только от тех кто до судьи в этом раунде
-                current_round_posts = [
-                    post for post in current_round_posts
-                    if post["display_name"] in participants_before_judge
-                ]
-            
+
             # Преобразуем в формат сообщений
             history_messages = []
-            for post in current_round_posts:
+            for post in posts_to_evaluate:
                 speaker_name = post["display_name"]
                 content = post["content"]
                 speaker_name_normalized = speaker_name.lower().replace(" ", "_")
-                
+
                 history_messages.append({
                     "role": "user",
                     "content": f"{speaker_name} говорит: {content}",
                     "name": speaker_name_normalized
                 })
-            
-            # Добавляем историю в messages
+
             messages.extend(history_messages)
-            
-            # Добавляем финальный запрос для судьи
-            if current_round_posts:
+
+            # Финальный запрос судье
+            if posts_to_evaluate:
                 messages.append({
                     "role": "user",
-                    "content": f'Как {participant_name}, оцени выступления участников в этом раунде. Для каждого участника укажи оценку от 1 до 10 баллов и краткое содержание его речи.',
+                    "content": (
+                        f'Как {participant_name}, оцени выступления участников. '
+                        f'Для каждого участника укажи оценку от 1 до 10 баллов '
+                        f'и краткое содержание его речи.'
+                    ),
                     "name": participant_name_normalized
                 })
             else:
                 messages.append({
                     "role": "user",
-                    "content": f'Как {participant_name}, в этом раунде до тебя никто не говорил. Скажи что оценивать нечего.',
+                    "content": (
+                        f'Как {participant_name}, пока никто не говорил. '
+                        f'Скажи, что оценивать нечего.'
+                    ),
                     "name": participant_name_normalized
                 })
-            
+
             return messages
         
         # Преобразуем в формат сообщений
