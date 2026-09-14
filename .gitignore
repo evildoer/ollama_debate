@@ -94,6 +94,11 @@ desktop.ini
 .vram_cache.json
 .theatre_settings.json
 
+# Личные рабочие файлы: лежат в папке, но в репозиторий не идут
+console.bat
+test.py
+pip.freeze.txt
+
 # Аватары
 /avatars/*
 !/avatars/.gitkeep
