@@ -10,7 +10,14 @@
 и не мешают идущему спектаклю. Все проверки — на живом коде проекта,
 а не на его копии.
 
+Приложение разбито на модули (пакет aitheatre/), и подменять функцию нужно там,
+где она живёт: модули вызывают друг друга по адресу (`ollama_api.ask_model`),
+поэтому правка в «своём» модуле видна всем, а копия имени в другом файле — нет.
+Помогает `app_module_of(имя)` ниже.
+
 Что покрыто (каждая группа — это место, где ошибку раньше ловили руками):
+  * устройство — модули не ссылаются на имена, которых в них нет, а точка
+    входа ведёт в то же приложение;
   * формулы — LaTeX больше не съедается markdown, а цены в долларах не
     превращаются в формулы;
   * тема — пустое поле в форме не мешает запуску, если тема есть на сервере;
@@ -22,23 +29,105 @@
   * VRAM — оценка контекста ведёт себя монотонно и уважает бюджет.
 """
 
+import builtins
 import collections
 import copy
+import importlib
 import json
 import re
+import symtable
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import ollama_debate_web as theatre
+import aitheatre
+
+from aitheatre import avatars, deps, ollama_api, page, search, settings, show, text
+from aitheatre import web as web_app
+
+# Приложение разбито на модули, и подменять функцию нужно там, где она живёт:
+# модули вызывают друг друга по полному адресу (ollama_api.check_models_available),
+# поэтому правка в «своём» модуле видна всем. app_module_of находит нужный модуль
+# по имени — так подмена бьёт в цель, а не в копию имени в другом файле.
+APP_MODULES = (settings, deps, text, search, avatars, ollama_api, show, page, web_app)
+
+
+def app_module_of(name):
+    """Модуль, в котором живёт имя приложения."""
+    for module in APP_MODULES:
+        if hasattr(module, name):
+            return module
+    raise AssertionError(f"нет такого имени приложения: {name}")
+
+
+def referenced_globals(source, filename):
+    """Имена, которые модуль ищет в своих глобалиях, а не заводит сам.
+
+    Локальные переменные и параметры сюда не попадают — их не видно снаружи,
+    поэтому они не могут «уехать» в другой файл.
+    """
+    found = set()
+
+    def walk(table):
+        for symbol in table.get_symbols():
+            if symbol.is_referenced() and not symbol.is_assigned() \
+                    and not symbol.is_parameter() and not symbol.is_imported():
+                if table.get_type() == "module" or symbol.is_global():
+                    found.add(symbol.get_name())
+        for child in table.get_children():
+            walk(child)
+
+    walk(symtable.symtable(source, filename, "exec"))
+    return found
+
+
+# ---------------------------------------------------------------- устройство
+
+class TestModuleLayout(unittest.TestCase):
+    """Пакет должен оставаться связным: модули говорят друг с другом по адресу.
+
+    При разбиении одного большого файла на модули легко получить ссылку на имя,
+    которое уехало в соседний файл: Python скажет о ней только в момент вызова,
+    то есть на редкой ветке — например, когда что-то пойдёт не так с сетью.
+    Этот тест смотрит в таблицу символов и находит такие ссылки до запуска.
+    """
+
+    def app_modules(self):
+        """Модули приложения в порядке знакомства (константы -> зависимости)."""
+        order = ("settings", "deps", "text", "search", "avatars", "ollama_api",
+                 "show", "page")
+        return [(name, getattr(aitheatre, name)) for name in order] + [("web", web_app)]
+
+    def test_every_module_imports(self):
+        for name, module in self.app_modules():
+            with self.subTest(module=name):
+                self.assertTrue(module.__file__.endswith(f"{name}.py"))
+
+    def test_no_module_refers_to_a_name_it_does_not_have(self):
+        for name, module in self.app_modules():
+            with self.subTest(module=name):
+                source = Path(module.__file__).read_text(encoding="utf-8")
+                referenced = referenced_globals(source, module.__file__)
+                missing = sorted(
+                    symbol for symbol in referenced
+                    if symbol not in module.__dict__ and not hasattr(builtins, symbol))
+                self.assertEqual(
+                    missing, [],
+                    f"{name}.py ссылается на имена, которых в нём нет: {missing}")
+
+    def test_entry_point_starts_the_same_app(self):
+        """«python ollama_debate_web.py» и «python .» должны вести в приложение,
+        а не в свою копию — иначе правки в пакете их не касались бы."""
+        entry = importlib.import_module("ollama_debate_web")
+        self.assertIs(entry.main, web_app.main)
 
 
 # ---------------------------------------------------------------- утилиты
 
 def make_session():
     """Свежая сессия со своим составом — тесты не трогают состав приложения."""
-    session = theatre.DebateSession()
+    session = show.DebateSession()
     session.load_new_cast()
     return session
 
@@ -50,7 +139,7 @@ def cast_payload(session):
 
 def strip_session_patch(test, session):
     """Подменяет глобальную сессию проекта на тестовую."""
-    patcher = mock.patch.object(theatre, "session", session)
+    patcher = mock.patch.object(show, "session", session)
     patcher.start()
     test.addCleanup(patcher.stop)
 
@@ -80,7 +169,7 @@ class TestFormulas(unittest.TestCase):
     """LaTeX должен доезжать до страницы живым, а markdown — не портить его."""
 
     def test_inline_formula_becomes_math_element(self):
-        html = theatre.markdown_to_html(
+        html = text.markdown_to_html(
             r"Предел $\lim_{x\to 0}\frac{\sin x}{x}$ равен единице")
         self.assertIn('<span class="math"', html)
         self.assertIn('data-display="0"', html)
@@ -88,44 +177,44 @@ class TestFormulas(unittest.TestCase):
 
     def test_underscores_inside_formula_survive(self):
         # Ровно тот баг: markdown превращал _ в <em> и формула рассыпалась
-        html = theatre.markdown_to_html(r"$a_1 + b_2 = c_3$")
+        html = text.markdown_to_html(r"$a_1 + b_2 = c_3$")
         self.assertIn("a_1 + b_2 = c_3", html)
         self.assertNotIn("<em>", html)
 
     def test_block_formula_is_marked_as_display(self):
-        html = theatre.markdown_to_html("Считаем:\n\n$$\\int_0^1 x^2 dx$$\n")
+        html = text.markdown_to_html("Считаем:\n\n$$\\int_0^1 x^2 dx$$\n")
         self.assertIn('data-display="1"', html)
         self.assertIn("math-block", html)
 
     def test_bracket_and_paren_forms_work(self):
-        self.assertIn('class="math"', theatre.markdown_to_html(r"\(a+b\)"))
-        self.assertIn('data-display="1"', theatre.markdown_to_html(r"\[a+b\]"))
+        self.assertIn('class="math"', text.markdown_to_html(r"\(a+b\)"))
+        self.assertIn('data-display="1"', text.markdown_to_html(r"\[a+b\]"))
 
     def test_latex_escaped_braces_survive(self):
-        html = theatre.markdown_to_html(r"Множество $\{a_n\}$ сходится")
+        html = text.markdown_to_html(r"Множество $\{a_n\}$ сходится")
         self.assertIn(r"\{a_n\}", html)
 
     def test_money_is_not_math(self):
-        html = theatre.markdown_to_html("Курс $5 и $7 за штуку")
+        html = text.markdown_to_html("Курс $5 и $7 за штуку")
         self.assertNotIn('class="math"', html)
         self.assertIn("$5", html)
         self.assertIn("$7", html)
 
     def test_unclosed_formula_is_left_as_text(self):
         # Некорректный LaTeX не должен ронять разметку
-        html = theatre.markdown_to_html(r"Обрыв $\frac{1}{ и всё")
+        html = text.markdown_to_html(r"Обрыв $\frac{1}{ и всё")
         self.assertIsInstance(html, str)
         self.assertIn("и всё", html)
 
     def test_bold_and_formula_live_together(self):
-        html = theatre.markdown_to_html(r"**Важно**: $x^2$ растёт")
+        html = text.markdown_to_html(r"**Важно**: $x^2$ растёт")
         self.assertIn("<strong>Важно</strong>", html)
         self.assertIn('<span class="math"', html)
         self.assertIn("x^2", html)
 
     def test_formula_latex_is_escaped_for_html(self):
         # LaTeX отдаётся в атрибут/текст, угловые скобки не должны ломать разметку
-        html = theatre.markdown_to_html(r"$a < b$")
+        html = text.markdown_to_html(r"$a < b$")
         self.assertNotIn("<b>", html)
 
 
@@ -134,20 +223,20 @@ class TestFormulas(unittest.TestCase):
 class TestAvatarNames(unittest.TestCase):
 
     def test_cyrillic_is_kept(self):
-        self.assertEqual(theatre.sanitize_avatar_name("дипломат женщина"),
+        self.assertEqual(avatars.sanitize_avatar_name("дипломат женщина"),
                          "дипломат_женщина")
 
     def test_yo_letter_is_kept(self):
-        self.assertIn("ё", theatre.sanitize_avatar_name("актёр"))
+        self.assertIn("ё", avatars.sanitize_avatar_name("актёр"))
 
     def test_service_characters_become_underscores(self):
-        self.assertEqual(theatre.sanitize_avatar_name("кот/пёс: 2"),
+        self.assertEqual(avatars.sanitize_avatar_name("кот/пёс: 2"),
                          "кот_пёс__2")
 
     def test_keywords_always_mention_gender(self):
         # Иначе поисковик отдаёт женщине «мужчину-геолога»
         for _ in range(15):
-            for person in theatre.build_new_cast():
+            for person in show.build_new_cast():
                 if person.get("model") == "human":
                     continue
                 keywords = person.get("avatar_keywords", "")
@@ -162,9 +251,9 @@ class TestCharacterLottery(unittest.TestCase):
     """Жребий общий для всех ролей: и судья, и модератор тянут наравне."""
 
     def test_all_presets_can_be_drawn(self):
-        available = {key for key, value in theatre.CHARACTER_PRESETS.items()
+        available = {key for key, value in settings.CHARACTER_PRESETS.items()
                      if key != "custom" and value.get("params")}
-        drawn = {theatre.draw_character() for _ in range(500)}
+        drawn = {show.draw_character() for _ in range(500)}
         self.assertEqual(drawn, available)
 
     def test_judge_is_not_pinned_to_one_character(self):
@@ -186,9 +275,9 @@ class TestCharacterLottery(unittest.TestCase):
         self.assertGreater(with_repeats, 0, "повторы внутри спектакля не встречаются")
 
     def test_parameters_stay_within_ollama_limits(self):
-        for key in theatre.CHARACTER_PRESETS:
+        for key in settings.CHARACTER_PRESETS:
             for _ in range(120):
-                params, think = theatre.character_parameters(key)
+                params, think = show.character_parameters(key)
                 self.assertIn(think, ("auto", "on", "off"))
                 for name, value in params.items():
                     if name in ("top_p", "min_p"):
@@ -203,9 +292,9 @@ class TestCharacterLottery(unittest.TestCase):
     def test_explicit_config_wins_over_lottery(self):
         """Числа, вписанные в PARTICIPANTS, важнее жребия."""
         template = {"model": "r1", "temperature": 0.25, "top_p": 0.5}
-        with mock.patch.object(theatre, "PARTICIPANTS", [template]):
+        with mock.patch.object(settings, "PARTICIPANTS", [template]):
             for _ in range(20):
-                person = theatre.build_new_cast()[0]
+                person = show.build_new_cast()[0]
                 self.assertEqual(person["temperature"], 0.25)
                 self.assertEqual(person["top_p"], 0.5)
 
@@ -223,7 +312,7 @@ class TestCharacterPresets(unittest.TestCase):
     """
 
     def _real_presets(self):
-        return {key: preset for key, preset in theatre.CHARACTER_PRESETS.items()
+        return {key: preset for key, preset in settings.CHARACTER_PRESETS.items()
                 if preset.get("params")}
 
     def test_no_two_characters_have_the_same_numbers(self):
@@ -243,18 +332,18 @@ class TestCharacterPresets(unittest.TestCase):
                 self.assertTrue(str(preset.get("label", "")).strip())
                 self.assertTrue(str(preset.get("hint", "")).strip())
                 self.assertIn(preset.get("group"), ("manual", "balanced", "extreme"))
-                self.assertIn(preset.get("think", "auto"), theatre.THINK_MODES)
+                self.assertIn(preset.get("think", "auto"), settings.THINK_MODES)
 
     def test_characters_speak_only_in_known_parameters(self):
         """Опечатка в имени числа — тихий отказ: в Ollama такое поле не уезжает,
         а набор будет выглядеть как задумано."""
-        known = set(theatre.PER_PARTICIPANT_OPTION_KEYS)
+        known = set(settings.PER_PARTICIPANT_OPTION_KEYS)
         for key, preset in self._real_presets().items():
             unknown = sorted(set(preset["params"]) - known)
             with self.subTest(character=key):
                 self.assertEqual(unknown, [], f"«{key}»: неизвестные параметры {unknown}")
 
-        unknown_drift = sorted(set(theatre.CHARACTER_DRIFT) - known)
+        unknown_drift = sorted(set(settings.CHARACTER_DRIFT) - known)
         self.assertEqual(unknown_drift, [],
                          f"разброс задан для неизвестных параметров: {unknown_drift}")
 
@@ -265,7 +354,7 @@ class TestCastStructure(unittest.TestCase):
 
     def test_names_and_emojis_are_unique(self):
         for _ in range(150):
-            cast = theatre.build_new_cast()
+            cast = show.build_new_cast()
             names = [p["display_name"] for p in cast]
             emojis = [p["avatar_emoji"] for p in cast]
             self.assertEqual(len(names), len(set(names)), names)
@@ -278,7 +367,7 @@ class TestCastStructure(unittest.TestCase):
                      "AVATAR_EMOJIS_MALE", "AVATAR_EMOJIS_FEMALE",
                      "AVATAR_EMOJIS_NEUTRAL"):
             with self.subTest(list=name):
-                seq = getattr(theatre, name)
+                seq = getattr(app_module_of(name), name)
                 repeated = [item for item, count in collections.Counter(seq).items()
                             if count > 1]
                 self.assertEqual(repeated, [], f"повторы в {name}")
@@ -286,10 +375,10 @@ class TestCastStructure(unittest.TestCase):
     def test_pools_are_wide_enough_for_the_whole_cast(self):
         """Имён и профессий должно хватать на всех, иначе участники получат
         одинаковые запасные «Участник»/«человек»."""
-        size = len(theatre.PARTICIPANTS)
+        size = len(settings.PARTICIPANTS)
         for name in ("MALE_NAMES", "FEMALE_NAMES", "PROFESSIONS"):
             with self.subTest(list=name):
-                self.assertGreaterEqual(len(set(getattr(theatre, name))), size)
+                self.assertGreaterEqual(len(set(getattr(app_module_of(name), name))), size)
 
     def test_duplicates_in_a_pool_do_not_leak_into_the_cast(self):
         """Даже если повтор в список вернут, спектакль не получит двух тёзок.
@@ -299,17 +388,17 @@ class TestCastStructure(unittest.TestCase):
         """
         male = ["ПовторМ"] * 3 + [f"Мужское{i}" for i in range(8)]
         female = ["ПовторЖ"] * 3 + [f"Женское{i}" for i in range(8)]
-        with mock.patch.object(theatre, "MALE_NAMES", male), \
-                mock.patch.object(theatre, "FEMALE_NAMES", female):
+        with mock.patch.object(settings, "MALE_NAMES", male), \
+                mock.patch.object(settings, "FEMALE_NAMES", female):
             for _ in range(40):
-                names = [p["display_name"] for p in theatre.build_new_cast()]
+                names = [p["display_name"] for p in show.build_new_cast()]
                 self.assertEqual(len(names), len(set(names)), names)
 
     def test_gender_matches_emoji_pool(self):
-        male = set(theatre.AVATAR_EMOJIS_MALE)
-        female = set(theatre.AVATAR_EMOJIS_FEMALE)
+        male = set(settings.AVATAR_EMOJIS_MALE)
+        female = set(settings.AVATAR_EMOJIS_FEMALE)
         for _ in range(10):
-            for person in theatre.build_new_cast():
+            for person in show.build_new_cast():
                 emoji = person["avatar_emoji"]
                 if person["gender"] == "male" and emoji in female:
                     self.fail(f"мужчине достался женский эмодзи {emoji}")
@@ -317,9 +406,9 @@ class TestCastStructure(unittest.TestCase):
                     self.fail(f"женщине достался мужской эмодзи {emoji}")
 
     def test_humans_have_no_generation_params(self):
-        for person in theatre.build_new_cast():
+        for person in show.build_new_cast():
             if person["model"] == "human":
-                for key in theatre.PER_PARTICIPANT_OPTION_KEYS:
+                for key in settings.PER_PARTICIPANT_OPTION_KEYS:
                     self.assertNotIn(key, person,
                                      "человеку нечего передавать в Ollama")
 
@@ -335,9 +424,9 @@ class TestCastEditor(unittest.TestCase):
     def setUp(self):
         self.session = make_session()
         strip_session_patch(self, self.session)
-        self._patch(theatre, "check_models_available",
+        self._patch(ollama_api, "check_models_available",
                     return_value={"ok": True, "missing": [], "error": None})
-        self._patch(theatre, "unload_model")
+        self._patch(ollama_api, "unload_model")
 
     def _patch(self, target, name, **kwargs):
         patcher = mock.patch.object(target, name, **kwargs)
@@ -349,7 +438,7 @@ class TestCastEditor(unittest.TestCase):
         payload[0]["display_name"] = "Новое Имя"
         payload[0]["gender"] = "female"
         payload[1]["model"] = "q9"
-        self.assertEqual(theatre.apply_cast_patch(payload), "")
+        self.assertEqual(show.apply_cast_patch(payload), "")
 
         cast = self.session.runtime_participants
         self.assertEqual(cast[0]["display_name"], "Новое Имя")
@@ -364,7 +453,7 @@ class TestCastEditor(unittest.TestCase):
         self.assertTrue(human_indexes, "в составе должен быть живой участник")
         for index in human_indexes:
             payload[index]["model"] = "r1"
-        self.assertEqual(theatre.apply_cast_patch(payload), "")
+        self.assertEqual(show.apply_cast_patch(payload), "")
         cast = self.session.runtime_participants
         for index in human_indexes:
             self.assertEqual(cast[index]["model"], "human")
@@ -372,28 +461,28 @@ class TestCastEditor(unittest.TestCase):
     def test_temperature_is_updated_and_can_be_cleared(self):
         payload = cast_payload(self.session)
         payload[0]["temperature"] = 1.25
-        self.assertEqual(theatre.apply_cast_patch(payload), "")
+        self.assertEqual(show.apply_cast_patch(payload), "")
         self.assertEqual(self.session.runtime_participants[0]["temperature"], 1.25)
 
         payload = cast_payload(self.session)
         payload[0]["temperature"] = ""
-        self.assertEqual(theatre.apply_cast_patch(payload), "")
+        self.assertEqual(show.apply_cast_patch(payload), "")
         self.assertNotIn("temperature", self.session.runtime_participants[0],
                          "пустое поле значит «как в модели», параметр не отправляем")
 
     def test_wrong_participant_count_is_rejected(self):
-        error = theatre.apply_cast_patch([{}])
+        error = show.apply_cast_patch([{}])
         self.assertIn("участник", error.lower())
 
     def test_empty_name_is_rejected(self):
         payload = cast_payload(self.session)
         payload[0]["display_name"] = "   "
-        self.assertTrue(theatre.apply_cast_patch(payload))
+        self.assertTrue(show.apply_cast_patch(payload))
 
     def test_duplicate_names_are_rejected(self):
         payload = cast_payload(self.session)
         payload[0]["display_name"] = payload[1]["display_name"]
-        self.assertIn("разными", theatre.apply_cast_patch(payload))
+        self.assertIn("разными", show.apply_cast_patch(payload))
 
     def test_bad_numbers_are_rejected(self):
         cases = (("temperature", 3.5), ("temperature", -0.1), ("top_p", 1.5),
@@ -403,7 +492,7 @@ class TestCastEditor(unittest.TestCase):
             with self.subTest(key=key):
                 payload = cast_payload(self.session)
                 payload[0][key] = value
-                self.assertTrue(theatre.apply_cast_patch(payload), f"{key} принят зря")
+                self.assertTrue(show.apply_cast_patch(payload), f"{key} принят зря")
 
     def test_cast_is_unchanged_when_a_later_participant_is_bad(self):
         """Запрос применяется целиком или отклоняется целиком."""
@@ -411,7 +500,7 @@ class TestCastEditor(unittest.TestCase):
         before = copy.deepcopy(self.session.runtime_participants)
         payload[0]["display_name"] = "Другое Имя"
         payload[-1]["temperature"] = 99
-        self.assertTrue(theatre.apply_cast_patch(payload))
+        self.assertTrue(show.apply_cast_patch(payload))
         self.assertEqual(self.session.runtime_participants[0]["display_name"],
                          before[0]["display_name"])
 
@@ -421,7 +510,7 @@ class TestCastEditor(unittest.TestCase):
                            if p.get("is_judge"))
         before = self.session.runtime_participants[judge_index]["instruction"]
         payload[judge_index]["display_name"] = "Судья Новый"
-        self.assertEqual(theatre.apply_cast_patch(payload), "")
+        self.assertEqual(show.apply_cast_patch(payload), "")
         self.assertEqual(self.session.runtime_participants[judge_index]["instruction"],
                          before)
 
@@ -430,7 +519,7 @@ class TestCastEditor(unittest.TestCase):
         self.session.add_post("Старое Имя", "r1", "текст", 1)
         payload = cast_payload(self.session)
         payload[0]["display_name"] = "Новое Имя"
-        self.assertEqual(theatre.apply_cast_patch(payload), "")
+        self.assertEqual(show.apply_cast_patch(payload), "")
         self.assertEqual(self.session.posts[0]["display_name"], "Старое Имя")
 
 
@@ -476,7 +565,7 @@ class TestSystemPrompt(unittest.TestCase):
         judge = judge_of(self.session)
         judge["instruction"] = ""
         prompt = self.session.get_system_prompt(judge)
-        self.assertIn(theatre.DEFAULT_JUDGE_INSTRUCTION.strip()[:40], prompt)
+        self.assertIn(settings.DEFAULT_JUDGE_INSTRUCTION.strip()[:40], prompt)
 
 
 class TestSettingsPersistence(unittest.TestCase):
@@ -487,7 +576,7 @@ class TestSettingsPersistence(unittest.TestCase):
         strip_session_patch(self, self.session)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
-        self._patch(theatre, "SETTINGS_FILE",
+        self._patch(settings, "SETTINGS_FILE",
                     Path(self.tmpdir.name) / "settings.json")
 
     def _patch(self, target, name, value):
@@ -497,16 +586,16 @@ class TestSettingsPersistence(unittest.TestCase):
 
     def test_rules_survive_a_restart(self):
         self.session.judge_rules = ["Оценка только по фактам"]
-        theatre.save_theatre_settings()
+        show.save_theatre_settings()
 
         self.session.judge_rules = ["временное"]
-        theatre.load_theatre_settings()
+        show.load_theatre_settings()
         self.assertEqual(self.session.judge_rules, ["Оценка только по фактам"])
 
     def test_file_is_readable_json(self):
         self.session.judge_rules = ["Пункт 1", "Пункт 2"]
-        theatre.save_theatre_settings()
-        data = json.loads(theatre.SETTINGS_FILE.read_text(encoding="utf-8"))
+        show.save_theatre_settings()
+        data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
         self.assertEqual(data["judge_rules"], ["Пункт 1", "Пункт 2"])
 
     def test_new_show_keeps_rules_but_makes_a_new_cast(self):
@@ -540,15 +629,15 @@ class TestVramHelpers(unittest.TestCase):
         # поэтому не путаем его с «аргумент не передан»
         info = self.INF if info is None else info
         return [
-            mock.patch.object(theatre, "resolve_model_name", side_effect=lambda m, a: m),
-            mock.patch.object(theatre, "fetch_model_info", return_value=info),
-            mock.patch.object(theatre, "vram_base_bytes",
+            mock.patch.object(ollama_api, "resolve_model_name", side_effect=lambda m, a: m),
+            mock.patch.object(ollama_api, "fetch_model_info", return_value=info),
+            mock.patch.object(ollama_api, "vram_base_bytes",
                               return_value=(base_bytes, 0)),
         ]
 
     def test_kv_cache_grows_with_context(self):
-        small = theatre.estimated_kv_bytes(self.INF, 4096)
-        large = theatre.estimated_kv_bytes(self.INF, 8192)
+        small = ollama_api.estimated_kv_bytes(self.INF, 4096)
+        large = ollama_api.estimated_kv_bytes(self.INF, 8192)
         self.assertGreater(large, small)
         self.assertEqual(large, small * 2)
 
@@ -559,10 +648,10 @@ class TestVramHelpers(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-        safe, need = theatre.suggest_safe_ctx("m1", 16384, budget, {})
+        safe, need = ollama_api.suggest_safe_ctx("m1", 16384, budget, {})
         self.assertIsNotNone(safe)
         self.assertLessEqual(need, budget)
-        self.assertEqual(safe % theatre.VRAM_SAFE_CTX_STEP, 0)
+        self.assertEqual(safe % settings.VRAM_SAFE_CTX_STEP, 0)
         self.assertLessEqual(safe, 16384)
 
     def test_no_room_means_no_suggestion(self):
@@ -571,7 +660,7 @@ class TestVramHelpers(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
-        safe, need = theatre.suggest_safe_ctx("m1", 16384, 8 * 10 ** 9, {})
+        safe, need = ollama_api.suggest_safe_ctx("m1", 16384, 8 * 10 ** 9, {})
         self.assertIsNone(safe)
         self.assertEqual(need, 0)
 
@@ -580,7 +669,7 @@ class TestVramHelpers(unittest.TestCase):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        self.assertEqual(theatre.suggest_safe_ctx("m1", 8192, 8 * 10 ** 9, {}),
+        self.assertEqual(ollama_api.suggest_safe_ctx("m1", 8192, 8 * 10 ** 9, {}),
                          (None, 0))
 
 
@@ -589,24 +678,24 @@ class TestVramHelpers(unittest.TestCase):
 class TestTokenHelpers(unittest.TestCase):
 
     def test_estimate_is_positive_for_a_word(self):
-        self.assertGreaterEqual(theatre.estimate_tokens("привет"), 1)
-        self.assertGreaterEqual(theatre.estimate_tokens("hello"), 1)
-        self.assertGreaterEqual(theatre.estimate_tokens(""), 0)
+        self.assertGreaterEqual(text.estimate_tokens("привет"), 1)
+        self.assertGreaterEqual(text.estimate_tokens("hello"), 1)
+        self.assertGreaterEqual(text.estimate_tokens(""), 0)
 
     def test_estimate_grows_with_text(self):
-        self.assertGreater(theatre.estimate_tokens("слово " * 50),
-                           theatre.estimate_tokens("слово"))
+        self.assertGreater(text.estimate_tokens("слово " * 50),
+                           text.estimate_tokens("слово"))
 
     def test_history_is_trimmed_to_fit_context(self):
         messages = [{"role": "user", "content": "длинный текст " * 1200}
                     for _ in range(6)]
-        trimmed = theatre.trim_history_by_tokens(messages, system_prompt_tokens=100)
+        trimmed = text.trim_history_by_tokens(messages, system_prompt_tokens=100)
         self.assertLess(len(trimmed), len(messages),
                         "история должна обрезаться под контекст")
 
     def test_short_history_is_kept_as_is(self):
         messages = [{"role": "user", "content": "ок"}]
-        self.assertEqual(theatre.trim_history_by_tokens(messages, 10), messages)
+        self.assertEqual(text.trim_history_by_tokens(messages, 10), messages)
 
 
 # ---------------------------------------------------------------- посты
@@ -618,7 +707,7 @@ class TestPosts(unittest.TestCase):
         strip_session_patch(self, self.session)
 
     def test_role_and_gender_are_rendered(self):
-        judge = theatre.create_post("Судья", "q1", "текст", 1,
+        judge = show.create_post("Судья", "q1", "текст", 1,
                                     role="judge", gender="female")
         self.assertEqual(judge["role_icon"], "⚖️")
         self.assertEqual(judge["role_name"], "Судья")
@@ -626,15 +715,15 @@ class TestPosts(unittest.TestCase):
         self.assertEqual(judge["gender"], "female")
 
     def test_content_html_is_built_from_content(self):
-        post = theatre.create_post("Имя", "r1", r"Формула $x^2$ тут", 1)
+        post = show.create_post("Имя", "r1", r"Формула $x^2$ тут", 1)
         self.assertIn('<span class="math"', post["content_html"])
         self.assertIn("$x^2$", post["content"])
 
     def test_ids_do_not_repeat(self):
         self.session.posts = []
-        first = theatre.create_post("А", "r1", "1", 1)
+        first = show.create_post("А", "r1", "1", 1)
         self.session.posts.append(first)
-        second = theatre.create_post("Б", "r1", "2", 1)
+        second = show.create_post("Б", "r1", "2", 1)
         self.assertNotEqual(first["id"], second["id"])
 
 
@@ -650,13 +739,13 @@ class TestRoleMarks(unittest.TestCase):
     def setUp(self):
         self.session = make_session()
         strip_session_patch(self, self.session)
-        self.page = theatre.HTML_TEMPLATE
+        self.page = page.HTML_TEMPLATE
 
     def test_every_role_produced_by_the_app_has_a_stripe(self):
         roles = {
-            theatre.create_post("А", "r1", "текст", 1)["role"],
-            theatre.create_post("Б", "r1", "текст", 1, role="moderator")["role"],
-            theatre.create_post("В", "r1", "текст", 1, role="judge")["role"],
+            show.create_post("А", "r1", "текст", 1)["role"],
+            show.create_post("Б", "r1", "текст", 1, role="moderator")["role"],
+            show.create_post("В", "r1", "текст", 1, role="judge")["role"],
         }
         self.assertEqual(roles, {"participant", "moderator", "judge"})
         for role in roles:
@@ -700,17 +789,17 @@ class TestTuningPanel(unittest.TestCase):
     PARAM_KEYS_RE = re.compile(r"const PARAM_KEYS = \[(.*?)\];", re.DOTALL)
 
     def setUp(self):
-        self.page = theatre.HTML_TEMPLATE
+        self.page = page.HTML_TEMPLATE
 
     def test_pult_lists_the_same_parameters_as_the_server(self):
         match = self.PARAM_KEYS_RE.search(self.page)
         self.assertIsNotNone(match, "в пульте не нашёлся список PARAM_KEYS")
         listed = re.findall(r"'([^']+)'", match.group(1))
-        self.assertEqual(listed, list(theatre.PER_PARTICIPANT_OPTION_KEYS),
+        self.assertEqual(listed, list(settings.PER_PARTICIPANT_OPTION_KEYS),
                          "пульт и сервер разошлись в списке параметров генерации")
 
     def test_every_parameter_has_a_field_in_the_editor(self):
-        missing = [key for key in theatre.PER_PARTICIPANT_OPTION_KEYS
+        missing = [key for key in settings.PER_PARTICIPANT_OPTION_KEYS
                    if f"paramField('{key}'" not in self.page]
         self.assertEqual(missing, [], f"у этих параметров нет поля в пульте: {missing}")
 
@@ -743,7 +832,7 @@ class TestOfflinePage(unittest.TestCase):
 
     def test_page_loads_nothing_from_the_internet(self):
         external = [next(g for g in match.groups() if g)
-                    for match in self.EXTERNAL_RESOURCE_RE.finditer(theatre.HTML_TEMPLATE)]
+                    for match in self.EXTERNAL_RESOURCE_RE.finditer(page.HTML_TEMPLATE)]
         self.assertEqual(
             external, [],
             "страница не должна ждать внешних ресурсов — она живёт за прокси и без сети")
@@ -779,10 +868,10 @@ class TestRoutes(unittest.TestCase):
             ("fetch_model_parameters", mock.Mock(return_value={})),
             ("unload_model", mock.Mock()),
         ):
-            patcher = mock.patch.object(theatre, name, value)
+            patcher = mock.patch.object(app_module_of(name), name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.client = theatre.app.test_client()
+        self.client = web_app.app.test_client()
 
     def test_empty_topic_field_uses_the_one_on_the_server(self):
         """Тот самый баг: поле в форме стёрли, а тема на сервере осталась."""
@@ -872,7 +961,7 @@ class TestRoutes(unittest.TestCase):
         self.assertEqual(self.session.topic, "Новая тема")
 
     def test_judge_rules_are_saved_from_the_editor(self):
-        with mock.patch.object(theatre, "save_theatre_settings") as save:
+        with mock.patch.object(show, "save_theatre_settings") as save:
             data = self.client.post("/api/moderator/instructions",
                                     json={"judge_rules": ["Пункт"]}).get_json()
         self.assertTrue(data["success"])
@@ -930,19 +1019,19 @@ class TestRoutes(unittest.TestCase):
 class TestProblemMessages(unittest.TestCase):
 
     def test_missing_models_are_named_with_pull_commands(self):
-        message = theatre.models_problem_message(
+        message = ollama_api.models_problem_message(
             {"ok": False, "missing": ["r1", "g1"], "error": None})
         self.assertIn("r1", message)
         self.assertIn("ollama pull r1", message)
 
     def test_unreachable_ollama_is_explained(self):
-        message = theatre.models_problem_message(
+        message = ollama_api.models_problem_message(
             {"ok": False, "missing": ["r1"], "error": "нет связи"})
         self.assertIn("нет связи", message)
         self.assertIn("Ollama", message)
 
     def test_no_problem_means_no_message(self):
-        self.assertEqual(theatre.models_problem_message(
+        self.assertEqual(ollama_api.models_problem_message(
             {"ok": True, "missing": [], "error": None}), "")
 
 

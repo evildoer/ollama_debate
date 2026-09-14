@@ -1,0 +1,1735 @@
+"""Страница театра: разметка, стили и клиентский скрипт одной строкой.
+
+Так задумано: страница отдаётся одним куском, без сборки, шаблонизатора и
+внешних ресурсов — всё, что ей нужно (клиент Socket.IO, рендерер формул),
+лежит в static/ рядом с проектом.
+"""
+
+# ============================================================
+# СОВРЕМЕННЫЙ ДИЗАЙН
+# ============================================================
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Театр</title>
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <style>
+        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и
+           Courier New. Раньше здесь стоял @import с чужим сервером шрифтов —
+           никто его не использовал, но браузер всё равно ждал ответа, прежде
+           чем нарисовать пульт: без интернета или за прокси он просто висел */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Georgia, 'Times New Roman', Times, serif; background: #ffffff; min-height: 100vh; color: #000000; line-height: 1.6; font-size: 16px; }
+        .layout { display: flex; min-height: 100vh; }
+        .main-content { flex: 1; padding: 40px 60px; }
+        .sidebar { width: 320px; background: #ffffff; border-left: 1px solid #000000; padding: 40px 30px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+        .container { width: 55%; margin: 0 auto; }
+        .header { background: #ffffff; border-bottom: 1px solid #000000; padding: 40px 0 30px 0; margin-bottom: 40px; text-align: center; }
+        .header-date { font-size: 14px; letter-spacing: 1px; margin-bottom: 20px; text-transform: uppercase; }
+        .header h1 { font-family: Georgia, serif; font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
+        .header-subtitle { font-size: 16px; font-style: italic; font-weight: normal; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
+        /* Тема — обычный текст по левому краю: её часто пишут пунктами,
+           а по центру многострочный список нечитаем */
+        .header-topic { font-size: 19px; font-weight: normal; color: #000000; margin-top: 20px; padding: 24px 28px; border: 2px solid #000000; text-align: left; line-height: 1.7; min-height: 60px; white-space: pre-wrap; word-wrap: break-word; }
+        .card { background: #ffffff; border: none; border-top: 1px solid #000000; border-bottom: 1px solid #000000; padding: 30px 0; margin-bottom: 40px; }
+        .card h2 { font-family: Georgia, serif; font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
+        .participants-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px; margin-bottom: 30px; }
+        .participant-card { border: none; border-top: 1px solid #000000; padding: 25px 0; background: #ffffff; }
+        .avatar-container { display: flex; justify-content: center; margin-bottom: 20px; }
+        .avatar-preview { width: 140px; height: 140px; border: 1px solid #000000; overflow: hidden; display: flex; align-items: center; justify-content: center; font-size: 70px; cursor: pointer; background: #ffffff; }
+        .avatar-preview:hover { border: 2px solid #000000; }
+        .avatar-preview img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(100%); }
+        .input-group { margin-bottom: 20px; }
+        .input-group label { display: block; font-family: Georgia, serif; font-weight: normal; margin-bottom: 8px; color: #000000; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }
+        .input-group input, .input-group textarea { width: 100%; padding: 10px; border: 1px solid #000000; font-size: 18px; background: #ffffff; color: #000000; font-family: Georgia, serif; }
+        .input-group input:focus, .input-group textarea:focus { outline: none; border: 2px solid #000000; }
+        .input-group textarea { resize: vertical; min-height: 80px; font-family: Georgia, serif; line-height: 1.6; }
+        .btn { padding: 12px 30px; border: 1px solid #000000; font-family: Georgia, serif; font-size: 16px; font-weight: normal; cursor: pointer; margin-right: 15px; letter-spacing: 1px; text-transform: uppercase; }
+        .btn-primary { background: #000000; color: #ffffff; }
+        .btn-primary:hover { background: #333333; }
+        .btn-secondary { background: #ffffff; color: #000000; }
+        .btn-secondary:hover { background: #f5f5f5; }
+        .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
+        .sidebar-title { font-family: Georgia, serif; font-size: 14px; font-weight: normal; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
+        /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
+        .panel-section { border-top: 1px solid #000000; padding-top: 24px; margin-top: 28px; }
+        .panel-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
+        .panel-heading .num { font-family: 'Courier New', monospace; font-size: 13px; color: #999999; letter-spacing: 1px; }
+        .panel-heading .name { font-size: 14px; text-transform: uppercase; letter-spacing: 2px; }
+        .panel-note { font-size: 12px; color: #666666; line-height: 1.55; margin-bottom: 14px; }
+        /* Поле сюжета: раньше было неотличимо от подписи — теперь заметное и на вырост */
+        .topic-input { display: block; width: 100%; min-height: 170px; box-sizing: border-box; padding: 16px 18px; border: 1px solid #000000; font-family: Georgia, serif; font-size: 17px; line-height: 1.7; color: #000000; resize: vertical; }
+        .topic-input:focus { outline: none; border: 2px solid #000000; }
+        /* Разделы пульта сворачиваются: на ходу целый состав занимает экран зря */
+        .panel-heading { cursor: pointer; user-select: none; }
+        .panel-heading:hover .name { text-decoration: underline; }
+        .panel-heading .caret { margin-left: auto; font-size: 12px; color: #888888; }
+        .panel-body.collapsed { display: none; }
+        /* Ключевые слова аватара и кнопка поиска — одной строкой, рядом с аватаром */
+        .keyword-row { display: flex; gap: 10px; align-items: stretch; }
+        .keyword-row input { flex: 1; min-width: 0; }
+        .status-bar { background: #ffffff; border: none; border-left: 3px solid #000000; color: #000000; padding: 15px 20px; font-size: 16px; margin-bottom: 20px; font-style: italic; line-height: 1.6; }
+        .status-bar.active { border-left: 4px solid #000000; }
+        .post { background: #ffffff; border: none; border-top: 1px solid #000000; padding: 40px 0; margin-bottom: 0; display: flex; gap: 30px; }
+        .post-avatar { flex-shrink: 0; }
+        .post-avatar img { width: 150px; height: 150px; object-fit: cover; border: 1px solid #000000; filter: grayscale(100%); }
+        .post-avatar .emoji { width: 150px; height: 150px; background: #ffffff; border: 1px solid #000000; display: flex; align-items: center; justify-content: center; font-size: 75px; }
+        .post-content { flex: 1; min-width: 0; }
+        .post-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #000000; }
+        .post-author { font-family: Georgia, serif; font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
+        .post-model { font-size: 14px; color: #000000; font-family: Georgia, serif; margin-top: 5px; font-style: italic; }
+        .post-time { font-size: 14px; color: #000000; font-style: italic; }
+        .post-text { font-size: 18px; line-height: 1.8; color: #000000; word-wrap: break-word; overflow-wrap: break-word; text-align: justify; }
+        .post-text p { margin-bottom: 15px; }
+        .post-text p:last-child { margin-bottom: 0; }
+        .post-text strong { font-weight: bold; }
+        .post-text em { font-style: italic; }
+        .post-text code { background: #ffffff; padding: 2px 6px; font-family: 'Courier New', monospace; border: 1px solid #000000; }
+        .post-text ul, .post-text ol { margin: 15px 0; padding-left: 30px; }
+        .post-text li { margin-bottom: 10px; line-height: 1.7; }
+        .post-text li::marker { font-weight: bold; }
+        /* Формулы: LaTeX от сервера, MathML от браузера */
+        .post-text .math { font-size: 1.05em; }
+        .post-text .math-block { display: block; margin: 14px 0; text-align: center; }
+        .post-text math { font-family: 'Cambria Math', 'Latin Modern Math', Georgia, serif; }
+        .post-text .temml-error { color: #b00020; font-size: 0.9em; white-space: pre-line; }
+        body.dark .post-text .temml-error { color: #ff6b6b !important; }
+        
+        /* Стили для ролей */
+        .role-badge { 
+            display: inline-block; 
+            padding: 2px 8px; 
+            border-radius: 3px; 
+            font-size: 11px; 
+            font-weight: bold; 
+            margin-right: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .role-participant { 
+            background: #e3f2fd; 
+            color: #1976d2; 
+            border: 1px solid #1976d2;
+        }
+        .role-moderator { 
+            background: #fff3e0; 
+            color: #f57c00; 
+            border: 1px solid #f57c00;
+        }
+        .role-judge { 
+            background: #f3e5f5; 
+            color: #7b1fa2; 
+            border: 1px solid #7b1fa2;
+        }
+
+        /* Цвет ролей в ленте: полоса слева у каждой реплики, тот же цвет, что у
+           бейджа роли. Включается кнопкой «Цвет ролей» в подвале.
+           Ленте нужны боковые отступы: у .post их не было (padding: 40px 0),
+           поэтому цветная граница легла бы ровно на первую букву. */
+        body.role-marks .post { padding-left: 35px; padding-right: 40px; }
+        body.role-marks .post.post-role-participant { border-left: 5px solid #1976d2; }
+        body.role-marks .post.post-role-moderator { border-left: 5px solid #f57c00; }
+        body.role-marks .post.post-role-judge { border-left: 5px solid #7b1fa2; }
+
+        
+        .search-info { background: transparent; padding: 20px 0 0 0; margin-top: 25px; font-size: 14px; color: #000000; font-style: italic; border-top: 1px solid #000000; }
+        .search-info strong { font-weight: normal; font-style: normal; text-transform: uppercase; letter-spacing: 2px; display: block; margin-bottom: 10px; font-size: 13px; }
+        .search-query { display: inline; margin-right: 12px; }
+        .search-query:not(:last-child)::after { content: " • "; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.95); cursor: pointer; }
+        .modal-content { margin: auto; display: block; max-width: 90%; max-height: 90%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 1px solid #000000; filter: grayscale(100%); }
+        .modal-close { position: absolute; top: 20px; right: 40px; color: white; font-size: 40px; font-weight: bold; cursor: pointer; }
+        .footer { text-align: center; color: #000000; padding: 30px 0; font-size: 14px; border-top: 1px solid #000000; margin-top: 40px; font-style: italic; letter-spacing: 1px; }
+        /* Нулевой раздел (готовность): метка о проблемах видна и в свёрнутом виде */
+        .ready-badge { margin-left: 8px; font-size: 11px; font-weight: bold; letter-spacing: 1px; color: #b00020; }
+        /* Пояснение вместо поля реплики, когда не ваша очередь: блок остаётся на месте */
+        .turn-note { font-size: 13px; font-style: italic; color: #666666; padding: 2px 0 4px 0; line-height: 1.6; }
+        /* Числовые поля параметров: пустое поле серое, заполненное — чёрное */
+        .param-input { border: 1px solid #cccccc; }
+        .param-input:not(.filled) { color: #555555; }
+        .param-input.filled { border-color: #000000; color: #000000; }
+
+        /* ══ Тёмная сцена ═══════════════════════════════════════════════
+           Класс dark на body перекрашивает интерфейс: чёрные элементы (рамки,
+           заголовки, карточки) становятся светлыми, чтобы быть видными на
+           тёмном фоне. Часть цветов интерфейс ставит инлайном — их приходится
+           перебивать, поэтому дальше встречается !important. */
+        body.dark { background: #0d0d0d; color: #e8e8e8; color-scheme: dark; }
+        /* Один холст: фон крупных блоков совпадает с фоном страницы — точно так же, как
+           в светлой теме, где всё белое и разделяют только линии. Стоит задать им другой
+           фон — и блоки выглядят «отрезанными» по бокам, а текст упирается в край плашки */
+        body.dark .header, body.dark .card, body.dark .post, body.dark .footer,
+        body.dark .sidebar, body.dark .participant-card { background: #0d0d0d; border-color: #3a3a3a; }
+        /* Плашки с внутренними отступами подсветить можно: текст в них не упирается в край */
+        body.dark .status-bar { background: #171717; border-left-color: #e8e8e8; }
+        body.dark .modal-content { border-color: #3a3a3a; }
+        body.dark .header h1, body.dark .card h2, body.dark .header-subtitle, body.dark .header-date,
+        body.dark .sidebar-title, body.dark .post-author, body.dark .post-text, body.dark .post-model,
+        body.dark .post-time, body.dark .header-topic, body.dark .search-info, body.dark .footer,
+        body.dark .panel-heading .name, body.dark .status-bar, body.dark .btn { color: #e8e8e8; }
+        body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
+        body.dark .footer, body.dark .sidebar, body.dark .sidebar-section,
+        body.dark .search-info, body.dark .post-header, body.dark .participant-card,
+        body.dark .post-avatar img { border-color: #3a3a3a; }
+        body.dark input, body.dark textarea, body.dark select { background: #1c1c1c !important; color: #e8e8e8 !important; border-color: #5a5a5a !important; }
+        body.dark input::placeholder, body.dark textarea::placeholder { color: #7d7d7d !important; }
+        body.dark .btn-primary { background: #e8e8e8; color: #111111; }
+        body.dark .btn-primary:hover { background: #cfcfcf; }
+        body.dark .btn-secondary { background: #1c1c1c; color: #e8e8e8; }
+        body.dark .btn-secondary:hover { background: #272727; }
+        body.dark .avatar-preview, body.dark .post-avatar .emoji { background: #141414; border-color: #3a3a3a; }
+        body.dark .avatar-preview:hover { border-color: #9a9a9a; }
+        body.dark .post-avatar img, body.dark .avatar-preview img { filter: grayscale(100%) brightness(0.82); }
+        body.dark .status-bar { border-left-color: #e8e8e8; }
+        body.dark .post-text code { background: #1c1c1c; border-color: #4a4a4a; }
+        body.dark .role-participant { background: #12283a; color: #79b8ff; border-color: #2f5a80; }
+        body.dark .role-moderator { background: #33260f; color: #ffb066; border-color: #7a5520; }
+        body.dark .role-judge { background: #281735; color: #c79ae0; border-color: #6a3f8a; }
+        /* Полоса роли на тёмном: те же роли, но чуть приглушённее бейджа —
+           широкую цветную полосу ярким цветом читать тяжелее */
+        body.dark.role-marks .post.post-role-participant { border-left-color: #4d8fcc; }
+        body.dark.role-marks .post.post-role-moderator { border-left-color: #cc8330; }
+        body.dark.role-marks .post.post-role-judge { border-left-color: #8f5cae; }
+        body.dark .param-input { border-color: #5a5a5a; }
+        body.dark .param-input:not(.filled) { color: #a0a0a0; }
+        body.dark .param-input.filled { border-color: #cfcfcf; color: #e8e8e8; }
+        body.dark .turn-note { color: #a0a0a0; }
+        body.dark .ready-badge { color: #ff6b6b; }
+        body.dark .panel-note { color: #a3a3a3; }
+        body.dark .btn { border-color: #6f6f6f; }
+        /* Текст сайдбара: цвет ему ставит разметка инлайном, поэтому красим по id.
+           По атрибуту style здесь нельзя: блоки, которые JS переключает через display,
+           браузер переписывает целиком и #000000 превращается в rgb(0, 0, 0) */
+        body.dark #vramDisplay, body.dark #participantsDisplay,
+        body.dark #moderatorInstructionsDisplay { color: #e8e8e8 !important; }
+        body.dark #statusPlaceholder, body.dark #rulesDisplay,
+        body.dark #randomizeHint { color: #a3a3a3 !important; }
+        /* Остальные инлайновые чёрные подписи (те, что JS не трогает) */
+        body.dark [style*="color:#000"] { color: #e8e8e8 !important; }
+        /* Эти блоки интерфейс переключает через style.display, а браузер при этом
+           переписывает весь атрибут style и превращает #666 в rgb(102,102,102),
+           так что по аттрибуту их уже не поймать — красим по id */
+        body.dark #modelsWarning { border-color: #ff6b6b !important; color: #ff8a8a !important; }
+        body.dark #vramWarning { border-color: #e8c56b !important; color: #e8c56b !important; }
+        body.dark #readyOk { color: #a3a3a3 !important; }
+        /* Инлайновые плашки и пояснения внутри пульта */
+        body.dark [style*="#ffffff"], body.dark [style*="#fafafa"],
+        body.dark [style*="#f9f9f9"], body.dark [style*="#f5f5f5"] { background: #181818 !important; }
+        body.dark [style*="#cccccc"], body.dark [style*="#ddd"] { border-color: #3a3a3a !important; }
+        body.dark [style*="border:1px solid #000"], body.dark [style*="border:2px solid #000"],
+        body.dark [style*="border:1px dashed #000"] { border-color: #6f6f6f !important; }
+        body.dark [style*="border:1px solid #7b1fa2"] { border-color: #a06fc0 !important; }
+        body.dark [style*="color:#666"], body.dark [style*="color:#555"],
+        body.dark [style*="color:#888"] { color: #a3a3a3 !important; }
+        body.dark [style*="color:#999"] { color: #8c8c8c !important; }
+        body.dark [style*="color:#333"] { color: #c9c9c9 !important; }
+        body.dark [style*="color:#b00020"] { color: #ff6b6b !important; }
+        body.dark [style*="border:2px solid #b00020"] { border-color: #ff6b6b !important; }
+        body.dark [style*="border:2px solid #b8860b"] { border-color: #e8c56b !important; }
+        body.dark [style*="color:#b8860b"], body.dark [style*="color:#8a6d00"] { color: #e8c56b !important; }
+        body.dark [style*="color:#7b1fa2"] { color: #c79ae0 !important; }
+        body.dark [style*="color:#1976d2"] { color: #79b8ff !important; }
+        body.dark [style*="color:#f57c00"] { color: #ffb066 !important; }
+    </style>
+</head>
+<body>
+    <div class="layout">
+        <div class="main-content">
+            <div class="container">
+                <div class="header">
+                    <div class="header-date" id="headerDate"></div>
+                    <h1>AI Театр</h1>
+                    <div class="header-subtitle">Спектакль нейросетей • Акт I</div>
+                    <div class="header-topic" id="topicDisplay" style="display:none;"></div>
+                </div>
+                <!-- Единый режиссёрский пульт: та же форма служит и настройкой
+                     спектакля, и пультом модератора на ходу -->
+                <!-- Единый режиссёрский пульт: одна форма и для настройки, и для управления
+                     на ходу. Разделы пронумерованы в порядке работы режиссёра. -->
+                <div class="card" id="controlPanel">
+                    <h2 id="controlPanelTitle">Режиссёрский пульт</h2>
+
+                    <!-- Нулевой раздел: готовность к спектаклю. Раскрывается сам, когда
+                         есть о чём предупредить, и сворачивается, когда всё в порядке -->
+                    <div class="panel-section" id="sec-ready">
+                        <div class="panel-heading"><span class="num">00</span><span class="name">Готовность</span><span class="ready-badge" id="readyBadge"></span></div>
+                        <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+                            <button class="btn btn-secondary" onclick="checkReadiness()" style="padding:6px 15px;font-size:13px;margin:0;">🔄 Проверить сейчас</button>
+                            <span style="font-size:12px;color:#666;">Проверка идёт при загрузке страницы и при правках состава</span>
+                        </div>
+                        <div id="readyOk" style="font-size:13px;color:#666;font-style:italic;">Проверка ещё не проходила.</div>
+                        <div id="modelsWarning" style="display:none;margin:0 0 14px 0;padding:14px 16px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
+                        <div id="vramWarning" style="display:none;margin:0;padding:14px 16px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
+                    </div>
+
+                    <div class="panel-section">
+                        <div class="panel-heading"><span class="num">01</span><span class="name">Сюжет</span></div>
+                        <div class="panel-note">Тема попадает в системные промпты следующих реплик. Менять можно и до спектакля, и на ходу.</div>
+                        <textarea id="topicInput" class="topic-input" rows="7" placeholder="Тема одной строкой или с пунктами — переносы строк сохраняются. Ctrl+Enter — применить." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); applyTopic(); }"></textarea>
+                        <div style="margin-top:10px;">
+                            <button class="btn btn-secondary" onclick="applyTopic()">🎯 Применить тему</button>
+                            <span style="font-size:12px;color:#666;">Ctrl+Enter — применить не отрывая рук</span>
+                        </div>
+                    </div>
+
+                    <div class="panel-section" id="sec-cast">
+                        <div class="panel-heading"><span class="num">02</span><span class="name">Состав</span></div>
+                        <div class="panel-note">Имена, пол, модели и параметры генерации. Правки действуют сразу: до спектакля — на заготовку, на ходу — на будущие реплики (уже сказанное не меняется). Характер (температура и прочее) на каждый спектакль разыгрывается случайно.</div>
+                        <div id="castEditor"></div>
+                        <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-top:6px;">
+                            <button class="btn btn-secondary" onclick="saveCast()" style="margin:0;">💾 Применить состав</button>
+                            <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику — и судье тоже (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
+                            <span id="randomizeHint" style="font-size:12px;color:#666;"></span>
+                        </div>
+                    </div>
+
+                    <div class="panel-section">
+                        <div class="panel-heading"><span class="num">03</span><span class="name">Правила и инструкции</span></div>
+                        <div class="panel-note">Общие правила общения, руководства модератора, правила судьи и личные инструкции участников. Работают одинаково до и во время спектакля.</div>
+                        <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Открыть редактор</button>
+
+                        <div id="instructionsEditor" style="display:none;">
+                            <div style="font-size:13px;color:#333;margin-bottom:15px;padding:10px;background:#f9f9f9;border:1px solid #ddd;">
+                                <strong>Доступные плейсхолдеры:</strong>
+                                <code>{ИМЯ}</code> — имя текущего участника,
+                                <code>{СОБЕСЕДНИКИ}</code> — остальные через запятую,
+                                <code>{ТЕМА}</code> — тема обсуждения
+                            </div>
+
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Правила общения (для всех участников):</label>
+                                <div id="staticInstructionsEditor"></div>
+                                <button class="btn btn-secondary" onclick="addStaticInstructionEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить правило</button>
+                            </div>
+
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Руководства (указания модератора):</label>
+                                <div id="moderatorMessagesEditor"></div>
+                                <button class="btn btn-secondary" onclick="addModeratorMessageEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить руководство</button>
+                            </div>
+
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">⚖️ Правила для роли судьи:</label>
+                                <div id="judgeRulesEditor"></div>
+                                <button class="btn btn-secondary" onclick="addJudgeRuleEditor()" style="margin-top:10px; padding:6px 15px; font-size:14px;">➕ Добавить правило судьи</button>
+                                <div style="font-size:12px;color:#666;margin-top:10px;font-style:italic;">Личный системный промпт судьи — ниже, в блоке «Индивидуальные инструкции».</div>
+                            </div>
+
+                            <div style="margin-bottom:20px;">
+                                <label style="display:block; font-weight:bold; margin-bottom:8px; font-size:14px;">Индивидуальные инструкции участников:</label>
+                                <div id="participantInstructionsEditor"></div>
+                            </div>
+
+                            <button class="btn btn-primary" onclick="saveInstructions()" style="margin-top:10px;">💾 Применить изменения</button>
+                        </div>
+                    </div>
+
+                    <!-- Блок «Ваша реплика» всегда на месте: раньше он исчезал, и нумерация
+                         разделов прыгала с 03 сразу на 05. Меняется только содержимое —
+                         поле реплики или пояснение, почему его сейчас нет -->
+                    <div class="panel-section" id="turnSection">
+                        <div class="panel-heading"><span class="num">04</span><span class="name" id="turnTitle">Ваша реплика</span></div>
+                        <div id="turnNote" class="turn-note">Спектакль ещё не начат — поле появится, когда очередь дойдёт до вас.</div>
+                        <div id="turnComposer" style="display:none;">
+                            <div class="panel-note">Пустое сообщение = пропуск действия. Ctrl+Enter — отправить.</div>
+                            <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
+                            <div style="display:flex; gap:15px; align-items:center;">
+                                <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
+                                <span style="font-size:12px;color:#666;font-style:italic;">Реплика станет постом от вашего имени</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel-section">
+                        <div class="panel-heading"><span class="num">05</span><span class="name">Управление спектаклем</span></div>
+                        <div class="panel-note">«Завершить» опускает занавес, но не закрывает театр: после него можно собрать новый состав и играть дальше. Сервер останавливает «Покинуть театр».</div>
+                        <div style="display:flex;gap:15px;flex-wrap:wrap;">
+                            <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
+                            <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
+                            <button class="btn btn-secondary" id="newBtn" onclick="newShow()" style="display:none;">🎭 Новый спектакль</button>
+                        </div>
+                    </div>
+                </div>
+                <div id="posts"></div>
+                <div class="footer">
+                    <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
+                    <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
+                    <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
+                </div>
+            </div>
+        </div>
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-title">Статус</div>
+                <div id="statusBar" class="status-bar" style="display:none;"></div>
+                <div id="statusPlaceholder" style="color:#666;font-size:13px;">Ожидание начала...</div>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Память GPU</div>
+                <div id="vramDisplay" style="color:#000000;font-size:13px;line-height:1.6;">—</div>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Персонажи</div>
+                <div id="participantsDisplay" style="color:#000000;font-size:13px;line-height:1.6;"></div>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Правила общения</div>
+                <div id="rulesDisplay" style="color:#000000;font-size:12px;line-height:1.5;font-style:italic;"></div>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-title">Инструкции от руководства</div>
+                <div id="moderatorInstructionsDisplay" style="color:#000000;font-size:12px;line-height:1.5;font-weight:bold;"></div>
+            </div>
+        </div>
+    </div>
+    <div id="avatarModal" class="modal" onclick="closeAvatarModal()">
+        <span class="modal-close">&times;</span>
+        <img class="modal-content" id="avatarModalImg">
+    </div>
+    <!-- Клиент Socket.IO лежит рядом с проектом: свежие посты приходят сразу,
+         а опрос /api/status остаётся страховкой -->
+    <script src="/static/socket.io.min.js"></script>
+    <!-- Формулы: Temml превращает LaTeX в MathML, который рисует сам браузер —
+         ни картинок, ни шрифтов не нужно. Файл лежит рядом с проектом -->
+    <script src="/static/temml.min.js"></script>
+    <script>
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+        }
+        
+        // Состав спектакля. У сервера он один и тот же и до старта, и на сцене,
+        // поэтому страница не держит вторую (свою) копию настроек
+        let cast = [];
+        let models = [];               // скачанные модели Ollama для выбора в составе
+        let thinkingModels = [];       // из них те, что умеют размышлять (capabilities Ollama)
+        let debateRunning = false;
+        let pollInterval = null;
+        let lastPostCount = 0;
+        let instructionsTick = 0;
+        let defaultJudgePrompt = '';  // им заполняется пустое поле промпта судьи
+        let mySessionId = null;        // id текущей сессии; следим за сменой на сервере
+        let showFinished = false;      // спектакль идёт или уже завершён (но не новый спектакль)
+        let finishRequested = false;   // занавес заказан, ждём, пока модель доиграет реплику
+        // Счётчик для строк, добавленных кнопками «➕»: индекс по длине контейнера
+        // повторялся после удаления строки выше, и ❌ у новой строки удалял чужую
+        let editorRowSeq = 0;
+        
+        // Разделы пульта сворачиваются со заголовка: обёртки расставляет этот вызов
+        decoratePanelSections();
+
+        // Состав и список моделей
+        loadCast().then(() => { updatePanel(); updateSidebarParticipants(); tryRestoreSession(); });
+        fetch('/api/models')
+            .then(r => r.json())
+            .then(data => {
+                models = data.models || [];
+                thinkingModels = data.thinking_models || [];
+                if (data.error) console.warn('Список моделей недоступен: ' + data.error);
+                renderCastEditor();
+            })
+            .catch(err => console.warn('Не удалось получить список моделей:', err));
+        
+        function loadCast() {
+            return fetch('/api/participants', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(data => {
+                    cast = data.participants || [];
+                    // Список характеров держит сервер: тот же набор он разыгрывает
+                    // случайно при подъёме занавеса
+                    if (data.characters) CHARACTERS = data.characters;
+                    renderCastEditor();
+                    renderModelsWarning(data.models_status);
+                    renderVramWarning(data.vram_status);
+                    syncReadinessSection();
+                    const hint = document.getElementById('randomizeHint');
+                    if (hint) {
+                        hint.textContent = data.randomize_characters
+                            ? 'на каждый спектакль характеры тянутся заново' : '';
+                    }
+                    if (data.topic) document.getElementById('topicInput').value = data.topic;
+                    return data;
+                })
+                .catch(err => { console.error('Не удалось загрузить состав:', err); return {}; });
+        }
+        
+        refreshMemory();  // сразу видно, что уже загружено в Ollama (могут быть чужие модели)
+        
+        // Socket.IO - ускоритель: по событию new_post сразу тянем статус, поэтому
+        // реплика появляется без задержки в 3 секунды. Если клиент не загрузился,
+        // страница молча живёт на polling'е.
+        let socket = null;
+        if (typeof io === 'function') {
+            try {
+                socket = io();
+                ['new_post', 'state_update'].forEach(evt =>
+                    socket.on(evt, () => { if (debateRunning) updatePosts(); }));
+            } catch (e) {
+                console.warn('Socket.IO недоступен, обновляемся опросом:', e);
+                socket = null;
+            }
+        }
+        
+        // Восстановление активной сессии при загрузке страницы: спектакль идёт
+        // (или уже отыгран) — возвращаемся к нему, а не начинаем новый.
+        function tryRestoreSession() {
+            fetch('/api/status?lastPostCount=0', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.session_id) return;
+                    if (!data.running && !data.finished) return;
+                    if (!data.running && !data.total_posts) return;
+
+                    mySessionId = data.session_id;
+                    debateRunning = true;
+                    showFinished = !!data.finished;
+
+                    setTopicDisplay(data.topic);
+                    if (data.topic) document.getElementById('topicInput').value = data.topic;
+                    document.getElementById('posts').innerHTML = '';
+
+                    (data.new_posts || []).forEach(post => addPost(post));
+                    lastPostCount = data.total_posts || 0;
+
+                    if (data.running) {
+                        pollInterval = setInterval(updatePosts, 3000);
+                    }
+                    updatePosts();
+                })
+                .catch(() => {});
+        }
+
+        // «Характер» — готовые наборы параметров генерации. Числа управляют не смыслом
+        // реплик (его задаёт личная инструкция), а тем, насколько участник предсказуем,
+        // склонен повторяться и размышляет ли перед ответом.
+        // Список приходит с сервера: он же используется для случайного розыгрыша
+        // характеров на новый спектакль, поэтому он один на всех.
+        let CHARACTERS = {};
+        const CUSTOM_CHARACTER = {label: '🎚 Свой — сам выберу', group: 'manual',
+                                  hint: 'числа выставляются вручную в «Тонкой настройке»', params: {}};
+        const CHARACTER_GROUPS = {balanced: 'Уравновешенные', extreme: 'С перекосом', manual: 'Вручную'};
+
+        function characterInfo(key) {
+            return (key && CHARACTERS[key]) ? CHARACTERS[key] : CUSTOM_CHARACTER;
+        }
+
+        // Числовые параметры, которыми управляет пульт. Список обязан совпадать
+        // с PER_PARTICIPANT_OPTION_KEYS на сервере — за этим следит TestTuningPanel.
+        // Раньше в нём было только пять чисел: top_k, min_p и seed можно было задать
+        // в PARTICIPANTS, но из пульта их не было видно и не поменять.
+        const PARAM_KEYS = ['temperature', 'top_p', 'top_k', 'min_p',
+                            'repeat_penalty', 'presence_penalty', 'frequency_penalty', 'seed'];
+
+        // Пересчитывает строку «Уйдёт в модель» по текущим полям формы — чтобы
+        // не приходилось сохранять состав, чтобы понять, что применится
+        function refreshEffective(idx) {
+            const box = document.getElementById('effective-' + idx);
+            if (!box) return;
+            const defaults = (cast[idx] && cast[idx].model_defaults) || {};
+            const parts = PARAM_KEYS.map(key => {
+                const el = document.getElementById(key + '-' + idx);
+                const raw = el ? el.value : '';
+                const own = raw !== '';
+                const value = own ? raw : (defaults[key] === undefined ? '—' : defaults[key]);
+                return key + ' <strong>' + value + '</strong>'
+                    + (own ? '' : ' <span style="color:#999;">(как в модели)</span>');
+            });
+            // Восемь параметров в одну строку не влезают: раскладываем по четыре
+            const rows = [];
+            for (let i = 0; i < parts.length; i += 4) rows.push(parts.slice(i, i + 4).join(' · '));
+            box.innerHTML = '<strong>Уйдёт в модель:</strong><br>' + rows.join('<br>')
+                + '<br>Пустое поле — параметр вообще не отправляется: действует значение из Modelfile модели.';
+        }
+
+        // «q1» и «q1:latest» — одна и та же модель
+        function modelSupportsThinking(name) {
+            if (!name || !thinkingModels.length) return false;
+            const base = n => String(n).split(':')[0];
+            return thinkingModels.some(m => base(m) === base(name));
+        }
+
+        // Характер просто заполняет поля — дальше числа можно править руками
+        function applyPreset(idx) {
+            const select = document.getElementById('preset-' + idx);
+            const preset = characterInfo(select ? select.value : 'custom');
+            const hint = document.getElementById('preset-hint-' + idx);
+            if (hint) hint.textContent = preset.hint || '';
+
+            Object.entries(preset.params || {}).forEach(([key, value]) => {
+                const el = document.getElementById(key + '-' + idx);
+                if (el) el.value = value;
+            });
+
+            // Набор задаёт и размышления, но «Свой» их не трогает; модель без
+            // поддержки размышлений не получит think=true — показываем честно
+            const thinkEl = document.getElementById('think-' + idx);                if (thinkEl && preset.think && preset.group !== 'manual') {
+                    thinkEl.value = preset.think;
+                    if (thinkEl.value === 'on' && thinkEl.dataset.supportsThinking === '0') {
+                        thinkEl.value = 'off';
+                    }
+                }
+                refreshParamStyles(idx);
+                refreshEffective(idx);
+        }
+
+        // Поле с числом: заполненное — выделено, пустое — серое (параметр не отправляется).
+        // Цвета заданы классами в CSS, чтобы тёмная сцена перекрашивала их вместе со всем
+        function refreshParamStyles(idx) {
+            PARAM_KEYS.forEach(key => {
+                const el = document.getElementById(key + '-' + idx);
+                if (el) el.classList.toggle('filled', el.value !== '');
+            });
+        }
+
+        // Ручная правка числа: набор больше не подходит, помечаем «Свой»
+        function onParamInput(idx) {
+            const select = document.getElementById('preset-' + idx);
+            if (select && select.value !== 'custom') {
+                select.value = 'custom';
+                const hint = document.getElementById('preset-hint-' + idx);
+                if (hint) hint.textContent = CUSTOM_CHARACTER.hint;
+            }
+            refreshParamStyles(idx);
+            refreshEffective(idx);
+        }
+
+        // Числа не мозолят глаза, пока их не спросят
+        function toggleTuning(idx) {
+            const box = document.getElementById('tuning-' + idx);
+            const caret = document.getElementById('tuning-caret-' + idx);
+            if (!box) return;
+            const hidden = box.style.display === 'none';
+            box.style.display = hidden ? 'block' : 'none';
+            if (caret) caret.textContent = hidden ? ' ▾' : ' ▸';
+        }
+
+        // «🎲 Разбросать характеры»: новый случайный характер каждому ИИ-участнику.
+        // Ту же лотерею сервер проводит сам при подъёме занавеса (RANDOMIZE_CHARACTERS).
+        // Все равны — и роль тут не помеха, повторы разрешены
+        function randomizeCharacters() {
+            const keys = Object.keys(CHARACTERS).filter(k => k !== 'custom' && CHARACTERS[k].params
+                && Object.keys(CHARACTERS[k].params).length);
+            if (!keys.length) { alert('Список характеров не загружен — обновите страницу'); return; }
+            cast.forEach((p, idx) => {
+                if (p.model === 'human') return;
+                const key = keys[Math.floor(Math.random() * keys.length)];
+                const select = document.getElementById('preset-' + idx);
+                if (select) select.value = key;
+                const thinkEl = document.getElementById('think-' + idx);
+                if (thinkEl && CHARACTERS[key].think) {
+                    thinkEl.value = CHARACTERS[key].think === 'on' && thinkEl.dataset.supportsThinking === '0'
+                        ? 'off' : CHARACTERS[key].think;
+                }
+                applyPreset(idx);
+            });
+        }
+
+        // Состав — одна и та же форма и для настройки спектакля, и для правок на ходу
+        // Выбор значения для селекта: «q1» и «q1:latest» — одна модель
+        function selectIf(value, current) {
+            return String(value) === String(current) ? 'selected' : '';
+        }
+
+        // Состав — одна и та же форма и для настройки спектакля, и для правок на ходу.
+        // Параметры генерации видны сразу: у пустого поля подсказкой стоит значение из
+        // OPTIONS, а под ними написано, что именно уйдёт в модель.
+        function renderCastEditor() {
+            const container = document.getElementById('castEditor');
+            if (!cast.length) {
+                container.innerHTML = '<div style="color:#666;font-style:italic;font-size:13px;">Состав пуст</div>';
+                return;
+            }
+            container.innerHTML = cast.map((p, idx) => {
+                const isHuman = p.model === 'human';
+                let roleBadge = '<span class="role-badge role-participant">🎭 УЧАСТНИК</span>';
+                let borderColor = '#000000';
+                if (p.is_moderator) {
+                    roleBadge = '<span class="role-badge role-moderator">🎬 МОДЕРАТОР</span>';
+                } else if (p.is_judge) {
+                    roleBadge = '<span class="role-badge role-judge">⚖️ СУДЬЯ</span>';
+                    borderColor = '#7b1fa2';
+                }
+                const avatar = p.avatar_url
+                    ? '<img src="' + escapeHtml(p.avatar_url) + '">'
+                    : (p.avatar_emoji || '📣');
+                const fieldLabel = text => '<label style="font-size:11px;text-transform:uppercase;letter-spacing:1px;">' + text + '</label>';
+                const fieldStyle = 'width:100%;padding:7px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;';
+
+                // У человека нет ни модели, ни параметров: это сама роль
+                const modelField = isHuman
+                    ? fieldLabel('Модель') + '<div style="font-size:13px;color:#666;padding:8px 0;">живой участник</div>'
+                    : fieldLabel('Модель') + '<select id="model-' + idx + '" style="' + fieldStyle + '">' + modelOptions(p.model) + '</select>';
+
+                const supportsThinking = modelSupportsThinking(p.model);
+                const thinkValue = p.think || 'auto';
+                const presetValue = CHARACTERS[p.preset] ? p.preset : 'custom';
+                const defaults = p.model_defaults || {};
+
+                // Одно числовое поле: пусто = параметр не отправляется вообще, и работает
+                // значение из Modelfile модели. Подсказка сереньким показывает именно его,
+                // даже если поле только что очистили
+                // Класс filled, а не инлайновые цвета: так поле перекрашивается вместе
+                // с темой (тёмная сцена иначе оставила бы чёрную рамку на чёрном)
+                const paramField = (key, label, step, min, max, hint) => {
+                    const value = (p[key] === undefined || p[key] === null) ? '' : p[key];
+                    const fallback = defaults[key] === undefined ? 'как в модели' : defaults[key];
+                    const range = (min === null ? '' : ' min="' + min + '"') + (max === null ? '' : ' max="' + max + '"');
+                    return '<div>' + fieldLabel(label)
+                        + '<input type="number" class="param-input' + (value === '' ? '' : ' filled') + '"'
+                        + ' id="' + key + '-' + idx + '" step="' + step + '"' + range
+                        + ' value="' + value + '" placeholder="' + fallback + '" title="' + hint + '"'
+                        + ' oninput="onParamInput(' + idx + ')" style="width:100%;padding:6px;font-size:13px;">'
+                        + '</div>';
+                };
+
+                // Список характеров приходит с сервера; сгруппирован, чтобы сразу
+                // было видно, где «ровные» наборы, а где с перекосом
+                const characterSelect = (() => {
+                    const keys = Object.keys(CHARACTERS);
+                    if (!keys.length) {
+                        return '<option value="custom" selected>' + escapeHtml(CUSTOM_CHARACTER.label) + '</option>';
+                    }
+                    const groups = {};
+                    ['custom'].concat(keys.filter(k => k !== 'custom')).forEach(key => {
+                        const info = characterInfo(key);
+                        const group = info.group || 'balanced';
+                        (groups[group] = groups[group] || []).push(
+                            '<option value="' + key + '" ' + selectIf(key, presetValue) + '>' + escapeHtml(info.label) + '</option>');
+                    });
+                    return Object.keys(groups).map(group =>
+                        '<optgroup label="' + escapeHtml(CHARACTER_GROUPS[group] || group) + '">'
+                        + groups[group].join('') + '</optgroup>').join('');
+                })();
+
+                const paramsBlock = isHuman ? '' : ''
+                    + '<div style="margin-top:14px;padding-top:12px;border-top:1px dotted #cccccc;">'
+                    +   '<div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">'
+                    +     '<div style="min-width:230px;">' + fieldLabel('Характер')
+                    +       '<select id="preset-' + idx + '" onchange="applyPreset(' + idx + ')" style="' + fieldStyle + '"'
+                    +         ' title="Готовый набор параметров генерации. Числа управляют тем, КАК участник говорит, а что он говорит — задаёт его личная инструкция. На новый спектакль характер разыгрывается случайно.">'
+                    +         characterSelect
+                    +       '</select>'
+                    +     '</div>'
+                    +     '<div style="min-width:220px;">' + fieldLabel('Размышления')
+                    +       '<select id="think-' + idx + '" data-supports-thinking="' + (supportsThinking ? 1 : 0) + '" style="' + fieldStyle + '"'
+                    +         ' title="Скрытое рассуждение модели перед ответом. Умеют не все модели — у остальных этот режим недоступен.">'
+                    +         '<option value="auto" ' + selectIf('auto', thinkValue) + '>Авто (как в ENABLE_THINKING)</option>'
+                    +         '<option value="off" ' + selectIf('off', thinkValue) + '>Выключены — отвечает сразу</option>'
+                    +         '<option value="on" ' + selectIf('on', thinkValue) + (supportsThinking ? '' : ' disabled') + '>Включены — сначала думает</option>'
+                    +       '</select>'
+                    +     '</div>'
+                    +     '<div id="preset-hint-' + idx + '" style="font-size:11px;color:#666;max-width:260px;padding-top:20px;line-height:1.5;">'
+                    +       escapeHtml(characterInfo(presetValue).hint || '') + (supportsThinking ? '' : '<br>размышления этой модели недоступны')
+                    +     '</div>'
+                    +   '</div>'
+                    // Числа спрятаны: в настройке они только мешают, а строка
+                    // «Уйдёт в модель» ниже и так показывает, что уйдёт в Ollama
+                    +   '<button class="btn btn-secondary" onclick="toggleTuning(' + idx + ')" style="padding:4px 12px;font-size:12px;margin:0 0 10px 0;">'
+                    +     '⚙ Тонкая настройка<span id="tuning-caret-' + idx + '"> ▸</span></button>'
+                    +   '<div id="tuning-' + idx + '" style="display:none;">'
+                    +     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;">'
+                    +       paramField('temperature', 'Температура', '0.1', 0, 2,
+                                'Насколько свободно выбираются слова: 0-0.3 предсказуемо, 0.8-1.2 живая речь, выше 1.5 текст рассыпается. Выше 2 не принимается.')
+                    +       paramField('top_p', 'top_p', '0.05', 0, 1,
+                                'Отсекает маловероятные слова: меньше — предсказуемее. Делает почти то же, что температура, поэтому крутить надо что-то одно.')
+                    +       paramField('min_p', 'min_p', '0.01', 0, 1,
+                                'Оставляет слова не ниже доли от самого вероятного: порог сам подстраивается под уверенность модели. 0.05 — лёгкая чистка, 0.2-0.3 — заметно строже. Единственный способ убрать мусор, не жертвуя высокой температурой.')
+                    +       paramField('top_k', 'top_k', '1', 1, null,
+                                'Сколько слов-кандидатов вообще рассматривать: 40 — как у большинства моделей, меньше 20 — заметно предсказуемее, больше 100 почти ничего не меняет.')
+                    +       paramField('repeat_penalty', 'repeat_penalty', '0.05', 0, null,
+                                'Штраф за повторы: 1.1-1.3 спасает от зацикливания, выше 1.6 ломает грамматику.')
+                    +       paramField('presence_penalty', 'presence_penalty', '0.1', 0, null,
+                                'Подталкивает к новым темам, а не к пересказу сказанного: 0.3-0.6.')
+                    +       paramField('frequency_penalty', 'frequency_penalty', '0.1', 0, null,
+                                'Режет частые слова, мягче чем repeat_penalty: 0.3-0.6.')
+                    +       paramField('seed', 'seed', '1', null, null,
+                                'Одно и то же число — один и тот же ответ при том же диалоге. Это не характер, а повторяемость: удобно сравнивать две модели на одной теме или вернуться к странной реплике. Пусто — каждый спектакль новый.')
+                    +     '</div>'
+                    +   '</div>'
+                    // Содержимое дособерёт refreshEffective(idx) ниже: так строка
+                    // не разойдётся с подсказками в самих полях
+                    +   '<div id="effective-' + idx + '" style="font-size:11px;color:#666;margin-top:9px;line-height:1.6;"></div>'
+                    + '</div>';
+
+                return ''
+                + '<div data-participant-index="' + idx + '" style="margin-bottom:18px;padding:14px;border:1px solid ' + borderColor + ';background:#ffffff;">'
+                +   '<div style="display:flex;gap:15px;align-items:flex-start;">'
+                +     '<div style="flex-shrink:0;">'
+                +       '<div class="avatar-preview" id="avatar-preview-' + idx + '" style="width:96px;height:96px;font-size:46px;" onclick="openAvatarModal(' + idx + ')" title="Показать аватар целиком">' + avatar + '</div>'
+                +     '</div>'
+                +     '<div style="flex:1;min-width:0;">'
+                +       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;">'
+                +         '<div>' + fieldLabel('Имя')
+                +           '<input type="text" id="name-' + idx + '" value="' + escapeHtml(p.display_name || '') + '" placeholder="Введите имя" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:16px;">'
+                +         '</div>'
+                +         '<div>' + fieldLabel('Пол (влияет только на аватар)')
+                +           '<select id="gender-' + idx + '" style="' + fieldStyle + '">'
+                +             '<option value="male" ' + selectIf('male', p.gender) + '>♂ Мужской</option>'
+                +             '<option value="female" ' + selectIf('female', p.gender) + '>♀ Женский</option>'
+                +           '</select>'
+                +         '</div>'
+                +         '<div>' + modelField + '</div>'
+                +       '</div>'
+                // Ключевые слова и поиск аватара стоят одной строкой рядом с аватаром:
+                // раньше кнопка была в подвале карточки, и её приходилось искать
+                +       '<div style="margin-top:12px;">' + fieldLabel('Ключевые слова для аватара')
+                +         '<div class="keyword-row">'
+                +           '<input type="text" id="keywords-' + idx + '" value="' + escapeHtml(p.avatar_keywords || '') + '" placeholder="Например: дипломат женщина" style="' + fieldStyle + '">'
+                +           '<button class="btn btn-secondary" id="search-avatar-' + idx + '" onclick="searchAvatar(' + idx + ')" style="padding:0 16px;margin:0;font-size:13px;white-space:nowrap;" title="Найти картинку по этим словам">🔍 Найти аватар</button>'
+                +         '</div>'
+                +       '</div>'
+                +       paramsBlock
+                +     '</div>'
+                +   '</div>'
+                +   '<div style="margin-top:14px;">' + roleBadge + '</div>'
+                + '</div>';
+            }).join('');
+            // У людей параметров нет, у моделей строка «Уйдёт в модель» собирается по полям
+            cast.forEach((p, idx) => { if (p.model !== 'human') refreshEffective(idx); });
+        }
+        
+        function modelOptions(current) {
+            const list = models.slice();
+            // Модель из PARTICIPANTS может быть с тегом: показываем её, даже если список иной
+            if (current && !list.includes(current)) list.unshift(current);
+            if (!list.length) return `<option value="${escapeHtml(current || '')}" selected>${escapeHtml(current || 'нет моделей')}</option>`;
+            return list.map(name => `<option value="${escapeHtml(name)}" ${name === current ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+        }
+        
+        function collectCast() {
+            return cast.map((p, idx) => {
+                const pick = (id, fallback) => { const el = document.getElementById(id); return el ? el.value : fallback; };
+                const entry = {
+                    display_name: pick(`name-${idx}`, p.display_name).trim(),
+                    gender: pick(`gender-${idx}`, p.gender),
+                    avatar_keywords: pick(`keywords-${idx}`, p.avatar_keywords),
+                    avatar_emoji: p.avatar_emoji,
+                    avatar_url: p.avatar_url || null,
+                };
+                if (p.model !== 'human') {
+                    entry.model = pick(`model-${idx}`, p.model);
+                    // Пустая строка = «как в OPTIONS»: сервер убирает такое поле у участника.
+                    // Поля нет в пульте — не отправляем ничего, чтобы не стереть число
+                    // из PARTICIPANTS нечаянно
+                    PARAM_KEYS.forEach(key => {
+                        const el = document.getElementById(`${key}-${idx}`);
+                        if (!el) return;
+                        entry[key] = el.value === '' ? null : el.value;
+                    });
+                    entry.think = pick(`think-${idx}`, p.think || 'auto');
+                    entry.preset = pick(`preset-${idx}`, p.preset || 'custom');
+                }
+                return entry;
+            });
+        }
+        
+        function saveCast() {
+            fetch('/api/participants', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({participants: collectCast()})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { alert('❌ ' + (data.error ||'не удалось применить состав')); return; }
+                cast = data.participants || cast;
+                renderCastEditor();
+                updateSidebarParticipants();
+                loadCast();   // заодно обновляем проверки моделей и видеопамяти
+            })
+            .catch(err => { console.error('Ошибка правки состава:', err); alert('❌ ' + err.message); });
+        }
+        
+        function renderModelsWarning(status) {
+            const box = document.getElementById('modelsWarning');
+            if (!box) return;
+            const missing = status && status.missing ? status.missing : [];
+            if (!status || (status.ok && missing.length === 0)) {
+                box.style.display = 'none';
+                box.innerHTML = '';
+                return;
+            }
+            box.innerHTML = `⚠️ ${
+                status.error
+                    ? `${status.error}. Проверьте, что Ollama запущена.`
+                    : `В Ollama нет моделей: <b>${missing.join(', ')}</b>. Скачайте: <code>${missing.map(m => 'ollama pull ' + m).join(' ; ')}</code>`
+            }`;
+            box.style.display = 'block';
+        }
+        
+        function searchAvatar(idx) {
+            const keywords = (document.getElementById(`keywords-${idx}`)?.value || '').trim()
+                || (cast[idx] ? cast[idx].display_name : '');
+            if (!keywords) { alert('Сначала введите имя или ключевые слова для аватара'); return; }
+            
+            // Блокируем кнопку во время загрузки (ищем её по id: кнопка больше
+            // не единственный элемент в строке с ключевыми словами)
+            const btn = document.getElementById('search-avatar-' + idx) || event.target;
+            if (btn.disabled) return;
+            btn.disabled = true;
+            btn.textContent = '⏳ Поиск...';
+            
+            const preview = document.getElementById(`avatar-preview-${idx}`);
+            const fallbackEmoji = (cast[idx] && cast[idx].avatar_emoji) || '📣';
+            preview.innerHTML = '⏳';
+            
+            fetch(`/api/avatar/${encodeURIComponent(keywords)}`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ keywords: keywords, participant_idx: idx })
+            }).then(r => r.json()).then(data => {
+                if (data.avatar_url) {
+                    cast[idx].avatar_url = data.avatar_url;
+                    preview.innerHTML = `<img src="${escapeHtml(data.avatar_url)}">`;
+                } else {
+                    preview.innerHTML = '❌';
+                    setTimeout(() => preview.innerHTML = fallbackEmoji, 2000);
+                }
+                btn.disabled = false;
+                btn.textContent = '🔍 Найти аватар';
+            }).catch(err => { console.error('Ошибка поиска аватара:', err); preview.innerHTML = '❌'; setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); btn.disabled = false; btn.textContent = '🔍 Найти аватар'; });
+        }
+        
+        function openAvatarModal(idx) { const u = cast[idx] && cast[idx].avatar_url; if (u) { document.getElementById('avatarModalImg').src = u; document.getElementById('avatarModal').style.display = 'block'; } }
+        function closeAvatarModal() { document.getElementById('avatarModal').style.display = 'none'; }
+        
+        // Тема в шапке: пустой рамки с прочерком быть не должно — пока темы нет,
+        // блока просто не видно. Тема, применённая раньше, остаётся на месте,
+        // даже если поле ввода потом очистили
+        function setTopicDisplay(text) {
+            const box = document.getElementById('topicDisplay');
+            if (!box) return;
+            const clean = String(text === undefined || text === null ? '' : text).trim();
+            box.textContent = clean;
+            box.style.display = clean ? 'block' : 'none';
+        }
+
+        // Тема: одна кнопка на обе стадии — и в настройке, и на ходу режиссёра
+        function applyTopic() {
+            const input = document.getElementById('topicInput');
+            const topic = input.value.trim();
+            if (!topic) { alert('Введите тему'); return; }
+            
+            fetch('/api/moderator/topic', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({topic: topic}) })
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) { alert('❌ ' + (data.error || 'не удалось сменить тему')); return; }
+                    input.value = data.topic;
+                    setTopicDisplay(data.topic);
+                })
+                .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
+        }
+        
+        function startDebate() {
+            // Пустое поле — не ошибка: тема могла быть применена раньше и жить на сервере.
+            // Пересылаем её только если поле заполнено, иначе берём ту, что уже есть
+            const topic = document.getElementById('topicInput').value.trim();
+            document.getElementById('startBtn').disabled = true;
+            
+            // Сначала отправляем правки из формы, потом стартуем: состав живёт на сервере
+            fetch('/api/participants', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({participants: collectCast()})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) throw new Error(data.error || 'не удалось применить состав');
+                cast = data.participants || cast;
+                return fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(topic ? {topic: topic} : {}) });
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { showStartError(data.error || 'неизвестная'); return; }
+                if (data.session_id) mySessionId = data.session_id;
+                debateRunning = true;
+                showFinished = false;
+                finishRequested = false;
+                lastPostCount = 0;
+                document.getElementById('posts').innerHTML = '';
+                // Тему в шапке берём из ответа сервера: он знает, с какой играет
+                setTopicDisplay(data.topic || topic);
+                // Спектакль пошёл: убираем баннер с прошлой неудачной попытки
+                const box = document.getElementById('modelsWarning');
+                if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+                pollInterval = setInterval(updatePosts, 3000);
+                renderCastEditor();
+                updateSidebarParticipants();
+                updatePanel();
+            })
+            .catch(err => { console.error('Ошибка запуска:', err); showStartError(err.message); });
+        }
+        
+        function showStartError(message) {
+            debateRunning = false;
+            document.getElementById('startBtn').disabled = false;
+            const box = document.getElementById('modelsWarning');
+            if (box) { box.innerHTML = `⚠️ Не удалось начать спектакль: ${escapeHtml(message)}`; box.style.display = 'block'; }
+            updatePanel();
+            alert('Не удалось начать спектакль: ' + message);
+        }
+        
+        // «Новый спектакль»: сервер собирает новый состав, настройки роли остаются
+        function newShow() {
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+            debateRunning = false;
+            showFinished = false;
+            finishRequested = false;
+            lastPostCount = 0;
+            mySessionId = null;
+            document.getElementById('posts').innerHTML = '';
+            document.getElementById('statusBar').style.display = 'none';
+            document.getElementById('statusPlaceholder').style.display = 'block';
+            document.getElementById('topicInput').value = '';
+            setTopicDisplay('');
+            setTurnState('hidden');
+            fetch('/api/reset', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => { if (data.participants) cast = data.participants; return loadCast(); })
+                .then(() => { updateSidebarParticipants(); updatePanel(); })
+                .catch(err => console.error('Ошибка сброса:', err));
+        }
+        
+        // Кнопки пульта: до спектакля — настройка, во время — остановка, после занавеса —
+        // новый спектакль. «Завершить» доступна всё время спектакля: режиссёру не нужно
+        // ждать своей очереди, чтобы остановить действие.
+        function updatePanel() {
+            const startBtn = document.getElementById('startBtn');
+            const finishBtn = document.getElementById('finishBtn');
+            const newBtn = document.getElementById('newBtn');
+            const title = document.getElementById('controlPanelTitle');
+            if (debateRunning && !showFinished) {
+                startBtn.style.display = 'none';
+                newBtn.style.display = 'none';
+                // Пока сервер не подтвердил занавес, повторно не показываем: иначе
+                // кнопка мелькала бы обратно, пока модель доигрывает реплику
+                finishBtn.style.display = finishRequested ? 'none' : 'inline-block';
+                title.textContent = 'Режиссёрский пульт — спектакль идёт';
+            } else if (showFinished) {
+                startBtn.style.display = 'none';
+                newBtn.style.display = 'inline-block';
+                finishBtn.style.display = 'none';
+                title.textContent = 'Режиссёрский пульт — занавес';
+            } else {
+                startBtn.style.display = 'inline-block';
+                startBtn.disabled = false;
+                newBtn.style.display = 'none';
+                finishBtn.style.display = 'none';
+                title.textContent = 'Режиссёрский пульт — настройка';
+            }
+            syncSectionsToPhase();
+        }
+
+        // ── Сворачивание разделов пульта ─────────────────────────────────
+        // Разметка разделов остаётся плоской: обёртку и каретку дописывает этот код,
+        // чтобы не расписывать одно и то же в каждом разделе
+        function decoratePanelSections() {
+            document.querySelectorAll('#controlPanel .panel-section').forEach((section, i) => {
+                if (section.dataset.collapsible) return;
+                const heading = section.querySelector('.panel-heading');
+                if (!heading) return;
+                section.dataset.collapsible = '1';
+                section.dataset.sectionKey = section.id || ('section-' + i);
+                const body = document.createElement('div');
+                body.className = 'panel-body';
+                Array.from(section.children).forEach(child => {
+                    if (child !== heading) body.appendChild(child);
+                });
+                section.appendChild(body);
+                const caret = document.createElement('span');
+                caret.className = 'caret';
+                caret.textContent = '▾';
+                heading.appendChild(caret);
+                heading.title = 'Свернуть / развернуть раздел';
+                heading.addEventListener('click', () => setSectionCollapsed(
+                    section.dataset.sectionKey, !body.classList.contains('collapsed')));
+            });
+        }
+
+        function setSectionCollapsed(key, collapsed) {
+            const section = document.querySelector('[data-section-key="' + key + '"]');
+            if (!section) return;
+            const body = section.querySelector('.panel-body');
+            const caret = section.querySelector('.panel-heading .caret');
+            if (!body) return;
+            body.classList.toggle('collapsed', !!collapsed);
+            if (caret) caret.textContent = collapsed ? '▸' : '▾';
+        }
+
+        // Свернуть или развернуть все разделы пульта разом
+        function setAllSectionsCollapsed(collapsed) {
+            document.querySelectorAll('#controlPanel .panel-section').forEach(section => {
+                if (section.dataset.sectionKey) setSectionCollapsed(section.dataset.sectionKey, collapsed);
+            });
+        }
+
+        // Фазы пульта: в настройке раскрыто всё; спектакль идёт — состав убран
+        // (он огромный, а на ходу нужен редко); после занавеса — свернуто всё,
+        // спектакль отыгран и пульт остаётся одними заголовками. Ручное
+        // сворачивание не трогаем: панель реагирует только на смену фазы
+        let sectionsPhase = null;
+        function syncSectionsToPhase() {
+            const phase = showFinished ? 'finished' : (debateRunning ? 'running' : 'setup');
+            if (phase === sectionsPhase) return;
+            sectionsPhase = phase;
+            if (phase === 'finished') setAllSectionsCollapsed(true);
+            else if (phase === 'running') setSectionCollapsed('sec-cast', true);
+            else setAllSectionsCollapsed(false);
+        }
+
+        // Как назвать роль в интерфейсе: у обычного участника никакой особой роли нет
+        function roleLabelOf(role) {
+            return role === 'moderator' ? 'модератор' : (role === 'judge' ? 'судья' : '');
+        }
+
+        // Раздел «Ваша реплика» всегда на месте: без него нумерация блоков прыгала
+        // с 03 на 05. Меняется только содержимое — поле ввода или пояснение
+        function setTurnState(state, who, roleName) {
+            const composer = document.getElementById('turnComposer');
+            const note = document.getElementById('turnNote');
+            const title = document.getElementById('turnTitle');
+            if (!composer || !note || !title) return;
+            if (state === 'your') {
+                composer.style.display = 'block';
+                note.style.display = 'none';
+                title.textContent = 'Ход: ' + (who || 'вы') + (roleName ? ' · ' + roleName : '');
+                return;
+            }
+            composer.style.display = 'none';
+            note.style.display = 'block';
+            title.textContent = 'Ваша реплика';
+            note.textContent = state === 'waiting'
+                ? 'Сейчас не ваше время выступать: говорит ' + (who || 'другой участник') + '.'
+                : state === 'finished' ? 'Занавес: реплики закончились.'
+                : state === 'sent' ? 'Реплика отправлена — ждём ответа других участников.'
+                : 'Спектакль ещё не начат — поле появится, когда очередь дойдёт до вас.';
+        }
+
+        // Раздел 00: содержимое рисуют renderModelsWarning / renderVramWarning,
+        // а здесь решается, раскрыт ли раздел, и ставится метка в заголовке
+        let readySignature = null;
+        function syncReadinessSection() {
+            const shown = el => !!(el && el.style.display !== 'none' && el.innerHTML.trim() !== '');
+            const models = document.getElementById('modelsWarning');
+            const vram = document.getElementById('vramWarning');
+            const okBox = document.getElementById('readyOk');
+            const badge = document.getElementById('readyBadge');
+            const problems = [];
+            if (shown(models)) problems.push('модели');
+            if (shown(vram)) problems.push('видеопамять');
+            if (okBox) okBox.style.display = problems.length ? 'none' : 'block';
+            if (badge) badge.textContent = problems.length ? '⚠️ ' + problems.length : '';
+            const signature = problems.join(',');
+            // Раскрываем, когда появилось о чём предупредить, и сворачиваем, когда
+            // всё в порядке. Пока набор предупреждений тот же — раздел не трогаем:
+            // иначе он не давал бы свернуть себя руками
+            if (signature === readySignature) return;
+            readySignature = signature;
+            setSectionCollapsed('sec-ready', problems.length === 0);
+        }
+
+        // Ручная проверка готовности — не трогая то, что уже введено в форме
+        function checkReadiness() {
+            const btn = document.querySelector('#sec-ready button');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Проверяю...'; }
+            fetch('/api/participants', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(data => {
+                    renderModelsWarning(data.models_status);
+                    renderVramWarning(data.vram_status);
+                    syncReadinessSection();
+                    refreshMemory();
+                })
+                .catch(err => console.warn('Проверка готовности не удалась:', err))
+                .finally(() => {
+                    if (btn) { btn.disabled = false; btn.textContent = '🔄 Проверить сейчас'; }
+                });
+        }
+
+        // Тёмная сцена: выбор запоминается, при первом входе берётся из настроек системы
+        function applyTheme(dark) {
+            document.body.classList.toggle('dark', !!dark);
+            const btn = document.getElementById('themeBtn');
+            if (btn) btn.textContent = dark ? '☀️ Светлая сцена' : '🌙 Тёмная сцена';
+        }
+
+        function toggleTheme() {
+            const dark = !document.body.classList.contains('dark');
+            applyTheme(dark);
+            try { localStorage.setItem('theatreTheme', dark ? 'dark' : 'light'); } catch (e) {}
+        }
+
+        // Цветные полосы ролей в ленте: оформление, а не смысл, поэтому его можно
+        // выключить. Класс стоит на самом теле страницы — оформление постов тогда
+        // возвращается к прежнему виду, без правок разметки. Выбор запоминается
+        function applyRoleMarks(on) {
+            document.body.classList.toggle('role-marks', !!on);
+            const btn = document.getElementById('rolesBtn');
+            if (btn) btn.textContent = on ? '🎨 Цвет ролей: вкл' : '🎨 Цвет ролей: выкл';
+        }
+
+        function toggleRoleMarks() {
+            const on = !document.body.classList.contains('role-marks');
+            applyRoleMarks(on);
+            try { localStorage.setItem('theatreRoleMarks', on ? 'on' : 'off'); } catch (e) {}
+        }
+
+        (function initRoleMarks() {
+            let saved = null;
+            try { saved = localStorage.getItem('theatreRoleMarks'); } catch (e) {}
+            // По умолчанию включено: это то, что режиссёр и так различает глазами
+            applyRoleMarks(saved === null ? true : saved === 'on');
+        })();
+
+        (function initTheme() {
+            let saved = null;
+            try { saved = localStorage.getItem('theatreTheme'); } catch (e) {}
+            const systemDark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            applyTheme(saved === null ? systemDark : saved === 'dark');
+        })();
+        
+        function addPost(post) {
+            const postsDiv = document.getElementById('posts');
+            const emoji = post.avatar_emoji || '📣';
+            let avatarHtml = post.avatar_url ? `<img src="${post.avatar_url}" onclick="showAvatarFull('${post.avatar_url}')">` : `<div class="emoji">${emoji}</div>`;
+            let searchInfo = '';
+            if (post.search_count > 0) { searchInfo = `<div class="search-info"><strong>Источники</strong>${post.search_queries.map(q => `<span class="search-query">"${q}"</span>`).join('')}</div>`; }
+            
+            // Определяем стиль для роли
+            const role = post.role || 'participant';
+            const roleIcon = post.role_icon || '🎭';
+            const roleName = post.role_name || 'Участник';
+            const roleClass = `role-${role}`;
+            
+            const postDiv = document.createElement('div');
+            // Класс роли нужен для цветной полосы слева (см. body.role-marks)
+            postDiv.className = `post post-role-${role}`;
+            const genderSymbol = post.gender === 'male' ? '♂' : '♀';
+            postDiv.innerHTML = `<div class="post-avatar">${avatarHtml}</div><div class="post-content"><div class="post-header"><div><div class="post-author"><span class="role-badge ${roleClass}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div><div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            // Формулы в реплике — в MathML (см. renderMath)
+            renderMath(postDiv.querySelector('.post-text'));
+            // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать
+            // спектакль снизу вверх не приходится
+            postsDiv.insertBefore(postDiv, postsDiv.firstChild);
+        }
+        
+        function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }
+
+        // Формулы: сервер отдаёт LaTeX внутри span.math (markdown его не портит),
+        // здесь он превращается в MathML — рисует сам браузер, без картинок и шрифтов.
+        // Если рендерер не загрузился, формула остаётся текстом, как было раньше
+        function renderMath(root) {
+            if (!root || typeof temml === 'undefined') return;
+            root.querySelectorAll('span.math:not(.math-done)').forEach(el => {
+                const latex = el.textContent;
+                try {
+                    el.innerHTML = temml.renderToString(latex, {
+                        displayMode: el.dataset.display === '1',
+                        throwOnError: false
+                    });
+                    el.classList.add('math-done');
+                } catch (err) {
+                    console.warn('Формула не отрисовалась:', latex, err);
+                }
+            });
+        }
+        
+        // Предупреждение «модель не влезает в VRAM»: показывается до старта,
+        // спектакль не блокирует - просто честно говорит, что будет медленнее
+        function renderVramWarning(status) {
+            const box = document.getElementById('vramWarning');
+            if (!box) return;
+            const warnings = (status && status.warnings) || [];
+            if (!warnings.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+            
+            const gb = b => (b / 1e9).toFixed(1);
+            const items = warnings.map(w => {
+                let text = `<b>${escapeHtml(w.model)}</b>: при num_ctx ${status.num_ctx} нужно ~${gb(w.need)} ГБ, `
+                    + `а доступно ~${gb(status.budget)} ГБ из ${gb(status.gpu_total)} ГБ. `;
+                if (w.safe_ctx) {
+                    text += `Поставьте num_ctx <b>${w.safe_ctx}</b> (тогда ~${gb(w.safe_need)} ГБ)`;
+                } else {
+                    text += 'Даже с минимальным контекстом модель не влезает целиком — часть будет считать процессор';
+                }
+                if (!w.measured) text += ' <span style="opacity:.7;">[оценка по размеру файла]</span>';
+                return `<div style="margin-bottom:8px;">${text}</div>`;
+            }).join('');
+            
+            box.innerHTML = `⚠️ <b>Не хватает видеопамяти</b><div style="margin-top:8px;">${items}</div>`
+                + '<div style="margin-top:8px;font-size:13px;">Спектакль пойдёт и так, но такие модели будут считать медленнее: уменьшите <code>num_ctx</code> в OPTIONS.</div>';
+            box.style.display = 'block';
+        }
+        
+        function renderLoadedModels(loaded, gpu, error) {
+            const el = document.getElementById('vramDisplay');
+            if (!el) return;
+            const gb = b => (b / 1e9).toFixed(1);
+            const esc = escapeHtml;
+            
+            if (error) { el.innerHTML = '<div style="color:#b00020;">Ollama недоступна</div>'; return; }
+            if (!loaded || loaded.length === 0) { el.innerHTML = '<div style="color:#999;">В памяти сейчас ничего нет</div>'; return; }
+            
+            const total = (gpu && gpu.total) ? gpu.total : 0;
+            el.innerHTML = loaded.map(m => {
+                const vram = m.size_vram || 0;
+                const size = vram ? `${gb(vram)} ГБ в VRAM` : `${gb(m.size)} ГБ в RAM`;
+                const pct = (vram && total) ? ` <span style="color:#666;">(${Math.round(vram / total * 100)}% из ${gb(total)} ГБ)</span>` : '';
+                const ctx = m.context_length ? `<div style="color:#666;font-size:12px;">контекст: ${m.context_length}</div>` : '';
+                // Не поместилась в VRAM: либо Ollama сама это сказала, либо заявила
+                // больше, чем есть на карте (на Windows часть уходит в общую память)
+                let spillBytes = 0;
+                if (m.size && vram) {
+                    if (total && vram > total) spillBytes = Math.max(0, m.size - total);
+                    else if (vram < m.size) spillBytes = m.size - vram;
+                }
+                const spill = spillBytes
+                    ? `<div style="color:#b00020;font-size:12px;">⚠️ ещё ${gb(spillBytes)} ГБ в RAM</div>` : '';
+                return `<div style="margin-bottom:10px;"><strong>${esc(m.name)}</strong><div>${size}${pct}</div>${ctx}${spill}</div>`;
+            }).join('');
+            if (total) {
+                el.innerHTML += `<div style="color:#666;font-size:12px;border-top:1px solid #000;padding-top:8px;">Занято на GPU: ${gb(gpu.used)} из ${gb(total)} ГБ</div>`;
+            }
+        }
+        
+        // Обновить только блок памяти: он нужен и до спектакля, и после занавеса,
+        // когда polling уже остановлен, а модели как раз выгружаются
+        function refreshMemory() {
+            fetch('/api/status', {cache: 'no-store'}).then(r => r.json())
+                .then(d => renderLoadedModels(d.loaded_models, d.gpu_memory, d.loaded_models_error))
+                .catch(() => {});
+        }
+        
+        // После занавеса модели выгружаются НЕ мгновенно (гигабайты уходят
+        // в память не сразу), поэтому обновляем панель ещё несколько раз,
+        // а не двумя разовыми замерами
+        let memorySettleTimer = null;
+        let memorySettleTicks = 0;
+        
+        function settleMemoryPanel() {
+            memorySettleTicks = 8;  // ~40 секунд наблюдения
+            if (memorySettleTimer) return;
+            memorySettleTimer = setInterval(() => {
+                refreshMemory();
+                if (--memorySettleTicks <= 0) {
+                    clearInterval(memorySettleTimer);
+                    memorySettleTimer = null;
+                }
+            }, 5000);
+            refreshMemory();
+        }
+        
+        let statusRequestInFlight = false;
+        
+        function updatePosts() {
+            // Опрос и событие Socket.IO могут сработать одновременно, а запрос несёт
+            // lastPostCount: два параллельных ответа добавили бы один пост дважды.
+            // Второй вызов пропускаем - следующий опрос всё равно подхватит новое.
+            if (statusRequestInFlight) return;
+            statusRequestInFlight = true;
+            
+            fetch(`/api/status?lastPostCount=${lastPostCount}`, {cache: 'no-store'}).then(r => r.json()).then(data => {
+                // Сессия сменилась на сервере — сбросить локальный UI.
+                if (data.session_id) {
+                    if (mySessionId === null) {
+                        mySessionId = data.session_id;
+                    } else if (mySessionId !== data.session_id) {
+                        // Спектакль начался в другой вкладке: переходим к просмотру
+                        mySessionId = data.session_id;
+                        debateRunning = true;
+                        lastPostCount = 0;
+                        document.getElementById('posts').innerHTML = '';
+                        setTurnState('hidden');
+                        loadCast().then(() => { updateSidebarParticipants(); updatePanel(); });
+                        return;
+                    }
+                }
+                const statusDiv = document.getElementById('statusBar');
+                const statusPlaceholder = document.getElementById('statusPlaceholder');
+                statusDiv.style.display = 'block'; statusPlaceholder.style.display = 'none';
+                // Флаги ставим до отрисовки пульта: после перезагрузки страницы
+                // он должен сразу знать, что спектакль идёт, а не ждать нового старта
+                debateRunning = true;
+                showFinished = !!data.finished;
+                if (data.topic) setTopicDisplay(data.topic);
+                updatePanel();
+                if (data.waiting_for_human) {
+                    // Ход человека: имя всегда, роль — только если она особенная
+                    const roleName = roleLabelOf(data.current_participant_role);
+                    const wasOpen = document.getElementById('turnComposer').style.display === 'block';
+                    setTurnState('your', data.current_participant, roleName);
+                    if (!wasOpen) {
+                        const mi = document.getElementById('moderatorInput');
+                        if (mi && !mi.value.trim()) mi.focus();
+                    }
+                    statusDiv.classList.add('active');
+                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
+                } else {
+                    // Не ваша очередь: блок остаётся на месте с пояснением, чтобы
+                    // нумерация разделов пульта не прыгала
+                    setTurnState(data.finished ? 'finished' : 'waiting', data.current_participant);
+                }
+                if (data.running && !data.waiting_for_human) {
+                    statusDiv.classList.add('active');
+                    let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
+                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>`;
+                } else if (data.finished) {
+                    statusDiv.classList.remove('active');
+                    statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>';
+                    setTurnState('finished');
+                    document.getElementById('finishBtn').style.display = 'none';
+                    // «Покинуть театр» оставляем: занавес больше не закрывает сервер,
+                    // и это единственная кнопка остановки приложения
+                    clearInterval(pollInterval);
+                    pollInterval = null;
+                    settleMemoryPanel();
+                }
+                if (data.new_posts && data.new_posts.length > 0) data.new_posts.forEach(post => addPost(post));
+                if (typeof data.total_posts === 'number') lastPostCount = data.total_posts;
+                // Показываем, какая модель сейчас в памяти и сколько занимает
+                renderLoadedModels(data.loaded_models, data.gpu_memory, data.loaded_models_error);
+                // Инструкции в сайдбаре меняются только вручную, поэтому обновляем
+                // их раз в 30 секунд, а не на каждом опросе
+                if (instructionsTick++ % 10 === 0) updateSidebarParticipants();
+            }).catch(err => {
+                console.error('Ошибка обновления статуса:', err);
+                // Если сервер недоступен — значит он остановлен
+                // Обновляем статус и скрываем кнопку выхода
+                const statusDiv = document.getElementById('statusBar');
+                statusDiv.style.display = 'block';
+                statusDiv.classList.remove('active');
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Театр закрыт</div><div style="font-style:italic;">Спектакль сохранён для просмотра</div>';
+                
+                const exitBtn = document.querySelector('.footer .btn');
+                if (exitBtn) exitBtn.style.display = 'none';
+                
+                // Останавливаем polling чтобы не спамить ошибками
+                if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+            })
+            .finally(() => { statusRequestInFlight = false; });
+        }
+        
+        function sendModeratorMessage() {
+            const input = document.getElementById('moderatorInput');
+            fetch('/api/moderator/message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input.value}) })
+            .then(r => r.json()).then(data => { if (data.success) { input.value = ''; setTurnState('sent'); } else alert('Ошибка: ' + (data.error || 'неизвестная')); })
+            .catch(err => { console.error('Ошибка:', err); alert('Ошибка: ' + err.message); });
+        }
+        
+        function updateSidebarParticipants() {
+            // Получаем актуальные инструкции с сервера
+            fetch('/api/moderator/instructions', {cache: 'no-store'})
+            .then(r => r.json())
+            .then(data => {
+                // Создаём словарь индивидуальных инструкций
+                const currentInstructions = {};
+                if (data.participant_instructions) {
+                    data.participant_instructions.forEach(p => {
+                        if (p.instruction && p.instruction.trim()) {
+                            currentInstructions[p.name] = p.instruction;
+                        }
+                    });
+                }
+                
+                // Состав у страницы и у сервера один и тот же (cast), поэтому сайдбар
+                // всегда совпадает со сценой: и в настройке, и после перезагрузки
+                document.getElementById('participantsDisplay').innerHTML = cast.map(p => {
+                    const instruction = currentInstructions[p.display_name];
+                    const genderSymbol = p.gender === 'male' ? '♂' : '♀';
+                    
+                    // Определяем иконку роли
+                    let roleIcon = '🎭';
+                    let roleLabel = ' <span style="color:#1976d2;font-size:11px;font-weight:bold;">УЧАСТНИК</span>';
+                    if (p.is_moderator) {
+                        roleIcon = '🎬';
+                        roleLabel = ' <span style="color:#f57c00;font-size:11px;font-weight:bold;">МОДЕРАТОР</span>';
+                    } else if (p.is_judge) {
+                        roleIcon = '⚖️';
+                        roleLabel = ' <span style="color:#7b1fa2;font-size:11px;font-weight:bold;">СУДЬЯ</span>';
+                    }
+                    
+                    // Как и в ленте: пол сразу после имени
+                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${escapeHtml(p.display_name)}</strong> ${genderSymbol}${roleLabel} <small>(${escapeHtml(p.model)})</small>`;
+                    if (instruction) {
+                        html += `<br><em style="margin-left:10px;">${escapeHtml(instruction)}</em>`;
+                    }
+                    return html + '</div>';
+                }).join('');
+                
+                // Обновляем блок "Правила общения"
+                const rulesDisplay = document.getElementById('rulesDisplay');
+                if (data.static_instructions && data.static_instructions.length > 0) {
+                    rulesDisplay.innerHTML = data.static_instructions
+                        .filter(rule => rule.trim())
+                        .map(rule => `<div style="margin-bottom:8px;">• ${escapeHtml(rule)}</div>`)
+                        .join('');
+                } else {
+                    rulesDisplay.innerHTML = '<div style="color:#999;">Правила не заданы</div>';
+                }
+                
+                // Обновляем блок "Инструкции от руководства"
+                const modInstructionsDisplay = document.getElementById('moderatorInstructionsDisplay');
+                if (data.moderator_messages && data.moderator_messages.length > 0) {
+                    modInstructionsDisplay.innerHTML = data.moderator_messages
+                        .filter(msg => msg.trim())
+                        .map(msg => `<div style="margin-bottom:8px;">• ${escapeHtml(msg)}</div>`)
+                        .join('');
+                } else {
+                    modInstructionsDisplay.innerHTML = '<div style="color:#999;font-weight:normal;">Нет указаний от руководства</div>';
+                }
+            })
+            .catch(err => console.error('Ошибка обновления сайдбара:', err));
+        }
+        
+        function saveInstructions() {
+            // Собираем static_instructions
+            const staticInstructions = [];
+            const staticContainer = document.getElementById('staticInstructionsEditor');
+            staticContainer.querySelectorAll('textarea').forEach(ta => {
+                if (ta.value.trim()) staticInstructions.push(ta.value.trim());
+            });
+            
+            // Собираем moderator_messages
+            const moderatorMessages = [];
+            const modContainer = document.getElementById('moderatorMessagesEditor');
+            modContainer.querySelectorAll('textarea').forEach(ta => {
+                if (ta.value.trim()) moderatorMessages.push(ta.value.trim());
+            });
+            
+            // Собираем индивидуальные инструкции участников
+            const participantInstructions = [];
+            const participantContainer = document.getElementById('participantInstructionsEditor');
+            participantContainer.querySelectorAll('div[data-participant]').forEach(div => {
+                const textarea = div.querySelector('textarea');
+                const name = (div.dataset.participant || '').trim();
+                if (textarea && name) {
+                    participantInstructions.push({ name: name, instruction: textarea.value });
+                }
+            });
+            
+            // Собираем правила судьи
+            const judgeRules = [];
+            document.getElementById('judgeRulesEditor').querySelectorAll('textarea').forEach(ta => {
+                if (ta.value.trim()) judgeRules.push(ta.value.trim());
+            });
+            
+            // Отправляем на сервер
+            fetch('/api/moderator/instructions', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    static_instructions: staticInstructions,
+                    moderator_messages: moderatorMessages,
+                    judge_rules: judgeRules,
+                    participant_instructions: participantInstructions
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    alert('✅ Инструкции обновлены!');
+                    document.getElementById('instructionsEditor').style.display = 'none';
+                    // Обновляем сайдбар с актуальными инструкциями
+                    updateSidebarParticipants();
+                } else {
+                    alert('❌ Ошибка: ' + (data.error || 'неизвестная'));
+                }
+            })
+            .catch(err => {
+                console.error('Ошибка сохранения:', err);
+                alert('❌ Ошибка сохранения: ' + err.message);
+            });
+        }
+        
+        // «Завершить спектакль» опускает занавес, но НЕ закрывает театр: сервер остаётся
+        // живым, опрос видит finished и показывает «🎭 Новый спектакль». Остановка сервера -
+        // отдельная кнопка «Покинуть театр».
+        function finishDebate() {
+            if (confirm('Опустить занавес? После этого можно собрать новый спектакль.')) {
+                finishRequested = true;
+                fetch('/api/moderator/finish', {method: 'POST'})
+                    .then(() => updatePosts())
+                    .catch(() => {});
+
+                // Немедленный отклик, не дожидаясь сервера
+                setTurnState('hidden');
+                document.getElementById('finishBtn').style.display = 'none';
+
+                const statusDiv = document.getElementById('statusBar');
+                statusDiv.style.display = 'block';
+                statusDiv.classList.remove('active');
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Опускаю занавес…</div><div style="font-style:italic;">Режиссёр завершил представление</div>';
+                document.getElementById('statusPlaceholder').style.display = 'none';
+            }
+        }
+        
+        function shutdownServer() {
+            if (confirm('Завершить работу сервера?')) {
+                // СРАЗУ останавливаем polling
+                if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+                
+                // СРАЗУ скрываем кнопку выхода — чтобы нельзя было нажать повторно
+                const exitBtn = document.querySelector('.footer .btn');
+                if (exitBtn) exitBtn.style.display = 'none';
+                
+                // СРАЗУ обновляем UI
+                setTurnState('hidden');
+                document.getElementById('statusPlaceholder').style.display = 'none';
+                
+                const statusDiv = document.getElementById('statusBar');
+                statusDiv.style.display = 'block';
+                statusDiv.classList.remove('active');
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Театр закрыт</div><div style="font-style:italic;">Спектакль сохранён для просмотра</div>';
+                
+                // Отправляем запрос на сервер (если он ещё жив)
+                fetch('/api/shutdown', {method: 'POST'}).catch(() => {});
+            }
+        }
+        
+        // Функции для редактирования инструкций и руководств
+        function toggleInstructionsEditor() {
+            const editor = document.getElementById('instructionsEditor');
+            if (editor.style.display === 'none') {
+                editor.style.display = 'block';
+                loadInstructionsForEdit();
+            } else {
+                editor.style.display = 'none';
+            }
+        }
+        
+        function loadInstructionsForEdit() {
+            fetch('/api/moderator/instructions')
+            .then(r => r.json())
+            .then(data => {
+                defaultJudgePrompt = data.default_judge_prompt || '';
+                renderStaticInstructionsEditor(data.static_instructions);
+                renderModeratorMessagesEditor(data.moderator_messages);
+                renderJudgeRulesEditor(data.judge_rules || []);
+                renderParticipantInstructionsEditor(data.participant_instructions || []);
+            })
+            .catch(err => console.error('Ошибка загрузки инструкций:', err));
+        }
+        
+        function renderStaticInstructionsEditor(instructions) {
+            const container = document.getElementById('staticInstructionsEditor');
+            container.innerHTML = instructions.map((instr, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${instr}</textarea>
+                    <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function renderModeratorMessagesEditor(messages) {
+            const container = document.getElementById('moderatorMessagesEditor');
+            container.innerHTML = messages.map((msg, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${msg}</textarea>
+                    <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function renderJudgeRulesEditor(rules) {
+            const container = document.getElementById('judgeRulesEditor');
+            container.innerHTML = rules.map((rule, idx) => `
+                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
+                    <textarea id="judge-rule-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${escapeHtml(rule)}</textarea>
+                    <button class="btn btn-secondary" onclick="removeJudgeRuleEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
+                </div>
+            `).join('');
+        }
+        
+        function addJudgeRuleEditor() {
+            const container = document.getElementById('judgeRulesEditor');
+            const idx = 'new' + (++editorRowSeq);
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="judge-rule-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое правило судьи..."></textarea>
+                <button class="btn btn-secondary" onclick="removeJudgeRuleEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function removeJudgeRuleEditor(idx) {
+            const el = document.getElementById(`judge-rule-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
+        function renderParticipantInstructionsEditor(participantInstructions) {
+            const container = document.getElementById('participantInstructionsEditor');
+            if (participantInstructions.length === 0) {
+                container.innerHTML = '<div style="color:#666;font-style:italic;font-size:13px;">Нет AI-участников для редактирования</div>';
+                return;
+            }
+            container.innerHTML = participantInstructions.map((p, idx) => {
+                // Определяем роль участника
+                let roleBadge = '<span class="role-badge role-participant">🎭 УЧАСТНИК</span>';
+                let borderColor = '#ccc';
+                let rows = 3;
+                
+                if (p.is_judge) {
+                    roleBadge = '<span class="role-badge role-judge">⚖️ СУДЬЯ</span>';
+                    borderColor = '#7b1fa2';
+                    rows = 8; // Больше строк для судьи
+                }
+                
+                // Имя лежит в data-атрибуте: раньше его брали из текста label,
+                // а туда попал бейдж роли - и инструкции сохранялись под именем
+                // «🎭 УЧАСТНИК Варвара», то есть никогда не применялись
+                const value = (p.instruction && p.instruction.trim())
+                    ? p.instruction
+                    : (p.is_judge ? defaultJudgePrompt : '');
+                
+                return `
+                <div data-participant="${escapeHtml(p.name)}" style="margin-bottom:15px;padding:10px;border:2px solid ${borderColor};border-radius:4px;background:${p.is_judge ? '#fafafa' : 'white'};">
+                    <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${roleBadge} ${escapeHtml(p.name)}:</label>
+                    ${p.is_judge ? '<div style="font-size:11px;color:#666;margin-bottom:5px;font-style:italic;">Системный промпт судьи (можно редактировать):</div>' : ''}
+                    <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${escapeHtml(p.name)}...">${escapeHtml(value)}</textarea>
+                </div>
+            `}).join('');
+        }
+        
+        function addStaticInstructionEditor() {
+            const container = document.getElementById('staticInstructionsEditor');
+            const idx = 'new' + (++editorRowSeq);
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новая инструкция..."></textarea>
+                <button class="btn btn-secondary" onclick="removeStaticInstructionEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function addModeratorMessageEditor() {
+            const container = document.getElementById('moderatorMessagesEditor');
+            const idx = 'new' + (++editorRowSeq);
+            const div = document.createElement('div');
+            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
+            div.innerHTML = `
+                <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое руководство..."></textarea>
+                <button class="btn btn-secondary" onclick="removeModeratorMessageEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
+            `;
+            container.appendChild(div);
+        }
+        
+        function removeStaticInstructionEditor(idx) {
+            const el = document.getElementById(`static-instr-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
+        function removeModeratorMessageEditor(idx) {
+            const el = document.getElementById(`mod-msg-edit-${idx}`);
+            if (el) el.parentElement.remove();
+        }
+        
+        document.getElementById('topicInput').addEventListener('keydown', function(e) { if (e.ctrlKey && e.key === 'Enter') startDebate(); });
+        document.getElementById('moderatorInput').addEventListener('keydown', function(e) { if (e.ctrlKey && e.key === 'Enter') sendModeratorMessage(); });
+        const now = new Date();
+        document.getElementById('headerDate').textContent = now.toLocaleDateString('ru-RU', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    </script>
+</body>
+</html>
+"""
