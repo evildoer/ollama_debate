@@ -210,6 +210,55 @@ class TestCharacterLottery(unittest.TestCase):
                 self.assertEqual(person["top_p"], 0.5)
 
 
+# ---------------------------------------------------------------- характеры
+
+class TestCharacterPresets(unittest.TestCase):
+    """Наборы характеров должны отличаться друг от друга и говорить на языке Ollama.
+
+    Характер — это готовые числа, и жребий выбирает из всего списка наугад.
+    Два набора с одинаковыми числами — один характер под двумя именами: сцена
+    становится однообразнее, а причина не видна. Опечатка в имени параметра
+    тише: такое число просто не уезжает в Ollama, и набор работает не так,
+    как написано в его подсказке.
+    """
+
+    def _real_presets(self):
+        return {key: preset for key, preset in theatre.CHARACTER_PRESETS.items()
+                if preset.get("params")}
+
+    def test_no_two_characters_have_the_same_numbers(self):
+        seen = {}
+        for key, preset in self._real_presets().items():
+            with self.subTest(character=key):
+                signature = tuple(sorted(preset["params"].items()))
+                self.assertNotIn(signature, seen,
+                                 f"«{key}» — клон «{seen.get(signature)}»")
+                seen[signature] = key
+
+    def test_every_character_is_ready_for_the_pult(self):
+        """Пульт берёт из набора подпись, подсказку и группу — без них в списке
+        характеров будет пустая строка или безымянная группа."""
+        for key, preset in self._real_presets().items():
+            with self.subTest(character=key):
+                self.assertTrue(str(preset.get("label", "")).strip())
+                self.assertTrue(str(preset.get("hint", "")).strip())
+                self.assertIn(preset.get("group"), ("manual", "balanced", "extreme"))
+                self.assertIn(preset.get("think", "auto"), theatre.THINK_MODES)
+
+    def test_characters_speak_only_in_known_parameters(self):
+        """Опечатка в имени числа — тихий отказ: в Ollama такое поле не уезжает,
+        а набор будет выглядеть как задумано."""
+        known = set(theatre.PER_PARTICIPANT_OPTION_KEYS)
+        for key, preset in self._real_presets().items():
+            unknown = sorted(set(preset["params"]) - known)
+            with self.subTest(character=key):
+                self.assertEqual(unknown, [], f"«{key}»: неизвестные параметры {unknown}")
+
+        unknown_drift = sorted(set(theatre.CHARACTER_DRIFT) - known)
+        self.assertEqual(unknown_drift, [],
+                         f"разброс задан для неизвестных параметров: {unknown_drift}")
+
+
 # ---------------------------------------------------------------- состав
 
 class TestCastStructure(unittest.TestCase):

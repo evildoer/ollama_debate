@@ -78,6 +78,16 @@ BUGS = {
         ("        body.dark.role-marks .post.post-role-judge { border-left-color: #8f5cae; }\n",
          ""),
     ],
+    "новый характер оказался клоном «Педанта»": [
+        ('        "params": {"temperature": 0.6, "top_p": 1.0, "min_p": 0.4, "top_k": 30,\n'
+         '                   "repeat_penalty": 1.2, "presence_penalty": 0.4,\n'
+         '                   "frequency_penalty": 0.3},',
+         '        "params": {"temperature": 0.2, "top_p": 0.5, "repeat_penalty": 1.10,\n'
+         '                   "presence_penalty": 0.05, "frequency_penalty": 0.05},'),
+    ],
+    "опечатка в имени параметра характера": [
+        ('"min_p": 0.4, "top_k": 30', '"minp": 0.4, "top_k": 30'),
+    ],
     "пульт снова теряет top_k, min_p и seed": [
         ("        const PARAM_KEYS = ['temperature', 'top_p', 'top_k', 'min_p',\n"
          "                            'repeat_penalty', 'presence_penalty', 'frequency_penalty', 'seed'];",
