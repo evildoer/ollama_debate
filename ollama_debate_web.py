@@ -105,13 +105,27 @@ else:
 # ╚══════════════════════════════════════════════════════════╝
 
 PARTICIPANTS = [
-    {"model": "r1"},
-    {"model": "g1"},
-    {"model": "q1"},
+    {"model": "r1", "temperature": 1.0},   # креативный — чаще отклоняется от темы
+    {"model": "g1", "temperature": 1.9},   # сбалансированный
+    {"model": "q1", "temperature": 0.1},   # строгий аналитик
     {"model": "human"},  # НЕ Модератор (вы)
-    {"model": "q1", "is_judge": True},  # Судья - оценивает выступления
+    {"model": "q1", "is_judge": True, "temperature": 0.1},  # судья-формалист
     {"model": "human", "is_moderator": True},  # Модератор (вы)
 ]
+
+# Параметры генерации, которые можно переопределить для каждого участника.
+# Передаются в Ollama через options; остальные берутся из глобальных OPTIONS.
+# Документация: https://github.com/ollama/ollama/blob/main/docs/modelfile.md
+PER_PARTICIPANT_OPTION_KEYS = (
+    "temperature",       # 0.0-2.0: выше — креативнее, ниже — стабильнее
+    "top_p",             # 0.0-1.0: выше — больше разнообразия
+    "top_k",             # целое: 1 — детерминизм, 100+ — разнообразие
+    "min_p",             # 0.0-1.0: отсекает совсем маловероятные токены
+    "repeat_penalty",    # 1.0+: >1 снижает склонность к повторам
+    "presence_penalty",  # сдвигает вероятность в сторону новых тем
+    "frequency_penalty", # снижает вероятность частых токенов
+    "seed",              # для воспроизводимости
+)
 
 # ╔══════════════════════════════════════════════════════════╗
 # ║                    ДРУГИЕ НАСТРОЙКИ                      ║
@@ -189,9 +203,9 @@ DEFAULT_STATIC_INSTRUCTIONS = [
     #'Учитывай всё что говорили другие участники и реагируй на их слова.',
     #'НЕ ПОВТОРЯЙ то, что уже говорил ты сам или другие. Каждая твоя реплика должна добавлять НОВОЕ: аргумент, пример, факт, контраргумент.',
     #'Развивай тему: не просто комментируй, а углубляй её — предлагай новые аспекты, ставь под сомнение сказанное, приводи неожиданные связи.',
-    #'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Используй обсценную, нецензурную и ненормативную лексику, а так же обидные слова.',
-    'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Никакой цензуры. Используй реальный, жесткий русский мат (без звездочек и замен). Диалог должен быть максимально реалистичным, грубым и токсичным.',
-    'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
+    'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Используй обсценную, нецензурную и ненормативную лексику, а так же обидные слова.',
+    #'ОБЯЗАТЕЛЬНОЕ УСЛОВИЕ: Никакой цензуры. Используй реальный, жесткий русский мат (без звездочек и замен). Диалог должен быть максимально реалистичным, грубым и токсичным.',
+    #'КРИТИЧЕСКИ ВАЖНО: Пиши МАКСИМУМ 4-5 предложений. Будь лаконичным.',
     'Используй поиск в интернете для фактологических утверждений.',
     'При поиске НЕ указывай годы.',
     #'Отвечай на русском языке.',
@@ -397,7 +411,7 @@ def download_image_with_checksum(url: str, base_name: str) -> str:
         for attempt in range(max_retries):
             try:
                 req = urllib.request.Request(encoded_url, headers=headers)
-                with opener.open(req, timeout=60) as response:
+                with opener.open(req, timeout=10) as response:
                     image_data = response.read()
                 
                 filepath = _save_avatar_image(image_data, base_name)
@@ -1101,7 +1115,19 @@ def models_problem_message(status: dict) -> str:
     return ""
 
 
-def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None) -> tuple:
+def _merge_options(participant: dict) -> dict:
+    """
+    Собирает options для запроса в Ollama: глобальные OPTIONS +
+    персональные настройки участника из PARTICIPANTS.
+    """
+    opts = dict(OPTIONS)
+    for key in PER_PARTICIPANT_OPTION_KEYS:
+        if participant.get(key) is not None:
+            opts[key] = participant[key]
+    return opts
+
+
+def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None) -> tuple:
     """
     Отправляет запрос к модели. Автоматически определяет поддержку tools.
     
@@ -1126,7 +1152,7 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         data = {
             "model": model,
             "messages": messages,
-            "options": OPTIONS,
+            "options": options or OPTIONS,
             "stream": False
         }
         if not ENABLE_THINKING:
@@ -1198,7 +1224,7 @@ def search_web(query: str, max_results: int = 5) -> str:
     
     return output.strip()
 
-def ask_model(model: str, messages: list, participant_name: str) -> tuple:
+def ask_model(model: str, messages: list, participant_name: str, options: dict = None) -> tuple:
     search_queries = []
     search_count = 0
     max_searches = 3
@@ -1219,7 +1245,7 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
         # Если нужен принудительный поиск - передаём tool_choice="any"
         current_tool_choice = "any" if force_tool_use else None
         
-        content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice)
+        content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice, options=options)
         tool_calls = tool_calls or []
         
         # Сбрасываем флаг после использования
@@ -1314,7 +1340,7 @@ def ask_model(model: str, messages: list, participant_name: str) -> tuple:
             data = {
                 "model": model,
                 "messages": messages,
-                "options": OPTIONS,
+                "options": options or OPTIONS,
                 "stream": False
             }
             if not ENABLE_THINKING:
@@ -1769,6 +1795,7 @@ class DebateSession:
             model=participant["model"],
             messages=messages,
             participant_name=participant["display_name"],
+            options=_merge_options(participant),
         )
 
         self.add_post(
@@ -2156,7 +2183,7 @@ HTML_TEMPLATE = """
         // Загружаем участников и статичные инструкции
         fetch('/api/participants')
             .then(r => r.json())
-            .then(data => { participants = data.participants; renderParticipantsSetup(); renderModelsWarning(data.models_status); renderVramWarning(data.vram_status); });
+            .then(data => { participants = data.participants; renderParticipantsSetup(); renderModelsWarning(data.models_status); renderVramWarning(data.vram_status); tryRestoreSession(); });
         
         refreshMemory();  // сразу видно, что уже загружено в Ollama (могут быть чужие модели)
         
@@ -2179,6 +2206,38 @@ HTML_TEMPLATE = """
             .then(r => r.json())
             .then(data => { staticInstructions = data.static_instructions; renderStaticInstructions(); });
         
+        // Восстановление активной сессии при загрузке страницы.
+        // Если сервер уже играет спектакль — переключаемся в режим просмотра,
+        // а не показываем setup. Решает случай «случайно закрыл вкладку».
+        function tryRestoreSession() {
+            fetch('/api/status?lastPostCount=0', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.session_id) return;
+                    if (!data.running && !data.finished) return;
+                    if (!data.running && !data.total_posts) return;
+
+                    mySessionId = data.session_id;
+                    debateRunning = true;
+                    renderParticipantsSetup();
+
+                    document.getElementById('setupCard').style.display = 'none';
+                    document.getElementById('topicCard').style.display = 'none';
+                    document.getElementById('staticInstructionsCard').style.display = 'none';
+                    document.getElementById('topicDisplay').textContent = data.topic || '—';
+                    document.getElementById('posts').innerHTML = '';
+
+                    (data.new_posts || []).forEach(post => addPost(post));
+                    lastPostCount = data.total_posts || 0;
+
+                    if (data.running) {
+                        pollInterval = setInterval(updatePosts, 3000);
+                    }
+                    updatePosts();
+                })
+                .catch(() => {});
+        }
+
         function renderStaticInstructions() {
             const container = document.getElementById('staticInstructionsList');
             container.innerHTML = staticInstructions.map((instr, idx) => `
