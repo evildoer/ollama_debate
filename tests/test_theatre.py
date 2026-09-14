@@ -1425,6 +1425,40 @@ class TestScenePanel(unittest.TestCase):
                 self.assertIn(route, {rule.rule for rule in web_app.app.url_map.iter_rules()})
 
 
+# ---------------------------------------------------------------- опрос статуса
+
+class TestStatusPolling(unittest.TestCase):
+    """Оборванная связь — ещё не закрытый театр, и опрос не должен умирать с первой неудачи.
+
+    Так уже случилось: в момент старта спектакля один пустой ответ (закрытое
+    keep-alive соединение или занятый сервер, пока модель грузится в память)
+    заставлял страницу объявить «Театр закрыт» и прекратить опрос навсегда:
+    спектакль шёл дальше, а лента замирала.
+    """
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+        start = self.page.index("function updatePosts()")
+        self.body = self.page[start:self.page.index("function sendModeratorMessage()", start)]
+        self.catch = self.body[self.body.index(".catch(err =>"):]
+
+    def test_a_single_failure_does_not_close_the_theatre(self):
+        self.assertIn("statusFailures++", self.catch, "неудачи не считаются")
+        self.assertIn("if (statusFailures < STATUS_FAILURES_BEFORE_CLOSED) return;", self.catch)
+        # Порог обязан стоять до остановки опроса — иначе он бесполезен
+        self.assertLess(self.catch.index("statusFailures < STATUS_FAILURES_BEFORE_CLOSED"),
+                        self.catch.index("clearInterval(pollInterval)"),
+                        "опрос останавливается раньше, чем мы убедились, что сервера нет")
+
+    def test_a_successful_poll_resets_the_failures(self):
+        self.assertIn("statusFailures = 0;", self.body,
+                      "после удачного опроса счётчик неудач не сбрасывается")
+
+    def test_a_bad_answer_is_not_read_as_if_it_were_json(self):
+        self.assertIn("if (!r.ok) throw new Error", self.body,
+                      "ответ 500 в виде HTML снова выдаст себя за закрытый театр")
+
+
 # ---------------------------------------------------------------- страница
 
 class TestOfflinePage(unittest.TestCase):

@@ -1513,7 +1513,15 @@ HTML_TEMPLATE = """
         }
         
         let statusRequestInFlight = false;
-        
+
+        // Сколько подряд неудачных опросов считать закрытием театра. Одна неудача не
+        // значит ничего: так рвётся и закрытое keep-alive соединение, и ответ
+        // занятого сервера — в том числе в момент, когда начинается спектакль
+        // и модель грузится в память. Раньше первая же неудача объявляла «Театр
+        // закрыт» и глушила опрос: спектакль шёл, а лента замирала навсегда.
+        const STATUS_FAILURES_BEFORE_CLOSED = 5;
+        let statusFailures = 0;
+
         function updatePosts() {
             // Опрос и событие Socket.IO могут сработать одновременно, а запрос несёт
             // lastPostCount: два параллельных ответа добавили бы один пост дважды.
@@ -1521,7 +1529,13 @@ HTML_TEMPLATE = """
             if (statusRequestInFlight) return;
             statusRequestInFlight = true;
             
-            fetch(`/api/status?lastPostCount=${lastPostCount}`, {cache: 'no-store'}).then(r => r.json()).then(data => {
+            fetch(`/api/status?lastPostCount=${lastPostCount}`, {cache: 'no-store'})
+            // Если сервер ответил не JSON, сказать об этом честно: без этой проверки
+            // ошибка выглядела бы как «не удалось прочитать ответ» — и снова
+            // выдавала себя за закрытый театр
+            .then(r => { if (!r.ok) throw new Error(`сервер ответил ${r.status}`); return r.json(); })
+            .then(data => {
+                statusFailures = 0;
                 // Сессия сменилась на сервере — сбросить локальный UI.
                 if (data.session_id) {
                     if (mySessionId === null) {
@@ -1585,9 +1599,12 @@ HTML_TEMPLATE = """
                 // их раз в 30 секунд, а не на каждом опросе
                 if (instructionsTick++ % 10 === 0) updateSidebarParticipants();
             }).catch(err => {
-                console.error('Ошибка обновления статуса:', err);
-                // Если сервер недоступен — значит он остановлен
-                // Обновляем статус и скрываем кнопку выхода
+                statusFailures++;
+                console.error(`Ошибка обновления статуса (${statusFailures} подряд):`, err);
+                // Ниже — поведение для случая, когда связь пропала надолго: без этой
+                // проверки любая случайная неудача выглядела как закрытый театр
+                if (statusFailures < STATUS_FAILURES_BEFORE_CLOSED) return;
+                // Похоже, театр и правда закрыт: показываем это и скрываем кнопку выхода
                 const statusDiv = document.getElementById('statusBar');
                 statusDiv.style.display = 'block';
                 statusDiv.classList.remove('active');
@@ -1596,7 +1613,8 @@ HTML_TEMPLATE = """
                 const exitBtn = document.querySelector('.footer .btn');
                 if (exitBtn) exitBtn.style.display = 'none';
                 
-                // Останавливаем polling чтобы не спамить ошибками
+                // Опрос останавливаем только убедившись, что сервера нет, а не после
+                // первой же пустой попытки: иначе лента замолкала на весь спектакль
                 if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
             })
             .finally(() => { statusRequestInFlight = false; });

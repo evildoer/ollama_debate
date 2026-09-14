@@ -125,6 +125,11 @@ BUGS = {
          "    if not ROLE_OPTIONS.get(role):\n"
          "        return"),
     ],
+    "одна пустая ошибка связи снова закрывает театр": [
+        ("aitheatre/page.py",
+         "                if (statusFailures < STATUS_FAILURES_BEFORE_CLOSED) return;",
+         "                if (statusFailures < 999) return;"),
+    ],
     "в разметку карточки подставляется имя, которого в странице нет": [
         ("aitheatre/page.py",
          "                const roleOptionsBlock = roleOptionKeys.length === 0 ? '' : ''",
