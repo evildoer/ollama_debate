@@ -104,12 +104,17 @@ else:
 # ║                    НАСТРОЙКИ УЧАСТНИКОВ                  ║
 # ╚══════════════════════════════════════════════════════════╝
 
+# Характер участника (температура и прочие параметры генерации) здесь больше не
+# вписан жёстко: при подъёме занавеса он разыгрывается случайно, чтобы каждый
+# спектакль был с новыми характерами (см. RANDOMIZE_CHARACTERS, CHARACTER_PRESETS).
+# Нужно зафиксировать конкретному персонажу температуру - допишите её прямо сюда:
+# явно заданные параметры важнее случайного розыгрыша.
 PARTICIPANTS = [
-    {"model": "r1", "temperature": 1.0},   # креативный — чаще отклоняется от темы
-    {"model": "g1", "temperature": 1.9},   # сбалансированный
-    {"model": "q1", "temperature": 0.1},   # строгий аналитик
+    {"model": "r1"},   # креативный — чаще отклоняется от темы
+    {"model": "g1"},   # сбалансированный
+    {"model": "q1"},   # строгий аналитик
     {"model": "human"},  # НЕ Модератор (вы)
-    {"model": "q1", "is_judge": True, "temperature": 0.1},  # судья-формалист
+    {"model": "q1", "is_judge": True},  # судья-формалист
     {"model": "human", "is_moderator": True},  # Модератор (вы)
 ]
 
@@ -126,6 +131,129 @@ PER_PARTICIPANT_OPTION_KEYS = (
     "frequency_penalty", # снижает вероятность частых токенов
     "seed",              # для воспроизводимости
 )
+
+# ── ХАРАКТЕРЫ ──────────────────────────────────────────────────────────────
+# «Характер» — готовый набор параметров генерации. Числа управляют не смыслом
+# реплик (его задаёт личная инструкция участника), а тем, КАК он говорит:
+# предсказуемо или вразнос, повторяется ли, спорит ли с уже сказанным.
+# Список один на всех: его показывает пульт в поле «Характер», и он же используется
+# при случайном розыгрыше характеров на новый спектакль.
+#
+# params  — базовые значения (уходят в Ollama как options участника);
+# think   — режим размышлений: off (отвечает сразу) или auto (как ENABLE_THINKING);
+# drift   — насколько случайно сдвинуть числа при розыгрыше (иначе у всех
+#           «Педантов» были бы побайтово одинаковые настройки).
+CHARACTER_PRESETS = {
+    # Пустой характер: числа участник задаёт сам в «Тонкой настройке»
+    "custom": {
+        "label": "🎚 Свой — сам выберу", "group": "manual",
+        "hint": "числа выставляются вручную в «Тонкой настройке»",
+        "params": {}, "think": "auto", "drift": {},
+    },
+
+    # ── Уравновешенные ──────────────────────────────────────────────
+    "pedant": {
+        "label": "⚖️ Педант", "group": "balanced",
+        "hint": "сухо и по делу, минимум фантазии, без размышлений",
+        "params": {"temperature": 0.2, "top_p": 0.5, "repeat_penalty": 1.10,
+                   "presence_penalty": 0.05, "frequency_penalty": 0.05},
+        "think": "off",
+    },
+    "analyst": {
+        "label": "🧠 Аналитик", "group": "balanced",
+        "hint": "строго, но с обоснованием каждого шага",
+        "params": {"temperature": 0.4, "top_p": 0.8, "repeat_penalty": 1.15,
+                   "presence_penalty": 0.3, "frequency_penalty": 0.2},
+        "think": "auto",
+    },
+    "talker": {
+        "label": "💬 Собеседник", "group": "balanced",
+        "hint": "живая речь, средняя свобода, тянет диалог",
+        "params": {"temperature": 0.9, "top_p": 0.9, "repeat_penalty": 1.10,
+                   "presence_penalty": 0.4, "frequency_penalty": 0.3},
+        "think": "auto",
+    },
+    "seeker": {
+        "label": "🔎 Дотошный", "group": "balanced",
+        "hint": "жёстко против повторов: всё время новая грань темы",
+        "params": {"temperature": 0.55, "top_p": 0.7, "repeat_penalty": 1.35,
+                   "presence_penalty": 0.9, "frequency_penalty": 0.7},
+        "think": "auto",
+    },
+    "dreamer": {
+        "label": "🎭 Фантазёр", "group": "balanced",
+        "hint": "неожиданные связи, логика на втором плане",
+        "params": {"temperature": 1.25, "top_p": 0.95, "repeat_penalty": 1.15,
+                   "presence_penalty": 0.6, "frequency_penalty": 0.5},
+        "think": "off",
+    },
+    "brawler": {
+        "label": "🔥 Провокатор", "group": "balanced",
+        "hint": "резко, с наездом, лишь бы не повторяться",
+        "params": {"temperature": 1.45, "top_p": 0.9, "repeat_penalty": 1.2,
+                   "presence_penalty": 0.7, "frequency_penalty": 0.6},
+        "think": "off",
+    },
+
+    # ── С перекосом ─────────────────────────────────────────────────
+    "stoic": {
+        "label": "🧊 Стоик", "group": "extreme",
+        "hint": "почти детерминизм: одна и та же мысль, но ровно сформулирована",
+        "params": {"temperature": 0.0, "top_p": 0.25, "repeat_penalty": 1.05,
+                   "presence_penalty": 0.0, "frequency_penalty": 0.0},
+        "think": "off",
+    },
+    "minimal": {
+        "label": "🤫 Минималист", "group": "extreme",
+        "hint": "короткие реплики, ни одного лишнего слова",
+        "params": {"temperature": 0.25, "top_p": 0.45, "repeat_penalty": 1.30,
+                   "presence_penalty": 0.2, "frequency_penalty": 0.15},
+        "think": "off",
+    },
+    "scholar": {
+        "label": "📚 Энциклопедист", "group": "extreme",
+        "hint": "самый жёсткий штраф за повторы: каждый раз новый факт",
+        "params": {"temperature": 0.3, "top_p": 0.6, "repeat_penalty": 1.45,
+                   "presence_penalty": 0.6, "frequency_penalty": 0.5},
+        "think": "auto",
+    },
+    "mystic": {
+        "label": "🔮 Мистик", "group": "extreme",
+        "hint": "образно и туманно, смысл приходится вычитывать",
+        "params": {"temperature": 1.55, "top_p": 0.97, "repeat_penalty": 1.25,
+                   "presence_penalty": 0.8, "frequency_penalty": 0.5},
+        "think": "auto",
+    },
+    "poet": {
+        "label": "🎨 Поэт", "group": "extreme",
+        "hint": "за гранью рабочей температуры: метафоры важнее тезисов",
+        "params": {"temperature": 1.65, "top_p": 0.98, "repeat_penalty": 1.10,
+                   "presence_penalty": 0.7, "frequency_penalty": 0.4},
+        "think": "off",
+    },
+    "gambler": {
+        "label": "🎲 Игрок", "group": "extreme",
+        "hint": "почти без отсечения хвоста: текст на грани связности",
+        "params": {"temperature": 1.8, "top_p": 0.99, "repeat_penalty": 1.05,
+                   "presence_penalty": 0.9, "frequency_penalty": 0.6},
+        "think": "off",
+    },
+    "chaos": {
+        "label": "🌀 Хаос", "group": "extreme",
+        "hint": "у самого предела: смысл держится чудом (для эксперимента)",
+        "params": {"temperature": 2.0, "top_p": 1.0, "repeat_penalty": 1.0,
+                   "presence_penalty": 1.5, "frequency_penalty": 1.2},
+        "think": "off", "drift": {},
+    },
+}
+
+# Разыгрывать характер заново на каждый спектакль (иначе берётся из PARTICIPANTS)
+RANDOMIZE_CHARACTERS = True
+# Судье случайный характер не достаётся: он должен судить одинаково строго
+JUDGE_CHARACTER = "pedant"
+# Насколько числа могут отклониться от базовых при розыгрыше (см. CHARACTER_PRESETS)
+CHARACTER_DRIFT = {"temperature": 0.12, "top_p": 0.05, "repeat_penalty": 0.04,
+                   "presence_penalty": 0.1, "frequency_penalty": 0.1}
 
 # ╔══════════════════════════════════════════════════════════╗
 # ║                    ДРУГИЕ НАСТРОЙКИ                      ║
@@ -215,7 +343,7 @@ DEFAULT_STATIC_INSTRUCTIONS = [
     'Ты — {ИМЯ}, участник живого обсуждения. Тема: "{ТЕМА}".',
     'Твои собеседники: {СОБЕСЕДНИКИ}. {ИМЯ} — это ты; обращайся к ним по именам.',
     'Если среди участников есть МОДЕРАТОР (ведущий обсуждения) — следуй его указаниям беспрекословно.',
-    'Отвечай на последние реплики, а не на тему вообще: согласись, возразь, уточни или задай вопрос конкретному собеседнику.',
+    'Отвечай на последние реплики, а не на тему вообще: согласись, возрази, уточни или задай вопрос конкретному собеседнику.',
     'НЕ ПОВТОРЯЙ то, что уже говорил ты сам или другие. Каждая реплика должна добавлять НОВОЕ: аргумент, пример, цифру, возражение или вывод.',
     'Развивай тему: предлагай новые аспекты, ставь сказанное под сомнение, ищи неочевидные связи и следствия.',
     'Говори о себе в первом лице (я, мне, моё); свои действия описывай в *звёздочках*.',
@@ -274,14 +402,29 @@ FEMALE_NAMES = [
     "Варвара", "Галина", "Диана", "Елизавета", "Кристина"
 ]
 
-AVATAR_EMOJIS = [
-    "🎭", "🎪", "🎨", "🎬", "🎯", "🎲", "🎸", "🎺",
-    "🦊", "🐺", "🦁", "🐯", "🦅", "🐉", "🦄", "🐙",
-    "🧙", "🧝", "🧛", "🧜", "🧚", "🦹", "🦸", "🥷",
-    "👨‍🎓", "👩‍🎓", "👨‍🔬", "👩‍🔬", "👨‍🎨", "👩‍🎨",
-    "👨‍💻", "👩‍💻", "👨‍🚀", "👩‍🚀", "🕵️", "👮",
-    "🤴", "👸", "🤵", "👰", "🧑‍🎤", "🧑‍🚀"
+# Эмодзи-аватары разложены по полу: грим должен совпадать с полом участника,
+# иначе получались «русалки по имени Роман». Нейтральные (театр, звери, предметы)
+# подходят любому и добирают нехватку внутри одного спектакля.
+AVATAR_EMOJIS_MALE = [
+    "👨‍🎓", "👨‍🔬", "👨‍🎨", "👨‍💻", "👨‍🚀", "👨‍🏫", "👨‍🍳", "👨‍✈️",
+    "👨‍⚕️", "👨‍🌾", "👨‍💼", "👨‍🎤", "👨‍🚒", "👨‍🔧", "👨‍⚖️", "🤵",
+    "🤴", "🧔", "🥷", "🧙‍♂️", "🧛‍♂️", "🦸‍♂️", "🦹‍♂️", "🕵️‍♂️",
 ]
+
+AVATAR_EMOJIS_FEMALE = [
+    "👩‍🎓", "👩‍🔬", "👩‍🎨", "👩‍💻", "👩‍🚀", "👩‍🏫", "👩‍🍳", "👩‍✈️",
+    "👩‍⚕️", "👩‍🌾", "👩‍💼", "👩‍🎤", "👩‍🚒", "👩‍🔧", "👩‍⚖️", "👰",
+    "👸", "💃", "🧜‍♀️", "🧚‍♀️", "🧙‍♀️", "🧛‍♀️", "🦸‍♀️", "🦹‍♀️",
+]
+
+AVATAR_EMOJIS_NEUTRAL = [
+    "🎭", "🎪", "🎨", "🎬", "🎯", "🎲", "🎸", "🎺",
+    "🔮", "📚", "🕯️", "🦊", "🐺", "🦁", "🐯", "🦅",
+    "🐉", "🦄", "🐙", "🦉",
+]
+
+# Все вместе - запасной список, если пол почему-то не указан
+AVATAR_EMOJIS = AVATAR_EMOJIS_MALE + AVATAR_EMOJIS_FEMALE + AVATAR_EMOJIS_NEUTRAL
 
 PROFESSIONS = [
     "философ", "учёный", "писатель", "художник", "музыкант",
@@ -1681,13 +1824,24 @@ class DebateSession:
             })
         return post
 
-    def current_participant_is_moderator(self) -> bool:
+    def current_participant_role(self) -> str:
+        """Роль того, кто сейчас говорит: пустая строка, "moderator" или "judge".
+
+        Интерфейс показывает имя всегда, а роль - только если она особенная.
+        """
         if not (self.waiting_for_human and self.current_participant):
-            return False
-        return any(
-            p["display_name"] == self.current_participant and p.get("is_moderator", False)
-            for p in self.runtime_participants
-        )
+            return ""
+        for p in self.runtime_participants:
+            if p.get("display_name") != self.current_participant:
+                continue
+            if p.get("is_moderator"):
+                return "moderator"
+            if p.get("is_judge"):
+                return "judge"
+        return ""
+
+    def current_participant_is_moderator(self) -> bool:
+        return self.current_participant_role() == "moderator"
 
     # ------------------------------------------------------------
     # Свежий буст модератора
@@ -1988,17 +2142,57 @@ class DebateSession:
         return response, search_count, search_queries
 
 
+def _clamp_option(key: str, value):
+    """Не даёт случайному разбросу выйти за допустимые пределы параметра."""
+    if key == "temperature":
+        return round(min(2.0, max(0.0, value)), 2)
+    if key in ("top_p", "min_p"):
+        return round(min(1.0, max(0.0, value)), 2)
+    if key == "top_k":
+        return max(1, int(value))
+    if key == "seed":
+        return int(value)
+    return round(max(0.0, value), 2)  # repeat/presence/frequency_penalty
+
+
+def draw_character(used: set = None) -> str:
+    """Случайный характер для нового спектакля (без «custom» и без повторов)."""
+    keys = [k for k, v in CHARACTER_PRESETS.items() if k != "custom" and v.get("params")]
+    if not keys:
+        return JUDGE_CHARACTER
+    used = used or set()
+    free = [k for k in keys if k not in used]
+    return random.choice(free or keys)
+
+
+def character_parameters(key: str) -> tuple:
+    """Параметры и режим размышлений для характера: базовые значения плюс разброс.
+
+    Разброс нужен, чтобы два «Педанта» в разных спектаклях всё же отличались.
+    """
+    preset = CHARACTER_PRESETS.get(key) or CHARACTER_PRESETS[JUDGE_CHARACTER]
+    drift = preset.get("drift", CHARACTER_DRIFT)
+    params = {}
+    for param, base in (preset.get("params") or {}).items():
+        step = drift.get(param, 0)
+        value = base + random.uniform(-step, step) if step else base
+        params[param] = _clamp_option(param, value)
+    return params, preset.get("think", "auto")
+
+
 def build_new_cast() -> list:
     """
-    Состав спектакля: роли и модели из PARTICIPANTS, новые имена, эмодзи и ключевые
-    слова для аватара. Личные параметры генерации (температура и прочее из
-    PARTICIPANTS) едут в том же словаре - иначе они до модели не доходили.
+    Состав спектакля: роли и модели из PARTICIPANTS, новые имена, эмодзи по полу
+    и ключевые слова для аватара. Характер (температура и прочие параметры) либо
+    берётся из PARTICIPANTS, либо разыгрывается случайно - см. RANDOMIZE_CHARACTERS.
     """
     cast = []
     available_male_names = MALE_NAMES.copy()
     available_female_names = FEMALE_NAMES.copy()
-    available_emojis = AVATAR_EMOJIS.copy()
+    available_emojis = (AVATAR_EMOJIS_MALE + AVATAR_EMOJIS_FEMALE
+                        + AVATAR_EMOJIS_NEUTRAL)
     available_professions = PROFESSIONS.copy()
+    used_characters = set()
 
     for template in PARTICIPANTS:
         gender = random.choice(["male", "female"])
@@ -2023,9 +2217,15 @@ def build_new_cast() -> list:
             else:
                 name = "Участник"
 
-        if available_emojis:
-            emoji = random.choice(available_emojis)
-            available_emojis.remove(emoji)
+        # Эмодзи по полу: сначала свои, потом нейтральные; в одном спектакле
+        # два одинаковых аватара не встречаются
+        own_pool = AVATAR_EMOJIS_MALE if gender == "male" else AVATAR_EMOJIS_FEMALE
+        for pool in (own_pool, AVATAR_EMOJIS_NEUTRAL, available_emojis, AVATAR_EMOJIS):
+            free = [e for e in pool if e in available_emojis]
+            if free:
+                emoji = random.choice(free)
+                available_emojis.remove(emoji)
+                break
         else:
             emoji = "📣"
 
@@ -2035,10 +2235,14 @@ def build_new_cast() -> list:
         else:
             profession = "человек"
 
+        # Ключевые слова для поиска аватара: с полом, иначе поисковик охотно
+        # отдаёт женщине «мужчину-геолога»
+        gender_word = "женщина" if gender == "female" else "мужчина"
+
         entry = {
             "model": template["model"],
             "display_name": name,
-            "avatar_keywords": profession,
+            "avatar_keywords": f"{profession} {gender_word}",
             "avatar_emoji": emoji,
             "avatar_url": None,
             "gender": gender,
@@ -2046,15 +2250,27 @@ def build_new_cast() -> list:
             "is_judge": template.get("is_judge", False),
             "instruction": DEFAULT_JUDGE_INSTRUCTION if template.get("is_judge") else "",
         }
-        # Персональные параметры генерации из PARTICIPANTS (temperature и другие)
-        for key in PER_PARTICIPANT_OPTION_KEYS:
-            if template.get(key) is not None:
-                entry[key] = template[key]
-        # Режим размышлений и «характер» тоже можно задать в PARTICIPANTS
+
+        # Персональные параметры и режим размышлений из PARTICIPANTS: то, что задано
+        # в конфиге, важнее случайного розыгрыша
+        own_params = {key: template[key] for key in PER_PARTICIPANT_OPTION_KEYS
+                      if template.get(key) is not None}
+        entry.update(own_params)
         if template.get("think") in THINK_MODES and template.get("think") != "auto":
             entry["think"] = template["think"]
         if isinstance(template.get("preset"), str) and template["preset"]:
             entry["preset"] = template["preset"]
+
+        # Характер на этот спектакль: у судьи он всегда один и тот же
+        elif RANDOMIZE_CHARACTERS and template.get("model") != "human" and not own_params:
+            character = JUDGE_CHARACTER if template.get("is_judge") else draw_character(used_characters)
+            used_characters.add(character)
+            params, think = character_parameters(character)
+            entry.update(params)
+            entry["preset"] = character
+            if think != "auto":
+                entry["think"] = think
+
         cast.append(entry)
 
     return cast
@@ -2341,7 +2557,9 @@ HTML_TEMPLATE = """
         .header-date { font-size: 14px; letter-spacing: 1px; margin-bottom: 20px; text-transform: uppercase; }
         .header h1 { font-family: Georgia, serif; font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
         .header-subtitle { font-size: 16px; font-style: italic; font-weight: normal; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
-        .header-topic { font-size: 24px; font-weight: bold; color: #000000; margin-top: 20px; padding: 20px; border: 2px solid #000000; text-align: center; line-height: 1.4; min-height: 60px; white-space: pre-wrap; word-wrap: break-word; }
+        /* Тема — обычный текст по левому краю: её часто пишут пунктами,
+           а по центру многострочный список нечитаем */
+        .header-topic { font-size: 19px; font-weight: normal; color: #000000; margin-top: 20px; padding: 24px 28px; border: 2px solid #000000; text-align: left; line-height: 1.7; min-height: 60px; white-space: pre-wrap; word-wrap: break-word; }
         .card { background: #ffffff; border: none; border-top: 1px solid #000000; border-bottom: 1px solid #000000; padding: 30px 0; margin-bottom: 40px; }
         .card h2 { font-family: Georgia, serif; font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
         .participants-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px; margin-bottom: 30px; }
@@ -2369,6 +2587,17 @@ HTML_TEMPLATE = """
         .panel-heading .num { font-family: 'Courier New', monospace; font-size: 13px; color: #999999; letter-spacing: 1px; }
         .panel-heading .name { font-size: 14px; text-transform: uppercase; letter-spacing: 2px; }
         .panel-note { font-size: 12px; color: #666666; line-height: 1.55; margin-bottom: 14px; }
+        /* Поле сюжета: раньше было неотличимо от подписи — теперь заметное и на вырост */
+        .topic-input { display: block; width: 100%; min-height: 170px; box-sizing: border-box; padding: 16px 18px; border: 1px solid #000000; font-family: Georgia, serif; font-size: 17px; line-height: 1.7; color: #000000; resize: vertical; }
+        .topic-input:focus { outline: none; border: 2px solid #000000; }
+        /* Разделы пульта сворачиваются: на ходу целый состав занимает экран зря */
+        .panel-heading { cursor: pointer; user-select: none; }
+        .panel-heading:hover .name { text-decoration: underline; }
+        .panel-heading .caret { margin-left: auto; font-size: 12px; color: #888888; }
+        .panel-body.collapsed { display: none; }
+        /* Ключевые слова аватара и кнопка поиска — одной строкой, рядом с аватаром */
+        .keyword-row { display: flex; gap: 10px; align-items: stretch; }
+        .keyword-row input { flex: 1; min-width: 0; }
         .status-bar { background: #ffffff; border: none; border-left: 3px solid #000000; color: #000000; padding: 15px 20px; font-size: 16px; margin-bottom: 20px; font-style: italic; line-height: 1.6; }
         .status-bar.active { border-left: 4px solid #000000; }
         .post { background: #ffffff; border: none; border-top: 1px solid #000000; padding: 40px 0; margin-bottom: 0; display: flex; gap: 30px; }
@@ -2425,6 +2654,74 @@ HTML_TEMPLATE = """
         .modal-content { margin: auto; display: block; max-width: 90%; max-height: 90%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 1px solid #000000; filter: grayscale(100%); }
         .modal-close { position: absolute; top: 20px; right: 40px; color: white; font-size: 40px; font-weight: bold; cursor: pointer; }
         .footer { text-align: center; color: #000000; padding: 30px 0; font-size: 14px; border-top: 1px solid #000000; margin-top: 40px; font-style: italic; letter-spacing: 1px; }
+        /* Нулевой раздел (готовность): метка о проблемах видна и в свёрнутом виде */
+        .ready-badge { margin-left: 8px; font-size: 11px; font-weight: bold; letter-spacing: 1px; color: #b00020; }
+        /* Пояснение вместо поля реплики, когда не ваша очередь: блок остаётся на месте */
+        .turn-note { font-size: 13px; font-style: italic; color: #666666; padding: 2px 0 4px 0; line-height: 1.6; }
+        /* Числовые поля параметров: пустое поле серое, заполненное — чёрное */
+        .param-input { border: 1px solid #cccccc; }
+        .param-input:not(.filled) { color: #555555; }
+        .param-input.filled { border-color: #000000; color: #000000; }
+
+        /* ══ Тёмная сцена ═══════════════════════════════════════════════
+           Класс dark на body перекрашивает интерфейс: чёрные элементы (рамки,
+           заголовки, карточки) становятся светлыми, чтобы быть видными на
+           тёмном фоне. Часть цветов интерфейс ставит инлайном — их приходится
+           перебивать, поэтому дальше встречается !important. */
+        body.dark { background: #0d0d0d; color: #e8e8e8; color-scheme: dark; }
+        body.dark .sidebar, body.dark .header, body.dark .card, body.dark .post,
+        body.dark .footer, body.dark .modal-content { background: #141414; border-color: #3a3a3a; }
+        body.dark .header h1, body.dark .card h2, body.dark .header-subtitle, body.dark .header-date,
+        body.dark .sidebar-title, body.dark .post-author, body.dark .post-text, body.dark .post-model,
+        body.dark .post-time, body.dark .header-topic, body.dark .search-info, body.dark .footer,
+        body.dark .panel-heading .name, body.dark .status-bar, body.dark .btn { color: #e8e8e8; }
+        body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
+        body.dark .footer, body.dark .sidebar, body.dark .search-info, body.dark .post-header { border-color: #3a3a3a; }
+        body.dark input, body.dark textarea, body.dark select { background: #1c1c1c !important; color: #e8e8e8 !important; border-color: #5a5a5a !important; }
+        body.dark input::placeholder, body.dark textarea::placeholder { color: #7d7d7d !important; }
+        body.dark .btn-primary { background: #e8e8e8; color: #111111; }
+        body.dark .btn-primary:hover { background: #cfcfcf; }
+        body.dark .btn-secondary { background: #1c1c1c; color: #e8e8e8; }
+        body.dark .btn-secondary:hover { background: #272727; }
+        body.dark .avatar-preview, body.dark .post-avatar .emoji { background: #141414; border-color: #3a3a3a; }
+        body.dark .avatar-preview:hover { border-color: #9a9a9a; }
+        body.dark .post-avatar img, body.dark .avatar-preview img { filter: grayscale(100%) brightness(0.82); }
+        body.dark .status-bar { border-left-color: #e8e8e8; }
+        body.dark .post-text code { background: #1c1c1c; border-color: #4a4a4a; }
+        body.dark .role-participant { background: #12283a; color: #79b8ff; border-color: #2f5a80; }
+        body.dark .role-moderator { background: #33260f; color: #ffb066; border-color: #7a5520; }
+        body.dark .role-judge { background: #281735; color: #c79ae0; border-color: #6a3f8a; }
+        body.dark .param-input { border-color: #5a5a5a; }
+        body.dark .param-input:not(.filled) { color: #a0a0a0; }
+        body.dark .param-input.filled { border-color: #cfcfcf; color: #e8e8e8; }
+        body.dark .turn-note { color: #a0a0a0; }
+        body.dark .ready-badge { color: #ff6b6b; }
+        body.dark .panel-note { color: #a3a3a3; }
+        body.dark .btn { border-color: #6f6f6f; }
+        /* Эти блоки интерфейс переключает через style.display, а браузер при этом
+           переписывает весь атрибут style и превращает #666 в rgb(102,102,102),
+           так что по аттрибуту их уже не поймать — красим по id */
+        body.dark #modelsWarning { border-color: #ff6b6b !important; color: #ff8a8a !important; }
+        body.dark #vramWarning { border-color: #e8c56b !important; color: #e8c56b !important; }
+        body.dark #readyOk { color: #a3a3a3 !important; }
+        /* Инлайновые плашки и пояснения внутри пульта */
+        body.dark [style*="#ffffff"], body.dark [style*="#fafafa"],
+        body.dark [style*="#f9f9f9"], body.dark [style*="#f5f5f5"] { background: #181818 !important; }
+        body.dark [style*="#cccccc"], body.dark [style*="#ddd"] { border-color: #3a3a3a !important; }
+        body.dark [style*="border:1px solid #000"], body.dark [style*="border:2px solid #000"],
+        body.dark [style*="border:1px dashed #000"] { border-color: #6f6f6f !important; }
+        body.dark [style*="border:1px solid #7b1fa2"] { border-color: #a06fc0 !important; }
+        body.dark [style*="color:#666"], body.dark [style*="color:#555"],
+        body.dark [style*="color:#888"] { color: #a3a3a3 !important; }
+        body.dark [style*="color:#999"] { color: #8c8c8c !important; }
+        body.dark [style*="color:#333"] { color: #c9c9c9 !important; }
+        body.dark [style*="color:#b00020"] { color: #ff6b6b !important; }
+        body.dark [style*="border:2px solid #b00020"] { border-color: #ff6b6b !important; }
+        body.dark [style*="border:2px solid #b8860b"] { border-color: #e8c56b !important; }
+        body.dark [style*="color:#b8860b"], body.dark [style*="color:#8a6d00"] { color: #e8c56b !important; }
+        body.dark [style*="color:#7b1fa2"] { color: #c79ae0 !important; }
+        body.dark [style*="color:#1976d2"] { color: #79b8ff !important; }
+        body.dark [style*="color:#f57c00"] { color: #ffb066 !important; }
     </style>
 </head>
 <body>
@@ -2444,26 +2741,38 @@ HTML_TEMPLATE = """
                 <div class="card" id="controlPanel">
                     <h2 id="controlPanelTitle">Режиссёрский пульт</h2>
 
-                    <!-- Предупреждения о готовности: показываются, когда спектакль не начнётся
-                         или пойдёт медленнее (текст подставляет JS) -->
-                    <div id="modelsWarning" style="display:none;margin:0 0 20px 0;padding:14px 16px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
-                    <div id="vramWarning" style="display:none;margin:0 0 20px 0;padding:14px 16px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
+                    <!-- Нулевой раздел: готовность к спектаклю. Раскрывается сам, когда
+                         есть о чём предупредить, и сворачивается, когда всё в порядке -->
+                    <div class="panel-section" id="sec-ready">
+                        <div class="panel-heading"><span class="num">00</span><span class="name">Готовность</span><span class="ready-badge" id="readyBadge"></span></div>
+                        <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+                            <button class="btn btn-secondary" onclick="checkReadiness()" style="padding:6px 15px;font-size:13px;margin:0;">🔄 Проверить сейчас</button>
+                            <span style="font-size:12px;color:#666;">Проверка идёт при загрузке страницы и при правках состава</span>
+                        </div>
+                        <div id="readyOk" style="font-size:13px;color:#666;font-style:italic;">Проверка ещё не проходила.</div>
+                        <div id="modelsWarning" style="display:none;margin:0 0 14px 0;padding:14px 16px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
+                        <div id="vramWarning" style="display:none;margin:0;padding:14px 16px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
+                    </div>
 
                     <div class="panel-section">
                         <div class="panel-heading"><span class="num">01</span><span class="name">Сюжет</span></div>
                         <div class="panel-note">Тема попадает в системные промпты следующих реплик. Менять можно и до спектакля, и на ходу.</div>
-                        <textarea id="topicInput" rows="3" placeholder="Опишите сюжет сцены..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); applyTopic(); }"></textarea>
+                        <textarea id="topicInput" class="topic-input" rows="7" placeholder="Тема одной строкой или с пунктами — переносы строк сохраняются. Ctrl+Enter — применить." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); applyTopic(); }"></textarea>
                         <div style="margin-top:10px;">
                             <button class="btn btn-secondary" onclick="applyTopic()">🎯 Применить тему</button>
                             <span style="font-size:12px;color:#666;">Ctrl+Enter — применить не отрывая рук</span>
                         </div>
                     </div>
 
-                    <div class="panel-section">
+                    <div class="panel-section" id="sec-cast">
                         <div class="panel-heading"><span class="num">02</span><span class="name">Состав</span></div>
-                        <div class="panel-note">Имена, пол, модели и параметры генерации. Правки действуют сразу: до спектакля — на заготовку, на ходу — на будущие реплики (уже сказанное не меняется).</div>
+                        <div class="panel-note">Имена, пол, модели и параметры генерации. Правки действуют сразу: до спектакля — на заготовку, на ходу — на будущие реплики (уже сказанное не меняется). Характер (температура и прочее) на каждый спектакль разыгрывается случайно.</div>
                         <div id="castEditor"></div>
-                        <button class="btn btn-secondary" onclick="saveCast()" style="margin-top:6px;">💾 Применить состав</button>
+                        <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-top:6px;">
+                            <button class="btn btn-secondary" onclick="saveCast()" style="margin:0;">💾 Применить состав</button>
+                            <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику, кроме судьи (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
+                            <span id="randomizeHint" style="font-size:12px;color:#666;"></span>
+                        </div>
                     </div>
 
                     <div class="panel-section">
@@ -2507,13 +2816,19 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
 
-                    <div class="panel-section" id="turnSection" style="display:none;">
+                    <!-- Блок «Ваша реплика» всегда на месте: раньше он исчезал, и нумерация
+                         разделов прыгала с 03 сразу на 05. Меняется только содержимое —
+                         поле реплики или пояснение, почему его сейчас нет -->
+                    <div class="panel-section" id="turnSection">
                         <div class="panel-heading"><span class="num">04</span><span class="name" id="turnTitle">Ваша реплика</span></div>
-                        <div class="panel-note">Пустое сообщение = пропуск действия. Ctrl+Enter — отправить.</div>
-                        <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
-                        <div style="display:flex; gap:15px; align-items:center;">
-                            <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
-                            <span style="font-size:12px;color:#666;font-style:italic;">Реплика станет постом от вашего имени</span>
+                        <div id="turnNote" class="turn-note">Спектакль ещё не начат — поле появится, когда очередь дойдёт до вас.</div>
+                        <div id="turnComposer" style="display:none;">
+                            <div class="panel-note">Пустое сообщение = пропуск действия. Ctrl+Enter — отправить.</div>
+                            <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
+                            <div style="display:flex; gap:15px; align-items:center;">
+                                <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
+                                <span style="font-size:12px;color:#666;font-style:italic;">Реплика станет постом от вашего имени</span>
+                            </div>
                         </div>
                     </div>
 
@@ -2529,6 +2844,7 @@ HTML_TEMPLATE = """
                 </div>
                 <div id="posts"></div>
                 <div class="footer">
+                    <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
                     <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
             </div>
@@ -2586,6 +2902,9 @@ HTML_TEMPLATE = """
         // повторялся после удаления строки выше, и ❌ у новой строки удалял чужую
         let editorRowSeq = 0;
         
+        // Разделы пульта сворачиваются со заголовка: обёртки расставляет этот вызов
+        decoratePanelSections();
+
         // Состав и список моделей
         loadCast().then(() => { updatePanel(); updateSidebarParticipants(); tryRestoreSession(); });
         fetch('/api/models')
@@ -2603,9 +2922,18 @@ HTML_TEMPLATE = """
                 .then(r => r.json())
                 .then(data => {
                     cast = data.participants || [];
+                    // Список характеров держит сервер: тот же набор он разыгрывает
+                    // случайно при подъёме занавеса
+                    if (data.characters) CHARACTERS = data.characters;
                     renderCastEditor();
                     renderModelsWarning(data.models_status);
                     renderVramWarning(data.vram_status);
+                    syncReadinessSection();
+                    const hint = document.getElementById('randomizeHint');
+                    if (hint) {
+                        hint.textContent = data.randomize_characters
+                            ? 'на каждый спектакль характеры тянутся заново' : '';
+                    }
                     if (data.topic) document.getElementById('topicInput').value = data.topic;
                     return data;
                 })
@@ -2661,24 +2989,16 @@ HTML_TEMPLATE = """
         // «Характер» — готовые наборы параметров генерации. Числа управляют не смыслом
         // реплик (его задаёт личная инструкция), а тем, насколько участник предсказуем,
         // склонен повторяться и размышляет ли перед ответом.
-        const PRESETS = {
-            custom:  {label: '🎚 Свой — сам выберу', hint: 'числа не трогаются'},
-            pedant:  {label: '⚖️ Педант', hint: 'предсказуемо, по делу, без размышлений',
-                      params: {temperature: 0.2, top_p: 0.5, repeat_penalty: 1.10,
-                               presence_penalty: 0.05, frequency_penalty: 0.05, think: 'off'}},
-            analyst: {label: '🧠 Аналитик', hint: 'строго, но с обоснованием',
-                      params: {temperature: 0.4, top_p: 0.8, repeat_penalty: 1.15,
-                               presence_penalty: 0.3, frequency_penalty: 0.2, think: 'auto'}},
-            talker:  {label: '💬 Собеседник', hint: 'живая речь, средняя свобода',
-                      params: {temperature: 0.9, top_p: 0.9, repeat_penalty: 1.10,
-                               presence_penalty: 0.4, frequency_penalty: 0.3, think: 'auto'}},
-            dreamer: {label: '🎭 Фантазёр', hint: 'неожиданные связи, меньше логики',
-                      params: {temperature: 1.25, top_p: 0.95, repeat_penalty: 1.15,
-                               presence_penalty: 0.6, frequency_penalty: 0.5, think: 'off'}},
-            brawler: {label: '🔥 Провокатор', hint: 'резко, с наездом, без повторов',
-                      params: {temperature: 1.45, top_p: 0.9, repeat_penalty: 1.2,
-                               presence_penalty: 0.7, frequency_penalty: 0.6, think: 'off'}},
-        };
+        // Список приходит с сервера: он же используется для случайного розыгрыша
+        // характеров на новый спектакль, поэтому он один на всех.
+        let CHARACTERS = {};
+        const CUSTOM_CHARACTER = {label: '🎚 Свой — сам выберу', group: 'manual',
+                                  hint: 'числа выставляются вручную в «Тонкой настройке»', params: {}};
+        const CHARACTER_GROUPS = {balanced: 'Уравновешенные', extreme: 'С перекосом', manual: 'Вручную'};
+
+        function characterInfo(key) {
+            return (key && CHARACTERS[key]) ? CHARACTERS[key] : CUSTOM_CHARACTER;
+        }
 
         // Числовые параметры, которыми управляет пульт (остальные берутся из Modelfile модели)
         const PARAM_KEYS = ['temperature', 'top_p', 'repeat_penalty', 'presence_penalty', 'frequency_penalty'];
@@ -2708,25 +3028,84 @@ HTML_TEMPLATE = """
             return thinkingModels.some(m => base(m) === base(name));
         }
 
-        // Пресет просто заполняет поля — дальше их можно править руками
+        // Характер просто заполняет поля — дальше числа можно править руками
         function applyPreset(idx) {
-            const name = document.getElementById('preset-' + idx).value;
-            const preset = PRESETS[name];
+            const select = document.getElementById('preset-' + idx);
+            const preset = characterInfo(select ? select.value : 'custom');
             const hint = document.getElementById('preset-hint-' + idx);
             if (hint) hint.textContent = preset.hint || '';
-            if (!preset.params) { refreshEffective(idx); return; }
 
-            Object.entries(preset.params).forEach(([key, value]) => {
+            Object.entries(preset.params || {}).forEach(([key, value]) => {
                 const el = document.getElementById(key + '-' + idx);
                 if (el) el.value = value;
             });
 
-            // Модель без поддержки размышлений не получит think=true — показываем честно
-            const thinkEl = document.getElementById('think-' + idx);
-            if (thinkEl && thinkEl.value === 'on' && thinkEl.dataset.supportsThinking === '0') {
-                thinkEl.value = 'off';
+            // Набор задаёт и размышления, но «Свой» их не трогает; модель без
+            // поддержки размышлений не получит think=true — показываем честно
+            const thinkEl = document.getElementById('think-' + idx);                if (thinkEl && preset.think && preset.group !== 'manual') {
+                    thinkEl.value = preset.think;
+                    if (thinkEl.value === 'on' && thinkEl.dataset.supportsThinking === '0') {
+                        thinkEl.value = 'off';
+                    }
+                }
+                refreshParamStyles(idx);
+                refreshEffective(idx);
+        }
+
+        // Поле с числом: заполненное — выделено, пустое — серое (параметр не отправляется).
+        // Цвета заданы классами в CSS, чтобы тёмная сцена перекрашивала их вместе со всем
+        function refreshParamStyles(idx) {
+            PARAM_KEYS.forEach(key => {
+                const el = document.getElementById(key + '-' + idx);
+                if (el) el.classList.toggle('filled', el.value !== '');
+            });
+        }
+
+        // Ручная правка числа: набор больше не подходит, помечаем «Свой»
+        function onParamInput(idx) {
+            const select = document.getElementById('preset-' + idx);
+            if (select && select.value !== 'custom') {
+                select.value = 'custom';
+                const hint = document.getElementById('preset-hint-' + idx);
+                if (hint) hint.textContent = CUSTOM_CHARACTER.hint;
             }
+            refreshParamStyles(idx);
             refreshEffective(idx);
+        }
+
+        // Числа не мозолят глаза, пока их не спросят
+        function toggleTuning(idx) {
+            const box = document.getElementById('tuning-' + idx);
+            const caret = document.getElementById('tuning-caret-' + idx);
+            if (!box) return;
+            const hidden = box.style.display === 'none';
+            box.style.display = hidden ? 'block' : 'none';
+            if (caret) caret.textContent = hidden ? ' ▾' : ' ▸';
+        }
+
+        // «🎲 Разбросать характеры»: новый случайный характер каждому ИИ-участнику.
+        // Ту же лотерею сервер проводит сам при подъёме занавеса (RANDOMIZE_CHARACTERS)
+        function randomizeCharacters() {
+            const keys = Object.keys(CHARACTERS).filter(k => k !== 'custom' && CHARACTERS[k].params
+                && Object.keys(CHARACTERS[k].params).length);
+            if (!keys.length) { alert('Список характеров не загружен — обновите страницу'); return; }
+            const taken = [];
+            cast.forEach((p, idx) => {
+                // Судье характер не разыгрываем: он должен судить одинаково строго
+                if (p.model === 'human' || p.is_judge) return;
+                let pool = keys.filter(k => taken.indexOf(k) === -1);
+                if (!pool.length) pool = keys;
+                const key = pool[Math.floor(Math.random() * pool.length)];
+                taken.push(key);
+                const select = document.getElementById('preset-' + idx);
+                if (select) select.value = key;
+                const thinkEl = document.getElementById('think-' + idx);
+                if (thinkEl && CHARACTERS[key].think) {
+                    thinkEl.value = CHARACTERS[key].think === 'on' && thinkEl.dataset.supportsThinking === '0'
+                        ? 'off' : CHARACTERS[key].think;
+                }
+                applyPreset(idx);
+            });
         }
 
         // Состав — одна и та же форма и для настройки спектакля, и для правок на ходу
@@ -2767,37 +3146,55 @@ HTML_TEMPLATE = """
 
                 const supportsThinking = modelSupportsThinking(p.model);
                 const thinkValue = p.think || 'auto';
-                const presetValue = PRESETS[p.preset] ? p.preset : 'custom';
-                const own = p.own_options || [];
-
-                // Одно числовое поле: пусто = параметр не отправляется вообще,
-                // действует значение из Modelfile модели (оно же стоит подсказкой)
+                const presetValue = CHARACTERS[p.preset] ? p.preset : 'custom';
                 const defaults = p.model_defaults || {};
+
+                // Одно числовое поле: пусто = параметр не отправляется вообще, и работает
+                // значение из Modelfile модели. Подсказка сереньким показывает именно его,
+                // даже если поле только что очистили
+                // Класс filled, а не инлайновые цвета: так поле перекрашивается вместе
+                // с темой (тёмная сцена иначе оставила бы чёрную рамку на чёрном)
                 const paramField = (key, label, step, min, max, hint) => {
                     const value = (p[key] === undefined || p[key] === null) ? '' : p[key];
-                    const ownValue = own.indexOf(key) !== -1;
-                    const fallback = ownValue ? '' : (defaults[key] === undefined ? 'как в модели' : defaults[key]);
+                    const fallback = defaults[key] === undefined ? 'как в модели' : defaults[key];
                     const range = (min === null ? '' : ' min="' + min + '"') + (max === null ? '' : ' max="' + max + '"');
                     return '<div>' + fieldLabel(label)
-                        + '<input type="number" id="' + key + '-' + idx + '" step="' + step + '"' + range
+                        + '<input type="number" class="param-input' + (value === '' ? '' : ' filled') + '"'
+                        + ' id="' + key + '-' + idx + '" step="' + step + '"' + range
                         + ' value="' + value + '" placeholder="' + fallback + '" title="' + hint + '"'
-                        + ' oninput="refreshEffective(' + idx + ')"'
-                        + ' style="width:100%;padding:6px;border:1px solid ' + (ownValue ? '#000000' : '#cccccc')
-                        + ';font-size:13px;' + (ownValue ? '' : 'color:#555;') + '">'
+                        + ' oninput="onParamInput(' + idx + ')" style="width:100%;padding:6px;font-size:13px;">'
                         + '</div>';
                 };
 
+                // Список характеров приходит с сервера; сгруппирован, чтобы сразу
+                // было видно, где «ровные» наборы, а где с перекосом
+                const characterSelect = (() => {
+                    const keys = Object.keys(CHARACTERS);
+                    if (!keys.length) {
+                        return '<option value="custom" selected>' + escapeHtml(CUSTOM_CHARACTER.label) + '</option>';
+                    }
+                    const groups = {};
+                    ['custom'].concat(keys.filter(k => k !== 'custom')).forEach(key => {
+                        const info = characterInfo(key);
+                        const group = info.group || 'balanced';
+                        (groups[group] = groups[group] || []).push(
+                            '<option value="' + key + '" ' + selectIf(key, presetValue) + '>' + escapeHtml(info.label) + '</option>');
+                    });
+                    return Object.keys(groups).map(group =>
+                        '<optgroup label="' + escapeHtml(CHARACTER_GROUPS[group] || group) + '">'
+                        + groups[group].join('') + '</optgroup>').join('');
+                })();
+
                 const paramsBlock = isHuman ? '' : ''
-                    + '<div style="grid-column:1/-1;margin-top:14px;padding-top:12px;border-top:1px dotted #cccccc;">'
+                    + '<div style="margin-top:14px;padding-top:12px;border-top:1px dotted #cccccc;">'
                     +   '<div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-bottom:12px;">'
-                    +     '<div style="min-width:210px;">' + fieldLabel('Характер (заполнить набором)')
+                    +     '<div style="min-width:230px;">' + fieldLabel('Характер')
                     +       '<select id="preset-' + idx + '" onchange="applyPreset(' + idx + ')" style="' + fieldStyle + '"'
-                    +         ' title="Готовый набор параметров генерации. Числа управляют тем, КАК участник говорит, а что он говорит — задаёт его личная инструкция.">'
-                    +         Object.entries(PRESETS).map(([key, v]) =>
-                                '<option value="' + key + '" ' + selectIf(key, presetValue) + '>' + v.label + '</option>').join('')
+                    +         ' title="Готовый набор параметров генерации. Числа управляют тем, КАК участник говорит, а что он говорит — задаёт его личная инструкция. На новый спектакль характер разыгрывается случайно.">'
+                    +         characterSelect
                     +       '</select>'
                     +     '</div>'
-                    +     '<div style="min-width:210px;">' + fieldLabel('Размышления')
+                    +     '<div style="min-width:220px;">' + fieldLabel('Размышления')
                     +       '<select id="think-' + idx + '" data-supports-thinking="' + (supportsThinking ? 1 : 0) + '" style="' + fieldStyle + '"'
                     +         ' title="Скрытое рассуждение модели перед ответом. Умеют не все модели — у остальных этот режим недоступен.">'
                     +         '<option value="auto" ' + selectIf('auto', thinkValue) + '>Авто (как в ENABLE_THINKING)</option>'
@@ -2805,21 +3202,27 @@ HTML_TEMPLATE = """
                     +         '<option value="on" ' + selectIf('on', thinkValue) + (supportsThinking ? '' : ' disabled') + '>Включены — сначала думает</option>'
                     +       '</select>'
                     +     '</div>'
-                    +     '<div id="preset-hint-' + idx + '" style="font-size:11px;color:#666;max-width:250px;padding-top:20px;line-height:1.5;">'
-                    +       (PRESETS[presetValue].hint || '') + (supportsThinking ? '' : '<br>размышления этой модели недоступны')
+                    +     '<div id="preset-hint-' + idx + '" style="font-size:11px;color:#666;max-width:260px;padding-top:20px;line-height:1.5;">'
+                    +       escapeHtml(characterInfo(presetValue).hint || '') + (supportsThinking ? '' : '<br>размышления этой модели недоступны')
                     +     '</div>'
                     +   '</div>'
-                    +   '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;">'
-                    +     paramField('temperature', 'Температура', '0.1', 0, 2,
+                    // Числа спрятаны: в настройке они только мешают, а строка
+                    // «Уйдёт в модель» ниже и так показывает, что уйдёт в Ollama
+                    +   '<button class="btn btn-secondary" onclick="toggleTuning(' + idx + ')" style="padding:4px 12px;font-size:12px;margin:0 0 10px 0;">'
+                    +     '⚙ Тонкая настройка<span id="tuning-caret-' + idx + '"> ▸</span></button>'
+                    +   '<div id="tuning-' + idx + '" style="display:none;">'
+                    +     '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px;">'
+                    +       paramField('temperature', 'Температура', '0.1', 0, 2,
                                 'Насколько свободно выбираются слова: 0-0.3 предсказуемо, 0.8-1.2 живая речь, выше 1.5 текст рассыпается. Выше 2 не принимается.')
-                    +     paramField('top_p', 'top_p', '0.05', 0, 1,
+                    +       paramField('top_p', 'top_p', '0.05', 0, 1,
                                 'Отсекает маловероятные слова: меньше — предсказуемее. Делает почти то же, что температура, поэтому крутить надо что-то одно.')
-                    +     paramField('repeat_penalty', 'repeat_penalty', '0.05', 0, null,
+                    +       paramField('repeat_penalty', 'repeat_penalty', '0.05', 0, null,
                                 'Штраф за повторы: 1.1-1.3 спасает от зацикливания, выше 1.6 ломает грамматику.')
-                    +     paramField('presence_penalty', 'presence_penalty', '0.1', 0, null,
+                    +       paramField('presence_penalty', 'presence_penalty', '0.1', 0, null,
                                 'Подталкивает к новым темам, а не к пересказу сказанного: 0.3-0.6.')
-                    +     paramField('frequency_penalty', 'frequency_penalty', '0.1', 0, null,
+                    +       paramField('frequency_penalty', 'frequency_penalty', '0.1', 0, null,
                                 'Режет частые слова, мягче чем repeat_penalty: 0.3-0.6.')
+                    +     '</div>'
                     +   '</div>'
                     // Содержимое дособерёт refreshEffective(idx) ниже: так строка
                     // не разойдётся с подсказками в самих полях
@@ -2829,8 +3232,10 @@ HTML_TEMPLATE = """
                 return ''
                 + '<div data-participant-index="' + idx + '" style="margin-bottom:18px;padding:14px;border:1px solid ' + borderColor + ';background:#ffffff;">'
                 +   '<div style="display:flex;gap:15px;align-items:flex-start;">'
-                +     '<div class="avatar-preview" id="avatar-preview-' + idx + '" style="width:90px;height:90px;font-size:44px;flex-shrink:0;" onclick="openAvatarModal(' + idx + ')">' + avatar + '</div>'
-                +     '<div style="flex:1;">'
+                +     '<div style="flex-shrink:0;">'
+                +       '<div class="avatar-preview" id="avatar-preview-' + idx + '" style="width:96px;height:96px;font-size:46px;" onclick="openAvatarModal(' + idx + ')" title="Показать аватар целиком">' + avatar + '</div>'
+                +     '</div>'
+                +     '<div style="flex:1;min-width:0;">'
                 +       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;">'
                 +         '<div>' + fieldLabel('Имя')
                 +           '<input type="text" id="name-' + idx + '" value="' + escapeHtml(p.display_name || '') + '" placeholder="Введите имя" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:16px;">'
@@ -2842,17 +3247,19 @@ HTML_TEMPLATE = """
                 +           '</select>'
                 +         '</div>'
                 +         '<div>' + modelField + '</div>'
-                +         '<div>' + fieldLabel('Ключевые слова для аватара')
-                +           '<input type="text" id="keywords-' + idx + '" value="' + escapeHtml(p.avatar_keywords || '') + '" placeholder="Например: философ учёный" style="' + fieldStyle + '">'
+                +       '</div>'
+                // Ключевые слова и поиск аватара стоят одной строкой рядом с аватаром:
+                // раньше кнопка была в подвале карточки, и её приходилось искать
+                +       '<div style="margin-top:12px;">' + fieldLabel('Ключевые слова для аватара')
+                +         '<div class="keyword-row">'
+                +           '<input type="text" id="keywords-' + idx + '" value="' + escapeHtml(p.avatar_keywords || '') + '" placeholder="Например: дипломат женщина" style="' + fieldStyle + '">'
+                +           '<button class="btn btn-secondary" id="search-avatar-' + idx + '" onclick="searchAvatar(' + idx + ')" style="padding:0 16px;margin:0;font-size:13px;white-space:nowrap;" title="Найти картинку по этим словам">🔍 Найти аватар</button>'
                 +         '</div>'
                 +       '</div>'
                 +       paramsBlock
                 +     '</div>'
                 +   '</div>'
-                +   '<div style="margin-top:14px;display:flex;gap:15px;align-items:center;flex-wrap:wrap;">'
-                +     roleBadge
-                +     '<button class="btn btn-secondary" onclick="searchAvatar(' + idx + ')" style="padding:6px 15px;font-size:14px;margin:0;">🔍 Найти аватар</button>'
-                +   '</div>'
+                +   '<div style="margin-top:14px;">' + roleBadge + '</div>'
                 + '</div>';
             }).join('');
             // У людей параметров нет, у моделей строка «Уйдёт в модель» собирается по полям
@@ -2930,8 +3337,9 @@ HTML_TEMPLATE = """
                 || (cast[idx] ? cast[idx].display_name : '');
             if (!keywords) { alert('Сначала введите имя или ключевые слова для аватара'); return; }
             
-            // Блокируем кнопку во время загрузки
-            const btn = event.target;
+            // Блокируем кнопку во время загрузки (ищем её по id: кнопка больше
+            // не единственный элемент в строке с ключевыми словами)
+            const btn = document.getElementById('search-avatar-' + idx) || event.target;
             if (btn.disabled) return;
             btn.disabled = true;
             btn.textContent = '⏳ Поиск...';
@@ -3034,7 +3442,7 @@ HTML_TEMPLATE = """
             document.getElementById('statusPlaceholder').style.display = 'block';
             document.getElementById('topicInput').value = '';
             document.getElementById('topicDisplay').textContent = '—';
-            document.getElementById('turnSection').style.display = 'none';
+            setTurnState('hidden');
             fetch('/api/reset', {method: 'POST'})
                 .then(r => r.json())
                 .then(data => { if (data.participants) cast = data.participants; return loadCast(); })
@@ -3069,7 +3477,154 @@ HTML_TEMPLATE = """
                 finishBtn.style.display = 'none';
                 title.textContent = 'Режиссёрский пульт — настройка';
             }
+            syncSectionsToPhase();
         }
+
+        // ── Сворачивание разделов пульта ─────────────────────────────────
+        // Разметка разделов остаётся плоской: обёртку и каретку дописывает этот код,
+        // чтобы не расписывать одно и то же в каждом разделе
+        function decoratePanelSections() {
+            document.querySelectorAll('#controlPanel .panel-section').forEach((section, i) => {
+                if (section.dataset.collapsible) return;
+                const heading = section.querySelector('.panel-heading');
+                if (!heading) return;
+                section.dataset.collapsible = '1';
+                section.dataset.sectionKey = section.id || ('section-' + i);
+                const body = document.createElement('div');
+                body.className = 'panel-body';
+                Array.from(section.children).forEach(child => {
+                    if (child !== heading) body.appendChild(child);
+                });
+                section.appendChild(body);
+                const caret = document.createElement('span');
+                caret.className = 'caret';
+                caret.textContent = '▾';
+                heading.appendChild(caret);
+                heading.title = 'Свернуть / развернуть раздел';
+                heading.addEventListener('click', () => setSectionCollapsed(
+                    section.dataset.sectionKey, !body.classList.contains('collapsed')));
+            });
+        }
+
+        function setSectionCollapsed(key, collapsed) {
+            const section = document.querySelector('[data-section-key="' + key + '"]');
+            if (!section) return;
+            const body = section.querySelector('.panel-body');
+            const caret = section.querySelector('.panel-heading .caret');
+            if (!body) return;
+            body.classList.toggle('collapsed', !!collapsed);
+            if (caret) caret.textContent = collapsed ? '▸' : '▾';
+        }
+
+        // Свернуть или развернуть все разделы пульта разом
+        function setAllSectionsCollapsed(collapsed) {
+            document.querySelectorAll('#controlPanel .panel-section').forEach(section => {
+                if (section.dataset.sectionKey) setSectionCollapsed(section.dataset.sectionKey, collapsed);
+            });
+        }
+
+        // Фазы пульта: в настройке раскрыто всё; спектакль идёт — состав убран
+        // (он огромный, а на ходу нужен редко); после занавеса — свернуто всё,
+        // спектакль отыгран и пульт остаётся одними заголовками. Ручное
+        // сворачивание не трогаем: панель реагирует только на смену фазы
+        let sectionsPhase = null;
+        function syncSectionsToPhase() {
+            const phase = showFinished ? 'finished' : (debateRunning ? 'running' : 'setup');
+            if (phase === sectionsPhase) return;
+            sectionsPhase = phase;
+            if (phase === 'finished') setAllSectionsCollapsed(true);
+            else if (phase === 'running') setSectionCollapsed('sec-cast', true);
+            else setAllSectionsCollapsed(false);
+        }
+
+        // Как назвать роль в интерфейсе: у обычного участника никакой особой роли нет
+        function roleLabelOf(role) {
+            return role === 'moderator' ? 'модератор' : (role === 'judge' ? 'судья' : '');
+        }
+
+        // Раздел «Ваша реплика» всегда на месте: без него нумерация блоков прыгала
+        // с 03 на 05. Меняется только содержимое — поле ввода или пояснение
+        function setTurnState(state, who, roleName) {
+            const composer = document.getElementById('turnComposer');
+            const note = document.getElementById('turnNote');
+            const title = document.getElementById('turnTitle');
+            if (!composer || !note || !title) return;
+            if (state === 'your') {
+                composer.style.display = 'block';
+                note.style.display = 'none';
+                title.textContent = 'Ход: ' + (who || 'вы') + (roleName ? ' · ' + roleName : '');
+                return;
+            }
+            composer.style.display = 'none';
+            note.style.display = 'block';
+            title.textContent = 'Ваша реплика';
+            note.textContent = state === 'waiting'
+                ? 'Сейчас не ваше время выступать: говорит ' + (who || 'другой участник') + '.'
+                : state === 'finished' ? 'Занавес: реплики закончились.'
+                : state === 'sent' ? 'Реплика отправлена — ждём ответа других участников.'
+                : 'Спектакль ещё не начат — поле появится, когда очередь дойдёт до вас.';
+        }
+
+        // Раздел 00: содержимое рисуют renderModelsWarning / renderVramWarning,
+        // а здесь решается, раскрыт ли раздел, и ставится метка в заголовке
+        let readySignature = null;
+        function syncReadinessSection() {
+            const shown = el => !!(el && el.style.display !== 'none' && el.innerHTML.trim() !== '');
+            const models = document.getElementById('modelsWarning');
+            const vram = document.getElementById('vramWarning');
+            const okBox = document.getElementById('readyOk');
+            const badge = document.getElementById('readyBadge');
+            const problems = [];
+            if (shown(models)) problems.push('модели');
+            if (shown(vram)) problems.push('видеопамять');
+            if (okBox) okBox.style.display = problems.length ? 'none' : 'block';
+            if (badge) badge.textContent = problems.length ? '⚠️ ' + problems.length : '';
+            const signature = problems.join(',');
+            // Раскрываем, когда появилось о чём предупредить, и сворачиваем, когда
+            // всё в порядке. Пока набор предупреждений тот же — раздел не трогаем:
+            // иначе он не давал бы свернуть себя руками
+            if (signature === readySignature) return;
+            readySignature = signature;
+            setSectionCollapsed('sec-ready', problems.length === 0);
+        }
+
+        // Ручная проверка готовности — не трогая то, что уже введено в форме
+        function checkReadiness() {
+            const btn = document.querySelector('#sec-ready button');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Проверяю...'; }
+            fetch('/api/participants', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(data => {
+                    renderModelsWarning(data.models_status);
+                    renderVramWarning(data.vram_status);
+                    syncReadinessSection();
+                    refreshMemory();
+                })
+                .catch(err => console.warn('Проверка готовности не удалась:', err))
+                .finally(() => {
+                    if (btn) { btn.disabled = false; btn.textContent = '🔄 Проверить сейчас'; }
+                });
+        }
+
+        // Тёмная сцена: выбор запоминается, при первом входе берётся из настроек системы
+        function applyTheme(dark) {
+            document.body.classList.toggle('dark', !!dark);
+            const btn = document.getElementById('themeBtn');
+            if (btn) btn.textContent = dark ? '☀️ Светлая сцена' : '🌙 Тёмная сцена';
+        }
+
+        function toggleTheme() {
+            const dark = !document.body.classList.contains('dark');
+            applyTheme(dark);
+            try { localStorage.setItem('theatreTheme', dark ? 'dark' : 'light'); } catch (e) {}
+        }
+
+        (function initTheme() {
+            let saved = null;
+            try { saved = localStorage.getItem('theatreTheme'); } catch (e) {}
+            const systemDark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+            applyTheme(saved === null ? systemDark : saved === 'dark');
+        })();
         
         function addPost(post) {
             const postsDiv = document.getElementById('posts');
@@ -3088,7 +3643,9 @@ HTML_TEMPLATE = """
             postDiv.className = `post`;
             const genderSymbol = post.gender === 'male' ? '♂' : '♀';
             postDiv.innerHTML = `<div class="post-avatar">${avatarHtml}</div><div class="post-content"><div class="post-header"><div><div class="post-author"><span class="role-badge ${roleClass}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div><div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
-            postsDiv.appendChild(postDiv);
+            // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать
+            // спектакль снизу вверх не приходится
+            postsDiv.insertBefore(postDiv, postsDiv.firstChild);
         }
         
         function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }
@@ -3197,14 +3754,13 @@ HTML_TEMPLATE = """
                         debateRunning = true;
                         lastPostCount = 0;
                         document.getElementById('posts').innerHTML = '';
-                        document.getElementById('turnSection').style.display = 'none';
+                        setTurnState('hidden');
                         loadCast().then(() => { updateSidebarParticipants(); updatePanel(); });
                         return;
                     }
                 }
                 const statusDiv = document.getElementById('statusBar');
                 const statusPlaceholder = document.getElementById('statusPlaceholder');
-                const turnSection = document.getElementById('turnSection');
                 statusDiv.style.display = 'block'; statusPlaceholder.style.display = 'none';
                 // Флаги ставим до отрисовки пульта: после перезагрузки страницы
                 // он должен сразу знать, что спектакль идёт, а не ждать нового старта
@@ -3213,18 +3769,21 @@ HTML_TEMPLATE = """
                 if (data.topic) document.getElementById('topicDisplay').textContent = data.topic;
                 updatePanel();
                 if (data.waiting_for_human) {
-                    // Ход человека: показываем поле реплики
-                    const isMod = !!data.current_participant_is_moderator;
-                    if (turnSection.style.display !== 'block') {
-                        turnSection.style.display = 'block';
+                    // Ход человека: имя всегда, роль — только если она особенная
+                    const roleName = roleLabelOf(data.current_participant_role);
+                    const wasOpen = document.getElementById('turnComposer').style.display === 'block';
+                    setTurnState('your', data.current_participant, roleName);
+                    if (!wasOpen) {
                         const mi = document.getElementById('moderatorInput');
                         if (mi && !mi.value.trim()) mi.focus();
                     }
-                    const turnTitle = document.getElementById('turnTitle');
-                    if (turnTitle) turnTitle.textContent = isMod ? `Ход режиссёра: ${data.current_participant}` : `Ход: ${data.current_participant}`;
                     statusDiv.classList.add('active');
                     statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
-                } else { turnSection.style.display = 'none'; }
+                } else {
+                    // Не ваша очередь: блок остаётся на месте с пояснением, чтобы
+                    // нумерация разделов пульта не прыгала
+                    setTurnState(data.finished ? 'finished' : 'waiting', data.current_participant);
+                }
                 if (data.running && !data.waiting_for_human) {
                     statusDiv.classList.add('active');
                     let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
@@ -3232,7 +3791,7 @@ HTML_TEMPLATE = """
                 } else if (data.finished) {
                     statusDiv.classList.remove('active');
                     statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>';
-                    turnSection.style.display = 'none';
+                    setTurnState('finished');
                     document.getElementById('finishBtn').style.display = 'none';
                     // «Покинуть театр» оставляем: занавес больше не закрывает сервер,
                     // и это единственная кнопка остановки приложения
@@ -3268,7 +3827,7 @@ HTML_TEMPLATE = """
         function sendModeratorMessage() {
             const input = document.getElementById('moderatorInput');
             fetch('/api/moderator/message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input.value}) })
-            .then(r => r.json()).then(data => { if (data.success) { input.value = ''; document.getElementById('turnSection').style.display = 'none'; } else alert('Ошибка: ' + (data.error || 'неизвестная')); })
+            .then(r => r.json()).then(data => { if (data.success) { input.value = ''; setTurnState('sent'); } else alert('Ошибка: ' + (data.error || 'неизвестная')); })
             .catch(err => { console.error('Ошибка:', err); alert('Ошибка: ' + err.message); });
         }
         
@@ -3408,7 +3967,7 @@ HTML_TEMPLATE = """
                     .catch(() => {});
 
                 // Немедленный отклик, не дожидаясь сервера
-                document.getElementById('turnSection').style.display = 'none';
+                setTurnState('hidden');
                 document.getElementById('finishBtn').style.display = 'none';
 
                 const statusDiv = document.getElementById('statusBar');
@@ -3429,7 +3988,7 @@ HTML_TEMPLATE = """
                 if (exitBtn) exitBtn.style.display = 'none';
                 
                 // СРАЗУ обновляем UI
-                document.getElementById('turnSection').style.display = 'none';
+                setTurnState('hidden');
                 document.getElementById('statusPlaceholder').style.display = 'none';
                 
                 const statusDiv = document.getElementById('statusBar');
@@ -3662,6 +4221,16 @@ def participants():
     return jsonify({
         "participants": cast,
         "option_keys": list(PER_PARTICIPANT_OPTION_KEYS),
+        # «Характер»: список и его числа держит сервер, чтобы пульт и случайный
+        # розыгрыш на новый спектакль опирались на один и тот же набор
+        "characters": {
+            key: {"label": value["label"], "hint": value.get("hint", ""),
+                  "group": value.get("group", "balanced"),
+                  "think": value.get("think", "auto"),
+                  "params": value.get("params") or {}}
+            for key, value in CHARACTER_PRESETS.items()
+        },
+        "randomize_characters": RANDOMIZE_CHARACTERS,
         "running": session.running,
         "finished": session.finished,
         "topic": session.topic,
@@ -3790,6 +4359,8 @@ def status():
         "search_query": session.search_query,
         "waiting_for_human": session.waiting_for_human,
         "current_participant_is_moderator": session.current_participant_is_moderator(),
+        # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
+        "current_participant_role": session.current_participant_role(),
         "loaded_models": loaded_models if not loaded_models_error else [],
         "loaded_models_error": loaded_models_error or "",
         "gpu_memory": fetch_gpu_memory(),
@@ -3820,6 +4391,8 @@ def handle_connect():
         "search_query": session.search_query,
         "waiting_for_human": session.waiting_for_human,
         "current_participant_is_moderator": session.current_participant_is_moderator(),
+        # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
+        "current_participant_role": session.current_participant_role(),
     })
 
 @socketio.on('disconnect')
@@ -3837,6 +4410,8 @@ def handle_request_status():
         "search_query": session.search_query,
         "waiting_for_human": session.waiting_for_human,
         "current_participant_is_moderator": session.current_participant_is_moderator(),
+        # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
+        "current_participant_role": session.current_participant_role(),
     })
 
 @app.route('/api/moderator/message', methods=['POST'])
