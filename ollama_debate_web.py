@@ -25,6 +25,7 @@ import ssl
 import re
 import random
 import traceback
+import uuid
 from pathlib import Path
 from urllib.parse import quote
 from flask import Flask, render_template_string, jsonify, request, send_from_directory
@@ -1402,6 +1403,7 @@ class DebateSession:
 
     def __init__(self):
         self.running = False
+        self.session_id = ""
         self.topic = ""
         self.posts = []
         self.current_round = 0
@@ -1424,6 +1426,7 @@ class DebateSession:
     def reset(self, topic, runtime_participants, avatars, instructions,
               avatar_emojis=None, static_instructions=None, judge_rules=None):
         self.running = True
+        self.session_id = uuid.uuid4().hex[:8]
         self.topic = topic
         self.posts = []
         self.current_round = 0
@@ -2052,20 +2055,20 @@ HTML_TEMPLATE = """
                 </div>
                 <div id="posts"></div>
                 <div id="moderatorPanel" style="display:none; margin-top:30px; padding:20px; border:2px solid #000000;">
-                    <h3 style="margin:0 0 15px 0; font-size:20px; text-transform:uppercase; letter-spacing:2px;">Ваша реплика, режиссёр</h3>
+                    <h3 id="moderatorPanelTitle" style="margin:0 0 15px 0; font-size:20px; text-transform:uppercase; letter-spacing:2px;">Ваша реплика</h3>
                     <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..."></textarea>
                     <div style="display:flex; gap:15px; margin-bottom:20px;">
                         <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
                         <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()">Завершить спектакль</button>
                     </div>
-                    <div style="display:flex; gap:10px; align-items:center; margin-bottom:15px;">
+                    <div id="topicChangeBlock" style="display:none; gap:10px; align-items:center; margin-bottom:15px;">
                         <textarea id="topicChangeInput" rows="2" style="flex:1; padding:10px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; resize:vertical; line-height:1.4;" placeholder="Текущая тема — отредактируйте и примените" onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); changeTopic(); }"></textarea>
                         <button class="btn btn-secondary" onclick="changeTopic()" style="margin:0;">🎯 Сменить тему</button>
                     </div>
-                    <div style="margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки реплики • смена темы — Ctrl+Enter в поле темы (сразу попадает в системные промпты участников)</div>
+                    <div id="moderatorHint" style="display:none; margin-top:10px; font-size:12px; font-style:italic; margin-bottom:20px;">💡 Пустое сообщение = пропуск действия • Ctrl+Enter для отправки реплики • смена темы — Ctrl+Enter в поле темы (сразу попадает в системные промпты участников)</div>
                     
-                    <!-- Панель редактирования инструкций и руководств -->
-                    <div style="border-top:1px solid #000; padding-top:20px; margin-top:20px;">
+                    <!-- Панель редактирования инструкций и руководств (только для модератора) -->
+                    <div id="instructionsSection" style="display:none; border-top:1px solid #000; padding-top:20px; margin-top:20px;">
                         <h4 style="margin:0 0 10px 0; font-size:16px; text-transform:uppercase; letter-spacing:1px;">📋 Управление инструкциями</h4>
                         <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Редактировать инструкции и руководства</button>
                         
@@ -2148,6 +2151,7 @@ HTML_TEMPLATE = """
         let staticInstructions = [];
         let instructionsTick = 0;
         let defaultJudgePrompt = '';  // им заполняется пустое поле промпта судьи
+        let mySessionId = null;        // id текущей сессии; следим за сменой на сервере
         
         // Загружаем участников и статичные инструкции
         fetch('/api/participants')
@@ -2324,6 +2328,7 @@ HTML_TEMPLATE = """
             fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ topic, instructions, participants, avatars, static_instructions: currentStaticInstructions }) })
             .then(r => r.json()).then(data => { 
                 if (data.success) {
+                    if (data.session_id) mySessionId = data.session_id;
                     // Спектакль пошёл: убираем баннер с прошлой неудачной попытки,
                     // иначе он висел бы с устаревшим текстом до перезагрузки
                     const box = document.getElementById('modelsWarning');
@@ -2490,6 +2495,29 @@ HTML_TEMPLATE = """
             statusRequestInFlight = true;
             
             fetch(`/api/status?lastPostCount=${lastPostCount}`, {cache: 'no-store'}).then(r => r.json()).then(data => {
+                // Сессия сменилась на сервере — сбросить локальный UI.
+                if (data.session_id) {
+                    if (mySessionId === null) {
+                        mySessionId = data.session_id;
+                    } else if (mySessionId !== data.session_id) {
+                        mySessionId = data.session_id;
+                        debateRunning = false;
+                        lastPostCount = 0;
+                        if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+                        document.getElementById('posts').innerHTML = '';
+                        document.getElementById('setupCard').style.display = 'block';
+                        document.getElementById('topicCard').style.display = 'block';
+                        document.getElementById('staticInstructionsCard').style.display = 'block';
+                        document.getElementById('moderatorPanel').style.display = 'none';
+                        document.getElementById('statusBar').style.display = 'none';
+                        document.getElementById('statusPlaceholder').style.display = 'block';
+                        document.getElementById('newBtn').style.display = 'none';
+                        document.getElementById('startBtn').disabled = false;
+                        const eb = document.querySelector('.footer .btn'); if (eb) eb.style.display = 'inline-block';
+                        renderParticipantsSetup();
+                        return;
+                    }
+                }
                 const statusDiv = document.getElementById('statusBar');
                 const statusPlaceholder = document.getElementById('statusPlaceholder');
                 const moderatorPanel = document.getElementById('moderatorPanel');
@@ -2500,8 +2528,17 @@ HTML_TEMPLATE = """
                     // Поле «Сменить тему»: если пустое — подставляем текущую
                     const tci = document.getElementById('topicChangeInput');
                     if (tci && !tci.value.trim() && data.topic) tci.value = data.topic;
+                    const isMod = !!data.current_participant_is_moderator;
                     const finishBtn = document.getElementById('finishBtn');
-                    if (finishBtn) finishBtn.style.display = data.current_participant_is_moderator ? 'inline-block' : 'none';
+                    if (finishBtn) finishBtn.style.display = isMod ? 'inline-block' : 'none';
+                    const title = document.getElementById('moderatorPanelTitle');
+                    if (title) title.textContent = isMod ? 'Ваша реплика, режиссёр' : 'Ваша реплика';
+                    const topicBlock = document.getElementById('topicChangeBlock');
+                    if (topicBlock) topicBlock.style.display = isMod ? 'flex' : 'none';
+                    const instrSection = document.getElementById('instructionsSection');
+                    if (instrSection) instrSection.style.display = isMod ? 'block' : 'none';
+                    const modHint = document.getElementById('moderatorHint');
+                    if (modHint) modHint.style.display = isMod ? 'block' : 'none';
                     statusDiv.classList.add('active');
                     statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${data.current_participant}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
                 } else { moderatorPanel.style.display = 'none'; }
@@ -3084,7 +3121,7 @@ def start():
     thread = threading.Thread(target=run_debate_thread, args=(topic,))
     thread.daemon = True
     thread.start()
-    return jsonify({"success": True})
+    return jsonify({"success": True, "session_id": session.session_id})
 
 @app.route('/api/reset', methods=['POST'])
 def reset():
@@ -3100,6 +3137,7 @@ def status():
     response = jsonify({
         "running": session.running,
         "finished": session.finished,
+        "session_id": session.session_id,
         "topic": session.topic,
         "new_posts": session.posts[last_post_count:],
         "total_posts": len(session.posts),
