@@ -21,6 +21,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
+# Отчёту нужны те же эмодзи (✅/❌), что и приложению, а русская консоль Windows
+# работает в cp1251 и роняет печать с UnicodeEncodeError. Приложение себя так
+# защищает при импорте; здесь импорта приложения нет, поэтому — тот же приём.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SOURCE = PROJECT_ROOT / "ollama_debate_web.py"
 TESTS = PROJECT_ROOT / "tests" / "test_theatre.py"
@@ -68,6 +77,11 @@ BUGS = {
     "у роли нет своего цвета на тёмной сцене": [
         ("        body.dark.role-marks .post.post-role-judge { border-left-color: #8f5cae; }\n",
          ""),
+    ],
+    "страница снова тянет шрифты из интернета": [
+        ("        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и",
+         "        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&display=swap');\n"
+         "        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и"),
     ],
     "правила судьи не переживают «Новый спектакль»": [
         ("        self.judge_rules = judge_rules",

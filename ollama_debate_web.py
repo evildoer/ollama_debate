@@ -2613,7 +2613,10 @@ HTML_TEMPLATE = """
     <title>AI Театр</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&family=Raleway:wght@400;600&display=swap');
+        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и
+           Courier New. Раньше здесь стоял @import с чужим сервером шрифтов —
+           никто его не использовал, но браузер всё равно ждал ответа, прежде
+           чем нарисовать пульт: без интернета или за прокси он просто висел */
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: Georgia, 'Times New Roman', Times, serif; background: #ffffff; min-height: 100vh; color: #000000; line-height: 1.6; font-size: 16px; }
         .layout { display: flex; min-height: 100vh; }

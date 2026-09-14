@@ -25,6 +25,7 @@
 import collections
 import copy
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -634,6 +635,46 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("classList.toggle('role-marks'", self.page)
         self.assertIn("localStorage.setItem('theatreRoleMarks'", self.page)
         self.assertIn("localStorage.getItem('theatreRoleMarks')", self.page)
+
+
+# ---------------------------------------------------------------- страница
+
+class TestOfflinePage(unittest.TestCase):
+    """Страница обязана открываться без интернета: всё нужное лежит рядом.
+
+    В пульте и ленте нет ни одного внешнего адреса — ни скриптов с CDN, ни
+    шрифтов. Найденный когда-то @import с Google Fonts никто не использовал
+    (весь текст рисуют системные Georgia и Courier New), но браузер всё равно
+    ждал ответа fonts.googleapis.com перед отрисовкой: без интернета пульт
+    просто висел на белом экране.
+    """
+
+    # Адреса, которые браузер обязан загрузить сам (src/href у тегов и CSS @import)
+    EXTERNAL_RESOURCE_RE = re.compile(
+        r'(?:src|href)\s*=\s*["\'](https?://[^"\']+)'
+        r'|@import\s+(?:url\()?["\']?(https?://[^)"\';]+)'
+    )
+
+    def test_page_loads_nothing_from_the_internet(self):
+        external = [next(g for g in match.groups() if g)
+                    for match in self.EXTERNAL_RESOURCE_RE.finditer(theatre.HTML_TEMPLATE)]
+        self.assertEqual(
+            external, [],
+            "страница не должна ждать внешних ресурсов — она живёт за прокси и без сети")
+
+    def test_local_files_the_page_needs_are_in_the_repository(self):
+        """Клиент Socket.IO и рендерер формул отдаются сервером, а не с CDN:
+        если файл потеряется, лента и формулы тихо перестанут работать.
+
+        Смотрим рядом с тестами, а не рядом с модулем приложения: в
+        tests/mutation_check.py код ради проверки тестов копируется в другую
+        папку, где никакого static/ нет.
+        """
+        root = Path(__file__).resolve().parent.parent
+        missing = [name for name in ("static/socket.io.min.js", "static/temml.min.js",
+                                     "favicon.ico")
+                   if not (root / name).is_file()]
+        self.assertEqual(missing, [], f"страница ссылается на отсутствующие файлы: {missing}")
 
 
 # ---------------------------------------------------------------- маршруты
