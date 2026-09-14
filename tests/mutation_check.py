@@ -78,6 +78,16 @@ BUGS = {
         ("        body.dark.role-marks .post.post-role-judge { border-left-color: #8f5cae; }\n",
          ""),
     ],
+    "пульт снова теряет top_k, min_p и seed": [
+        ("        const PARAM_KEYS = ['temperature', 'top_p', 'top_k', 'min_p',\n"
+         "                            'repeat_penalty', 'presence_penalty', 'frequency_penalty', 'seed'];",
+         "        const PARAM_KEYS = ['temperature', 'top_p', 'repeat_penalty', "
+         "'presence_penalty', 'frequency_penalty'];"),
+    ],
+    "у участника пропало поле min_p": [
+        ("paramField('min_p', 'min_p', '0.01', 0, 1,",
+         "paramField('hidden_min_p', 'min_p', '0.01', 0, 1,"),
+    ],
     "страница снова тянет шрифты из интернета": [
         ("        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и",
          "        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&display=swap');\n"

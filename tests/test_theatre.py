@@ -637,6 +637,43 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("localStorage.getItem('theatreRoleMarks')", self.page)
 
 
+# ---------------------------------------------------------------- тонкая настройка
+
+class TestTuningPanel(unittest.TestCase):
+    """«⚙ Тонкая настройка» должна уметь всё, что принимает сервер.
+
+    Список чисел лежит в двух местах: PER_PARTICIPANT_OPTION_KEYS в приложении
+    и PARAM_KEYS в пульте. Разошлись — и параметр можно задать только в
+    PARTICIPANTS: из пульта его не видно, в строке «Уйдёт в модель» тоже.
+    Так уже было с top_k, min_p и seed: их принимал сервер, а пульт — нет.
+    """
+
+    PARAM_KEYS_RE = re.compile(r"const PARAM_KEYS = \[(.*?)\];", re.DOTALL)
+
+    def setUp(self):
+        self.page = theatre.HTML_TEMPLATE
+
+    def test_pult_lists_the_same_parameters_as_the_server(self):
+        match = self.PARAM_KEYS_RE.search(self.page)
+        self.assertIsNotNone(match, "в пульте не нашёлся список PARAM_KEYS")
+        listed = re.findall(r"'([^']+)'", match.group(1))
+        self.assertEqual(listed, list(theatre.PER_PARTICIPANT_OPTION_KEYS),
+                         "пульт и сервер разошлись в списке параметров генерации")
+
+    def test_every_parameter_has_a_field_in_the_editor(self):
+        missing = [key for key in theatre.PER_PARTICIPANT_OPTION_KEYS
+                   if f"paramField('{key}'" not in self.page]
+        self.assertEqual(missing, [], f"у этих параметров нет поля в пульте: {missing}")
+
+    def test_editor_sends_parameters_from_the_one_list(self):
+        """Свой список чисел внутри collectCast когда-то и обрезал пульт до пяти."""
+        start = self.page.index("function collectCast()")
+        body = self.page[start:self.page.index("function saveCast()", start)]
+        self.assertIn("PARAM_KEYS.forEach", body)
+        self.assertNotIn("'temperature'", body,
+                         "список чисел в пульте должен быть один — PARAM_KEYS")
+
+
 # ---------------------------------------------------------------- страница
 
 class TestOfflinePage(unittest.TestCase):

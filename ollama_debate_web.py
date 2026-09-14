@@ -3112,8 +3112,12 @@ HTML_TEMPLATE = """
             return (key && CHARACTERS[key]) ? CHARACTERS[key] : CUSTOM_CHARACTER;
         }
 
-        // Числовые параметры, которыми управляет пульт (остальные берутся из Modelfile модели)
-        const PARAM_KEYS = ['temperature', 'top_p', 'repeat_penalty', 'presence_penalty', 'frequency_penalty'];
+        // Числовые параметры, которыми управляет пульт. Список обязан совпадать
+        // с PER_PARTICIPANT_OPTION_KEYS на сервере — за этим следит TestTuningPanel.
+        // Раньше в нём было только пять чисел: top_k, min_p и seed можно было задать
+        // в PARTICIPANTS, но из пульта их не было видно и не поменять.
+        const PARAM_KEYS = ['temperature', 'top_p', 'top_k', 'min_p',
+                            'repeat_penalty', 'presence_penalty', 'frequency_penalty', 'seed'];
 
         // Пересчитывает строку «Уйдёт в модель» по текущим полям формы — чтобы
         // не приходилось сохранять состав, чтобы понять, что применится
@@ -3129,7 +3133,10 @@ HTML_TEMPLATE = """
                 return key + ' <strong>' + value + '</strong>'
                     + (own ? '' : ' <span style="color:#999;">(как в модели)</span>');
             });
-            box.innerHTML = '<strong>Уйдёт в модель:</strong> ' + parts.join(' · ')
+            // Восемь параметров в одну строку не влезают: раскладываем по четыре
+            const rows = [];
+            for (let i = 0; i < parts.length; i += 4) rows.push(parts.slice(i, i + 4).join(' · '));
+            box.innerHTML = '<strong>Уйдёт в модель:</strong><br>' + rows.join('<br>')
                 + '<br>Пустое поле — параметр вообще не отправляется: действует значение из Modelfile модели.';
         }
 
@@ -3324,12 +3331,18 @@ HTML_TEMPLATE = """
                                 'Насколько свободно выбираются слова: 0-0.3 предсказуемо, 0.8-1.2 живая речь, выше 1.5 текст рассыпается. Выше 2 не принимается.')
                     +       paramField('top_p', 'top_p', '0.05', 0, 1,
                                 'Отсекает маловероятные слова: меньше — предсказуемее. Делает почти то же, что температура, поэтому крутить надо что-то одно.')
+                    +       paramField('min_p', 'min_p', '0.01', 0, 1,
+                                'Оставляет слова не ниже доли от самого вероятного: порог сам подстраивается под уверенность модели. 0.05 — лёгкая чистка, 0.2-0.3 — заметно строже. Единственный способ убрать мусор, не жертвуя высокой температурой.')
+                    +       paramField('top_k', 'top_k', '1', 1, null,
+                                'Сколько слов-кандидатов вообще рассматривать: 40 — как у большинства моделей, меньше 20 — заметно предсказуемее, больше 100 почти ничего не меняет.')
                     +       paramField('repeat_penalty', 'repeat_penalty', '0.05', 0, null,
                                 'Штраф за повторы: 1.1-1.3 спасает от зацикливания, выше 1.6 ломает грамматику.')
                     +       paramField('presence_penalty', 'presence_penalty', '0.1', 0, null,
                                 'Подталкивает к новым темам, а не к пересказу сказанного: 0.3-0.6.')
                     +       paramField('frequency_penalty', 'frequency_penalty', '0.1', 0, null,
                                 'Режет частые слова, мягче чем repeat_penalty: 0.3-0.6.')
+                    +       paramField('seed', 'seed', '1', null, null,
+                                'Одно и то же число — один и тот же ответ при том же диалоге. Это не характер, а повторяемость: удобно сравнивать две модели на одной теме или вернуться к странной реплике. Пусто — каждый спектакль новый.')
                     +     '</div>'
                     +   '</div>'
                     // Содержимое дособерёт refreshEffective(idx) ниже: так строка
@@ -3394,11 +3407,13 @@ HTML_TEMPLATE = """
                 };
                 if (p.model !== 'human') {
                     entry.model = pick(`model-${idx}`, p.model);
-                    // Пустая строка = «как в OPTIONS»: сервер убирает такое поле у участника
-                    ['temperature', 'top_p', 'repeat_penalty',
-                     'presence_penalty', 'frequency_penalty'].forEach(key => {
-                        const raw = pick(`${key}-${idx}`, '');
-                        entry[key] = raw === '' ? null : raw;
+                    // Пустая строка = «как в OPTIONS»: сервер убирает такое поле у участника.
+                    // Поля нет в пульте — не отправляем ничего, чтобы не стереть число
+                    // из PARTICIPANTS нечаянно
+                    PARAM_KEYS.forEach(key => {
+                        const el = document.getElementById(`${key}-${idx}`);
+                        if (!el) return;
+                        entry[key] = el.value === '' ? null : el.value;
                     });
                     entry.think = pick(`think-${idx}`, p.think || 'auto');
                     entry.preset = pick(`preset-${idx}`, p.preset || 'custom');
