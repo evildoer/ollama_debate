@@ -3,8 +3,10 @@
 Ollama AI Debate - Современный веб-интерфейс с WebSocket
 =========================================================
 
-Установка:
-    pip install flask flask-socketio ddgs markdown
+Установка (подробности — в README.md):
+    python -m venv venv && venv\\Scripts\\activate     # Windows
+    source venv/bin/activate                          # Linux и macOS
+    python -m pip install -r requirements.txt
 
 Запуск:
     python ollama_debate_web.py

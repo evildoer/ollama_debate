@@ -27,12 +27,23 @@ ENV/
 .venv/
 .env/
 
-# IDE
+# IDE и редакторы
 .vscode/
 .idea/
 .freebuff/
+*.iml
 *.swp
 *.swo
+
+# Кэши инструментов проверки
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Следы слияний и патчей
+*.orig
+*.rej
+*.bak
 
 # Logs
 *.log
@@ -54,6 +65,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Compressed files
 *.zip
