@@ -30,6 +30,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.freebuff/
 *.swp
 *.swo
 
