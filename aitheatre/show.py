@@ -1032,10 +1032,13 @@ def apply_cast_patch(incoming: list) -> str:
                 if value not in allowed:
                     return f"{name}: «{key}» может быть " + " или ".join(allowed)
 
+        # Модель меняется в обе стороны: место можно сделать живым участником
+        # (модель «human») и вернуть ему модель обратно. Пустое поле — «как было»:
+        # у живого места модель не теряется, а опечатка в чистом поле не делает
+        # участника человеком
         model = str(raw.get("model", (entry or {}).get("model", "")) or "").strip()
-        if entry and entry.get("model") == "human":
-            # Живое место человеком и остаётся: он говорит сам, модель ему не подсунуть
-            model = "human"
+        if not model:
+            model = (entry or {}).get("model", "") or ""
 
         keywords = str(raw.get("avatar_keywords", "") or "")
         emoji = str(raw.get("avatar_emoji", "") or "")
@@ -1130,7 +1133,10 @@ def apply_cast_patch(incoming: list) -> str:
                 session.rename_participant(entry.get("display_name", ""), u["name"])
                 entry["display_name"] = u["name"]
             entry["gender"] = u["gender"]
-            if entry.get("model") != "human" and u["model"]:
+            # Модель ставится и на новую, и на «human»: живое место — это место
+            # с моделью «human», и никакого отдельного способа «стать человеком»
+            # у пульта нет
+            if u["model"]:
                 entry["model"] = u["model"]
             if u["keywords"]:
                 entry["avatar_keywords"] = u["keywords"]

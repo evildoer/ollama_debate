@@ -544,6 +544,14 @@ HTML_TEMPLATE = """
         function refreshEffective(idx) {
             const box = document.getElementById('effective-' + idx);
             if (!box) return;
+            // Живому участнику числа не нужны: говорим это вместо списка параметров,
+            // иначе после вписанного руками «human» строка «Уйдёт в модель» врала бы
+            const modelEl = document.getElementById('model-' + idx);
+            if (modelEl && modelEl.value.trim() === 'human') {
+                box.innerHTML = '<strong>Живой участник:</strong> говорит сам — модель и числа '
+                    + 'здесь ни при чём, их можно не трогать';
+                return;
+            }
             const defaults = (cast[idx] && cast[idx].model_defaults) || {};
             const parts = PARAM_KEYS.map(key => {
                 const el = document.getElementById(key + '-' + idx);
@@ -803,19 +811,21 @@ HTML_TEMPLATE = """
                 const fieldLabel = text => '<label style="font-size:11px;text-transform:uppercase;letter-spacing:1px;">' + text + '</label>';
                 const fieldStyle = 'width:100%;padding:7px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;';
 
-                // У человека нет ни модели, ни параметров: это сама роль
-                const modelField = isHuman
-                    ? fieldLabel('Модель') + '<div style="font-size:13px;color:#666;padding:8px 0;">живой участник</div>'
-                    : fieldLabel('Модель')
-                      // Поле — текст с подсказками (datalist), а не жёсткий список:
-                      // облачную модель можно вписать рукой — «cloud:вендор/модель» —
-                      // например, если её только что добавили на шлюз
+                // Модель есть у любого места, даже у живого участника: посадить
+                // за стол человека («human») или вернуть ему модель — решение
+                // режиссёра, и дверь должна открываться в обе стороны.
+                // Поле — текст с подсказками (datalist), а не жёсткий список:
+                // так вписать можно и облачную модель, и только что добавленную
+                const modelField = fieldLabel(isHuman ? 'Модель — живой участник' : 'Модель')
                       + '<input type="text" id="model-' + idx + '" list="modelList"'
                       + ' value="' + escapeHtml(p.model || '') + '"'
                       + ' placeholder="— выберите модель — или впишите cloud:…"'
-                      + ' style="' + fieldStyle + '" onchange="refreshEffective(' + idx + ')"'
+                      + ' style="' + fieldStyle + (isHuman ? 'background:#f3f3f3;' : '') + '"'
+                      + ' onchange="refreshEffective(' + idx + ')"'
                       + ' title="Начните набирать — список отфильтруется. Облачную модель можно вписать целиком: cloud:вендор/модель'
-                      + (cloudHint ? ' (облако: ' + cloudHint + ')' : '') + '">';
+                      + (cloudHint ? ' (облако: ' + cloudHint + ')' : '')
+                      + '. «human» — живой участник: говорит сам, без модели и чисел'
+                      + '">';
 
                 const supportsThinking = modelSupportsThinking(p.model);
                 const thinkValue = p.think || 'auto';
@@ -994,9 +1004,12 @@ HTML_TEMPLATE = """
         function renderModelSuggestions() {
             const box = document.getElementById('modelList');
             if (!box) return;
+            // «Живой участник» — такая же модель места, как любая другая: без этой
+            // строки посадить за стол человека можно было только из файла настроек
             const option = name => '<option value="' + escapeHtml(name) + '">'
-                + escapeHtml(cloudModels.includes(name) ? '☁️ ' + name : name) + '</option>';
-            const names = models.concat(cloudModels);
+                + (name === 'human' ? '🧑 Живой участник — говорит сам'
+                    : escapeHtml(cloudModels.includes(name) ? '☁️ ' + name : name)) + '</option>';
+            const names = ['human'].concat(models, cloudModels);
             // Модель из PARTICIPANTS может быть с тегом: показываем и её, даже
             // если такого имени в списках нет
             cast.forEach(p => {
@@ -1020,8 +1033,11 @@ HTML_TEMPLATE = """
                     avatar_emoji: p.avatar_emoji,
                     avatar_url: p.avatar_url || null,
                 };
+                // Модель отправляем всегда, и «human» тоже: молчание клиента сервер
+                // читал как «модель не менялась» — и место, которое режиссёр сделал
+                // живым, молча возвращалось из модели прежней
+                entry.model = String(pick(`model-${idx}`, p.model) || '').trim();
                 if (p.model !== 'human') {
-                    entry.model = pick(`model-${idx}`, p.model);
                     // Пустая строка = «как в OPTIONS»: сервер убирает такое поле у участника.
                     // Поля нет в пульте — не отправляем ничего, чтобы не стереть число
                     // из PARTICIPANTS нечаянно

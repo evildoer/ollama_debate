@@ -12,7 +12,12 @@
 
     POST {base}/chat/completions
     Authorization: Bearer <ключ>
-    {"model": "qwen/qwen3.7-flash", "messages": [...], "temperature": 0.8, ...}
+    {"model": "qwen/qwen3.7-flash", "messages": [...], "stream": false}
+
+Тело запроса нарочно короткое: числа характера, инструменты и поле «name»
+у сообщений добавляются только по настройке (CLOUD_SEND_*): каждый лишний
+ключ — повод для «400 Bad Request», а серия таких отказов уводит ключ в паузу
+и превращает всё в 429.
 
     {"choices": [{"message": {"content": "...", "tool_calls": [...]}}],
      "usage": {"prompt_tokens": 100, "completion_tokens": 200}}
@@ -85,6 +90,48 @@ _load_dotenv()
 
 
 # ── ЧТО СЧИТАЕТСЯ ОБЛАЧНОЙ МОДЕЛЬЮ ──────────────────────────────────────────
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Переключатель из .env: «1», «true», «да» — включено, «0» — выключено.
+
+    Пусто или непонятное значение — берётся то, что стоит в settings: иначе
+    опечатка в .env молча выключала бы то, что человек только что включил.
+    """
+    value = (os.environ.get(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in ("1", "true", "yes", "on", "да", "вкл")
+
+
+def send_params() -> bool:
+    """Отправлять ли на шлюз числа участника (temperature и прочие)."""
+    return _env_flag("CLOUD_SEND_PARAMS", settings.CLOUD_SEND_PARAMS)
+
+
+def send_tools() -> bool:
+    """Отправлять ли шлюзу инструмент поиска. Без поиска в проекте — и тут нет."""
+    return settings.ENABLE_SEARCH and _env_flag("CLOUD_SEND_TOOLS", settings.CLOUD_SEND_TOOLS)
+
+
+def send_message_names() -> bool:
+    """Оставлять ли у сообщений поле «name»."""
+    return _env_flag("CLOUD_SEND_MESSAGE_NAMES", settings.CLOUD_SEND_MESSAGE_NAMES)
+
+
+def plain_messages(messages: list) -> list:
+    """Сообщения в самой простой форме: только «role» и «content».
+
+    Зачем убирать имена. По схеме OpenAI поле «name» — это латиница, цифры,
+    дефис и подчёркивание, а у нас там русские имена: шлюз честно отвечает
+    «400 Bad Request», и хорошо, если не на каждом ходу. Двадцать таких
+    ответов за минуту переводят ключ в паузу, и на всё сыплется 429 —
+    а причина остаётся невидимой, потому что имя в теле никто не заподозрит.
+
+    Кто говорит, и так видно из текста: «Имя говорит: …» дописывается в show.
+    """
+    return [{"role": str(message.get("role") or "user"), "content": message.get("content") or ""}
+            for message in (messages or []) if isinstance(message, dict)]
+
 
 def is_cloud_model(model: str) -> bool:
     """Модель с префиксом («cloud:qwen/qwen3.7-flash») играет на облаке.
@@ -190,11 +237,60 @@ def _url(path: str) -> str:
     return f"{base_url()}/{path.lstrip('/')}"
 
 
-def _request(path: str, payload=None, method: str = "GET", timeout: int = None):
+# Что значат коды шлюза — словами, а не номером: по номеру причина не видна,
+# а ошибка из чата идёт прямо в ленту спектакля.
+_HTTP_HINTS = {
+    400: "шлюз не понял запрос. Обычно дело в лишнем или неверном поле в теле: "
+         "попробуйте выключить числа характеров и инструменты поиска (CLOUD_SEND_*)",
+    401: "шлюз не принял ключ: проверьте строку CLOUD_API_KEY в файле .env",
+    402: "на ключе кончились средства: пополните баланс",
+    403: "ключ не даёт доступа к этой модели",
+    404: "модель или адрес шлюза не найдены: проверьте CLOUD_BASE_URL и имя модели",
+    429: "шлюз просит сбавить темп: либо лимит модели, либо пауза по ключу после "
+         "серии ошибок. Подождите и попробуйте снова",
+}
+
+
+def _error_text(code: int, reason: str, detail: str) -> str:
+    """Ошибка шлюза одной строкой: код, подсказка словами и ответ шлюза."""
+    text = f"шлюз ответил HTTP {code} {reason}".strip()
+    hint = _HTTP_HINTS.get(code)
+    if hint:
+        text += f" — {hint}"
+    if detail:
+        # Шлюз иногда пересказывает запрос целиком: длинный ответ обрезаем
+        text += f": {detail[:300]}"
+    return text
+
+
+def _wait_before_retry(attempt: int, headers) -> float:
+    """Сколько ждать до следующей попытки при 429.
+
+    Своя задержка растёт (1, 2, 4 секунды), но если шлюз прислал Retry-After —
+    слушаем его. Огромные значения (пауза по ключу бывает и в 12 часов) в сон
+    превращать нельзя: спектакль на это время не остановишь, поэтому берём
+    не больше сигнала «подожди немного»
+    """
+    delays = tuple(settings.CLOUD_RETRY_DELAYS or ())
+    wait = float(delays[attempt]) if attempt < len(delays) else 0.0
+    try:
+        offered = float((headers or {}).get("Retry-After"))
+        if 0 < offered <= 15:
+            wait = max(wait, offered)
+    except (TypeError, ValueError):
+        pass
+    return wait
+
+
+def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
+             retries: int = None):
     """Один запрос к шлюзу. Возвращает (данные, текст ошибки) — без исключений.
 
     Ключа в тексте ошибки не бывает: сюда его подставляет только этот метод,
     а наружу уходит уже прогнанным через hide_key.
+
+    Повторяется только 429 и только с задержкой: остальные 4xx — про сам запрос,
+    и повторять их бессмысленно (и вредно: серия ошибок уводит ключ в паузу).
     """
     problem = key_problem()
     if problem:
@@ -212,21 +308,36 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None):
     # и через свой локальный прокси (как поиск в интернете) значило бы замедлить
     # запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=timeout or settings.CLOUD_TIMEOUT) as response:
-            body = response.read().decode("utf-8")
-        return json.loads(body), None
-    except urllib.error.HTTPError as e:
-        detail = ""
+    delays = tuple(settings.CLOUD_RETRY_DELAYS or ())
+    attempts = (len(delays) if retries is None else max(0, retries)) + 1
+
+    for attempt in range(attempts):
         try:
-            detail = e.read().decode("utf-8")[:500]
-        except Exception:
+            with opener.open(request, timeout=timeout or settings.CLOUD_TIMEOUT) as response:
+                body = response.read().decode("utf-8")
+            try:
+                return json.loads(body), None
+            except ValueError:
+                return None, hide_key(f"шлюз ответил не данными, а текстом: {body[:200]}")
+        except urllib.error.HTTPError as e:
             detail = ""
-        finally:
-            e.close()   # иначе Python ругается на не закрытый ответ ошибки
-        return None, hide_key(f"шлюз ответил HTTP {e.code} {e.reason}: {detail}".strip())
-    except Exception as e:
-        return None, hide_key(f"шлюз недоступен по адресу {base_url()}: {e}")
+            try:
+                detail = e.read().decode("utf-8")[:500]
+            except Exception:
+                detail = ""
+            finally:
+                e.close()   # иначе Python ругается на не закрытый ответ ошибки
+            if e.code == 429 and attempt + 1 < attempts:
+                wait = _wait_before_retry(attempt, getattr(e, "headers", None))
+                print(f"  ⏳ Шлюз просит подождать (429), повторяю через {wait:.0f} с "
+                      f"— попытка {attempt + 2} из {attempts}")
+                time.sleep(wait)
+                continue
+            return None, hide_key(_error_text(e.code, e.reason, detail))
+        except Exception as e:
+            return None, hide_key(f"шлюз недоступен по адресу {base_url()}: {e}")
+
+    return None, "шлюз не ответил"      # недостижимо: попытки кончаются возвратом
 
 
 # ── ПЕРЕВОД ЧИСЕЛ УЧАСТНИКА ─────────────────────────────────────────────────
@@ -293,14 +404,20 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     (поиск в интернете, разбор ошибок, лента) работает без изменений. Ошибка
     приходит текстом в первом элементе: так же ведёт себя и Ollama-путь.
     """
+    # Тело запроса нарочно простое: модель, сообщения и stream. Всё остальное
+    # (числа характеров, инструмент поиска, имена отправителей) добавляется только
+    # если его включили в настройках — см. CLOUD_SEND_* в settings.py. Так облачный
+    # участник сначала просто говорит, а лишние поводы для «400 Bad Request»,
+    # от которых ключ уходит в паузу и отвечает 429, остаются за дверью
     payload = {
         "model": bare_model_name(model),
-        "messages": messages,
+        "messages": list(messages or []) if send_message_names() else plain_messages(messages),
         "stream": False,
     }
-    payload.update(translate_options(options if options is not None else settings.OPTIONS))
+    if send_params():
+        payload.update(translate_options(options if options is not None else settings.OPTIONS))
 
-    if settings.ENABLE_SEARCH:
+    if send_tools():
         payload["tools"] = _tool_schema()
         if tool_choice:
             # «any» у Ollama значит «обязан вызвать инструмент», у OpenAI — «required»
@@ -339,7 +456,8 @@ def fetch_models(force: bool = False, timeout: int = 20) -> tuple:
             and time.monotonic() - _MODELS_CACHE["at"] < settings.CLOUD_MODELS_CACHE_TTL:
         return _MODELS_CACHE["names"], _MODELS_CACHE["error"]
 
-    result, error = _request("models", timeout=timeout)
+    # Список моделей — не разговор: повторять его незачем, ответ нужен сейчас
+    result, error = _request("models", timeout=timeout, retries=0)
     names = []
     if not error:
         for item in (result.get("data") or []):

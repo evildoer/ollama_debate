@@ -763,9 +763,12 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
     # поиска в интернете и разбор ошибок в ask_model остаются нетронутыми
     if cloud.is_cloud_model(model):
         # Инструменты облачные модели умеют, а спросить про это не у кого:
-        # /api/show спрашивает Ollama, у которой такой модели нет. Эта метка ещё и
-        # разрешает принудительный поиск в ask_model - он смотрит в тот же кэш
-        MODELS_TOOLS_SUPPORT[model] = True
+        # /api/show спрашивает Ollama, у которой такой модели нет. Метка — та же,
+        # что и у местных, и она разрешает принудительный поиск в ask_model
+        # (он смотрит в тот же кэш). Но только когда инструмент правда отправляется:
+        # иначе мы бы требовали поиск у шлюза, которого он не получал, — и получали
+        # ошибку на каждом ходу вместо обычной реплики
+        MODELS_TOOLS_SUPPORT[model] = cloud.send_tools()
         return cloud.chat(model, messages, options=options, tool_choice=tool_choice)
 
     # Проверяем кэш поддержки tools

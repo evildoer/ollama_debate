@@ -134,8 +134,46 @@ BUGS = {
     ],
     "ключ шлюза уехал в текст ошибки, а тот — в ленту": [
         ("aitheatre/cloud.py",
-         '        return None, hide_key(f"шлюз ответил HTTP {e.code} {e.reason}: {detail}".strip())',
-         '        return None, f"шлюз ответил HTTP {e.code} {e.reason}: {detail}".strip()'),
+         "            return None, hide_key(_error_text(e.code, e.reason, detail))",
+         "            return None, _error_text(e.code, e.reason, detail)"),
+    ],
+    "русское имя отправителя снова уезжает на шлюз": [
+        ("aitheatre/cloud.py",
+         '"messages": list(messages or []) if send_message_names() else plain_messages(messages),',
+         '"messages": list(messages or []),'),
+    ],
+    "числа характеров снова уезжают на шлюз": [
+        ("aitheatre/cloud.py",
+         "    if send_params():",
+         "    if True:"),
+    ],
+    "после 429 запрос не повторяется": [
+        ("aitheatre/cloud.py",
+         "            if e.code == 429 and attempt + 1 < attempts:",
+         "            if False:"),
+    ],
+    "остальные 4xx повторяются и продлевают паузу по ключу": [
+        ("aitheatre/cloud.py",
+         "            return None, hide_key(_error_text(e.code, e.reason, detail))",
+         "            if attempt + 1 < attempts:\n"
+         "                time.sleep(0)\n"
+         "                continue\n"
+         "            return None, hide_key(_error_text(e.code, e.reason, detail))"),
+    ],
+    "у шлюза снова требуют поиск, которого он не получал": [
+        ("aitheatre/ollama_api.py",
+         "        MODELS_TOOLS_SUPPORT[model] = cloud.send_tools()",
+         "        MODELS_TOOLS_SUPPORT[model] = True"),
+    ],
+    "пульт снова молчит про модель живого места": [
+        ("aitheatre/page.py",
+         "                entry.model = String(pick(`model-${idx}`, p.model) || '').trim();",
+         "                entry.model = p.model === 'human' ? '' : String(pick(`model-${idx}`, p.model) || '').trim();"),
+    ],
+    "живое место снова нельзя вернуть из человека": [
+        ("aitheatre/show.py",
+         '            if u["model"]:\n                entry["model"] = u["model"]',
+         '            if u["model"] and entry.get("model") != "human":\n                entry["model"] = u["model"]'),
     ],
     "префикс пульта уехал на шлюз вместо имени модели": [
         ("aitheatre/cloud.py",

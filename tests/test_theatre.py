@@ -451,18 +451,47 @@ class TestCastEditor(unittest.TestCase):
         self.assertEqual(cast[0]["gender"], "female")
         self.assertEqual(cast[1]["model"], "q9")
 
-    def test_humans_keep_model_human(self):
-        """Живому участнику нельзя подсунуть модель: он говорит сам."""
+    def test_a_place_can_be_made_human(self):
+        """Живой участник — это место с моделью «human»: его надо суметь создать.
+
+        Пульт раньше молчал про модель живого места, а молчание сервер читал как
+        «модель не менялась» — и место, которое режиссёр только что сделал живым,
+        возвращалось из модели, ничего не сказав
+        """
         payload = cast_payload(self.session)
+        payload[0]["model"] = "human"
+        self.assertEqual(show.apply_cast_patch(payload), "")
+        self.assertEqual(self.session.runtime_participants[0]["model"], "human")
+
+    def test_a_place_can_become_a_model_again(self):
+        """И обратно: человек за местом — не приговор, модель возвращается так же."""
         human_indexes = [i for i, p in enumerate(self.session.runtime_participants)
                          if p["model"] == "human"]
         self.assertTrue(human_indexes, "в составе должен быть живой участник")
+        payload = cast_payload(self.session)
         for index in human_indexes:
             payload[index]["model"] = "r1"
         self.assertEqual(show.apply_cast_patch(payload), "")
         cast = self.session.runtime_participants
         for index in human_indexes:
-            self.assertEqual(cast[index]["model"], "human")
+            self.assertEqual(cast[index]["model"], "r1")
+
+    def test_a_new_place_can_be_created_as_a_human(self):
+        """➕ в пульте даёт место с моделью, но человеком оно становится тем же полем."""
+        payload = cast_payload(self.session)
+        payload.append({"cast_id": "", "role": "participant", "display_name": "Гость",
+                        "gender": "male", "model": "human", "avatar_keywords": "гость"})
+        self.assertEqual(show.apply_cast_patch(payload), "")
+        self.assertEqual(self.session.runtime_participants[-1]["model"], "human")
+
+    def test_an_empty_model_field_does_not_make_a_human(self):
+        """Пустое поле — «как было»: стёртая строка не превращает участника в человека."""
+        before = self.session.runtime_participants[1]["model"]
+        self.assertNotEqual(before, "human")
+        payload = cast_payload(self.session)
+        payload[1]["model"] = ""
+        self.assertEqual(show.apply_cast_patch(payload), "")
+        self.assertEqual(self.session.runtime_participants[1]["model"], before)
 
     def test_temperature_is_updated_and_can_be_cleared(self):
         payload = cast_payload(self.session)
@@ -1442,12 +1471,14 @@ class FakeGateway:
     """
 
     def __init__(self, models=("qwen/qwen3.7-flash",), content="Канберра.",
-                 status=200, body_text=None):
+                 status=200, body_text=None, statuses=()):
         self.requests = []        # что до нас донеслось: метод, путь, ключ, тело
         self.models = list(models)
         self.content = content
         self.status = status
+        self.statuses = list(statuses)   # очередь кодов ответа: для повторов после 429
         self.body_text = body_text    # сырой ответ вместо обычного: ошибки и мусор
+
         gateway = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -1461,7 +1492,7 @@ class FakeGateway:
                     "body": json.loads(raw) if raw else None,
                 })
                 payload = gateway.answer(self.path)
-                self.send_response(gateway.status)
+                self.send_response(gateway.next_status())
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -1483,6 +1514,10 @@ class FakeGateway:
         # миллисекунды, иначе 34 прогона проверки тестов каждый раз съедали минуту
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
+
+    def next_status(self) -> int:
+        """Код ответа: очередь задана — отдаём по одному, иначе всегда один и тот же."""
+        return self.statuses.pop(0) if self.statuses else self.status
 
     def _serve(self):
         self.httpd.timeout = 0.1
@@ -1575,14 +1610,61 @@ class TestCloudGateway(unittest.TestCase):
                          "префикс пульта на шлюз уезжать не должен")
         self.assertEqual(sent["body"]["messages"],
                          [{"role": "user", "content": "Привет!"}])
-        self.assertEqual(sent["body"]["temperature"], 0.8)
-        self.assertEqual(sent["body"]["max_tokens"], 512,
-                         "num_predict у OpenAI зовётся max_tokens")
-        self.assertNotIn("min_p", sent["body"], "в схеме OpenAI такого поля нет")
         self.assertNotIn("options", sent["body"], "вложенные числа — диалект Ollama")
         self.assertNotIn("think", sent["body"], "и think тоже")
         self.assertEqual(content, "Канберра.")
         self.assertEqual(tools, [])
+
+    def test_the_body_is_as_simple_as_possible(self):
+        """Сначала — самый простой разговор: модель, сообщения и stream.
+
+        Каждый лишний ключ в теле — повод для «400 Bad Request», а двадцать
+        таких ответов за минуту уводят ключ в паузу (и всё получает 429).
+        """
+        cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!",
+                                 "name": "иван"}],
+                   options={"temperature": 0.8, "seed": 7})
+
+        sent = self.gateway.last_request()["body"]
+        self.assertEqual(sorted(sent), ["messages", "model", "stream"],
+                         "в теле только модель, сообщения и stream")
+        self.assertEqual(sent["messages"], [{"role": "user", "content": "Привет!"}],
+                         "русское имя в поле name шлюз отвергает: оно уезжать не должно")
+
+    def test_the_numbers_and_tools_can_be_turned_on(self):
+        """Числа характеров и поиск — не запрет, а отдельные выключатели."""
+        for name, value in (("CLOUD_SEND_PARAMS", "1"),
+                            ("CLOUD_SEND_TOOLS", "1"),
+                            ("CLOUD_SEND_MESSAGE_NAMES", "1")):
+            os.environ[name] = value
+            self.addCleanup(os.environ.pop, name, None)
+
+        cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!", "name": "иван"}],
+                   options={"temperature": 0.8, "num_predict": 512, "min_p": 0.2})
+
+        sent = self.gateway.last_request()["body"]
+        self.assertEqual(sent["temperature"], 0.8)
+        self.assertEqual(sent["max_tokens"], 512, "num_predict у OpenAI — max_tokens")
+        self.assertNotIn("min_p", sent, "в схеме OpenAI такого поля нет")
+        self.assertEqual(sent["tools"][0]["function"]["name"], "search_web")
+        self.assertEqual(sent["messages"][0]["name"], "иван")
+
+    def test_a_crowded_gateway_is_asked_again_after_a_pause(self):
+        """429 — просьба сбавить темп: повторяем, а не считаем ход сломанным."""
+        self.gateway.statuses = [429, 200]
+        settings.CLOUD_RETRY_DELAYS = (0, 0, 0)   # ждать в тесте нечего
+        self.addCleanup(setattr, settings, "CLOUD_RETRY_DELAYS", (1, 2, 4))
+
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertEqual(content, "Канберра.")
+        self.assertEqual(len(self.gateway.requests), 2, "после 429 запрос повторяется")
+
+    def test_the_other_errors_are_not_repeated(self):
+        """4xx (кроме 429) — про сам запрос: повторы только продлили бы паузу по ключу."""
+        self.gateway.status = 400
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertIn("HTTP 400", content)
+        self.assertEqual(len(self.gateway.requests), 1)
 
     def test_a_cloud_turn_goes_through_the_common_entrance(self):
         """Весь остальной код зовёт модель через ask_model_with_tools — и облако тоже."""
@@ -1591,8 +1673,9 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(content, "Канберра.")
         self.assertTrue(self.gateway.requests, "ход не дошёл до шлюза")
         # От этой метки зависит принудительный поиск в ask_model: спросить
-        # у Ollama про облачную модель нельзя, но инструменты она умеет
-        self.assertTrue(ollama_api.MODELS_TOOLS_SUPPORT[self.MODEL])
+        # у Ollama про облачную модель нельзя, поэтому её ставит сам облачный путь —
+        # и только тогда, когда инструмент правда отправляется
+        self.assertEqual(ollama_api.MODELS_TOOLS_SUPPORT[self.MODEL], cloud.send_tools())
 
     def test_a_key_with_odd_symbols_is_explained_in_words(self):
         """Заголовки HTTP бывают только латинскими: кириллица в ключе падала бы кодеком."""
@@ -1720,6 +1803,25 @@ class TestCloudPanel(unittest.TestCase):
         body = self.suggestions()
         self.assertIn("cloudModels", body)
         self.assertIn("☁️", body, "по значку видно, что реплика уйдёт в интернет")
+
+    def test_the_living_participant_is_in_the_suggestion_list(self):
+        """«human» — такая же модель места: без неё человека не посадить за стол из пульта."""
+        body = self.suggestions()
+        self.assertIn("'human'", body)
+        self.assertIn("🧑 Живой участник", body)
+
+    def cast_body(self) -> str:
+        start = self.page.index("function collectCast()")
+        return self.page[start:self.page.index("function saveCast()", start)]
+
+    def test_the_living_participants_model_is_sent_too(self):
+        """Пульт молчал про модель живого места — и оно молча возвращалось из модели."""
+        body = self.cast_body()
+        model_line = next(line for line in body.splitlines() if "entry.model = " in line)
+        self.assertIn("pick(`model-${idx}`", model_line)
+        self.assertNotIn("human", model_line)
+        self.assertLess(body.index("entry.model = "), body.index("if (p.model !== 'human') {"),
+                        "модель уходит всегда, а числа — только у моделей")
 
     def test_the_suggestions_are_one_list_for_the_whole_cast(self):
         """У шлюза сотни моделей: своя копия списка в каждой карточке — тысячи строк разметки."""
