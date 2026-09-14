@@ -5,9 +5,11 @@
 
     venv/Scripts/python.exe -m unittest discover -s tests -v
 
-Набор ничего не запускает и никуда не ходит: Ollama и поток спектакля
-подменяются заглушками, поэтому тесты проходят и без запущенной Ollama,
-и не мешают идущему спектаклю. Все проверки — на живом коде проекта,
+Набор не ходит никуда в интернет: Ollama и поток спектакля подменяются
+заглушками, поэтому тесты проходят и без запущенной Ollama, и не мешают
+идущему спектаклю. Облачный шлюз проверяется на своём сервере-заглушке
+на 127.0.0.1 и случайном порту — запрос к нему должен быть настоящим,
+иначе проверять форму запроса нечего. Все проверки — на живом коде проекта,
 а не на его копии.
 
 Приложение разбито на модули (пакет aitheatre/), и подменять функцию нужно там,
@@ -32,8 +34,10 @@
 import builtins
 import collections
 import copy
+import http.server
 import importlib
 import json
+import os
 import re
 import symtable
 import tempfile
@@ -45,14 +49,14 @@ from unittest import mock
 
 import aitheatre
 
-from aitheatre import avatars, deps, ollama_api, page, search, settings, show, text
+from aitheatre import avatars, cloud, deps, ollama_api, page, search, settings, show, text
 from aitheatre import web as web_app
 
 # Приложение разбито на модули, и подменять функцию нужно там, где она живёт:
 # модули вызывают друг друга по полному адресу (ollama_api.check_models_available),
 # поэтому правка в «своём» модуле видна всем. app_module_of находит нужный модуль
 # по имени — так подмена бьёт в цель, а не в копию имени в другом файле.
-APP_MODULES = (settings, deps, text, search, avatars, ollama_api, show, page, web_app)
+APP_MODULES = (settings, deps, text, search, avatars, cloud, ollama_api, show, page, web_app)
 
 
 def app_module_of(name):
@@ -97,8 +101,8 @@ class TestModuleLayout(unittest.TestCase):
 
     def app_modules(self):
         """Модули приложения в порядке знакомства (константы -> зависимости)."""
-        order = ("settings", "deps", "text", "search", "avatars", "ollama_api",
-                 "show", "page")
+        order = ("settings", "deps", "text", "search", "avatars", "cloud",
+                 "ollama_api", "show", "page")
         return [(name, getattr(aitheatre, name)) for name in order] + [("web", web_app)]
 
     def test_every_module_imports(self):
@@ -1423,6 +1427,281 @@ class TestScenePanel(unittest.TestCase):
             with self.subTest(route=route):
                 self.assertIn(route, self.page)
                 self.assertIn(route, {rule.rule for rule in web_app.app.url_map.iter_rules()})
+
+
+# ---------------------------------------------------------------- облако
+
+class FakeGateway:
+    """Заглушка облачного шлюза — настоящий HTTP-сервер в отдельном потоке.
+
+    Подменять здесь нечего: модуль обязан отправить настоящий запрос и разобрать
+    настоящий ответ, иначе проверка формы запроса не значит ничего. Сервер
+    слушает 127.0.0.1 и порт, который выберет система, — в интернет тесты не ходят.
+    """
+
+    def __init__(self, models=("qwen/qwen3.7-flash",), content="Канберра.",
+                 status=200, body_text=None):
+        self.requests = []        # что до нас донеслось: метод, путь, ключ, тело
+        self.models = list(models)
+        self.content = content
+        self.status = status
+        self.body_text = body_text    # сырой ответ вместо обычного: ошибки и мусор
+        gateway = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def _serve(self, method):
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length).decode("utf-8") if length else ""
+                gateway.requests.append({
+                    "method": method,
+                    "path": self.path,
+                    "authorization": self.headers.get("Authorization", ""),
+                    "body": json.loads(raw) if raw else None,
+                })
+                payload = gateway.answer(self.path)
+                self.send_response(gateway.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                self._serve("GET")
+
+            def do_POST(self):
+                self._serve("POST")
+
+            def log_message(self, *args):
+                pass    # иначе каждый запрос печатался бы в вывод тестов
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.httpd.daemon_threads = True
+        # Свой цикл вместо serve_forever: остановка такого сервера ждала бы
+        # полсекунды (интервал опроса), а вспомогательный сервер — это доли
+        # миллисекунды, иначе 34 прогона проверки тестов каждый раз съедали минуту
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self):
+        self.httpd.timeout = 0.1
+        while True:
+            try:
+                self.httpd.handle_request()
+            except (OSError, ValueError):
+                break    # сокет закрыт — просили остановиться
+
+    def answer(self, path: str) -> bytes:
+        if self.body_text is not None:
+            return self.body_text.encode("utf-8")
+        if path.endswith("/models"):
+            payload = {"object": "list",
+                       "data": [{"id": name} for name in self.models]}
+        else:
+            payload = {"choices": [{"message": {"content": self.content}}],
+                       "usage": {"prompt_tokens": 12, "completion_tokens": 3}}
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    @property
+    def base_url(self) -> str:
+        host, port = self.httpd.server_address[:2]
+        return f"http://{host}:{port}/v1"
+
+    def last_request(self) -> dict:
+        return self.requests[-1]
+
+    def stop(self):
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+
+
+class TestCloudGateway(unittest.TestCase):
+    """Облачный участник: ход уходит на шлюз в формате OpenAI.
+
+    Заглушка — живой сервер (см. FakeGateway). Проверяется форма запроса (имя
+    модели без префикса, ключ в заголовке, числа наверху, а не в «options»),
+    разбор ответа и то, что ключ никуда не утекает.
+    """
+
+    KEY = "test-key-1234567890"
+    MODEL = "cloud:qwen/qwen3.7-flash"
+
+    def setUp(self):
+        self.gateway = FakeGateway()
+        self.addCleanup(self.gateway.stop)
+        self.saved = (settings.CLOUD_BASE_URL, settings.CLOUD_API_KEY)
+        self.addCleanup(self._restore_settings)
+        settings.CLOUD_BASE_URL = self.gateway.base_url
+        settings.CLOUD_API_KEY = self.KEY
+        # Ключ берётся ещё и из переменной окружения, а набор обязан вести себя
+        # одинаково на любой машине: без этого «ключа нет» ничего бы не проверяло
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop(settings.CLOUD_KEY_ENV, None)
+        self.addCleanup(self._clear_cache)
+        # Никаких зависимостей от запущенной Ollama: список местных моделей,
+        # проверка «умеет ли модель размышлять» (у каждой модели это /api/show!)
+        # и опрос загруженных моделей подменяются на мгновенные заглушки
+        for name, value in (
+            ("fetch_ollama_models", mock.Mock(return_value=({}, None))),
+            ("model_supports_thinking", mock.Mock(return_value=False)),
+            ("fetch_loaded_models", mock.Mock(return_value=([], None))),
+            ("fetch_gpu_memory", mock.Mock(return_value={})),
+        ):
+            patcher = mock.patch.object(ollama_api, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _restore_settings(self):
+        settings.CLOUD_BASE_URL, settings.CLOUD_API_KEY = self.saved
+
+    def _clear_cache(self):
+        cloud._MODELS_CACHE = {"at": 0.0, "names": [], "error": None}
+
+    def test_the_request_goes_in_the_openai_shape(self):
+        content, tools = cloud.chat(
+            self.MODEL, [{"role": "user", "content": "Привет!"}],
+            options={"temperature": 0.8, "min_p": 0.2, "num_predict": 512})
+
+        sent = self.gateway.last_request()
+        self.assertEqual(sent["path"], "/v1/chat/completions")
+        self.assertEqual(sent["authorization"], f"Bearer {self.KEY}")
+        self.assertEqual(sent["body"]["model"], "qwen/qwen3.7-flash",
+                         "префикс пульта на шлюз уезжать не должен")
+        self.assertEqual(sent["body"]["messages"],
+                         [{"role": "user", "content": "Привет!"}])
+        self.assertEqual(sent["body"]["temperature"], 0.8)
+        self.assertEqual(sent["body"]["max_tokens"], 512,
+                         "num_predict у OpenAI зовётся max_tokens")
+        self.assertNotIn("min_p", sent["body"], "в схеме OpenAI такого поля нет")
+        self.assertNotIn("options", sent["body"], "вложенные числа — диалект Ollama")
+        self.assertNotIn("think", sent["body"], "и think тоже")
+        self.assertEqual(content, "Канберра.")
+        self.assertEqual(tools, [])
+
+    def test_a_cloud_turn_goes_through_the_common_entrance(self):
+        """Весь остальной код зовёт модель через ask_model_with_tools — и облако тоже."""
+        content, _tools = ollama_api.ask_model_with_tools(
+            self.MODEL, [{"role": "user", "content": "Столица Австралии?"}])
+        self.assertEqual(content, "Канберра.")
+        self.assertTrue(self.gateway.requests, "ход не дошёл до шлюза")
+        # От этой метки зависит принудительный поиск в ask_model: спросить
+        # у Ollama про облачную модель нельзя, но инструменты она умеет
+        self.assertTrue(ollama_api.MODELS_TOOLS_SUPPORT[self.MODEL])
+
+    def test_a_key_with_odd_symbols_is_explained_in_words(self):
+        """Заголовки HTTP бывают только латинскими: кириллица в ключе падала бы кодеком."""
+        settings.CLOUD_API_KEY = "ключ-скопированный-из-письма"
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertIn("не латинские символы", content)
+        self.assertNotIn("latin-1", content)
+        self.assertEqual(self.gateway.requests, [])
+
+    def test_a_key_copied_with_quotes_still_works(self):
+        """Ключ часто копируют вместе с «Bearer » или кавычками — это не ошибка человека."""
+        settings.CLOUD_API_KEY = f'"Bearer {self.KEY}"'
+        self.assertTrue(cloud.is_configured())
+        cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertEqual(self.gateway.last_request()["authorization"], f"Bearer {self.KEY}")
+
+    def test_without_a_key_the_answer_says_what_to_do(self):
+        settings.CLOUD_API_KEY = ""
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertIn(settings.CLOUD_KEY_ENV, content)
+        self.assertEqual(self.gateway.requests, [], "без ключа ходить к шлюзу некуда")
+
+    def test_the_key_does_not_come_back_in_the_error(self):
+        """Ошибку шлюза мы показываем прямо в ленте спектакля — ключ туда не должен."""
+        self.gateway.status = 401
+        self.gateway.body_text = json.dumps(
+            {"error": {"message": "неверный ключ"},
+             "seen": f"Authorization: Bearer {self.KEY}"})
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertNotIn(self.KEY, content)
+        self.assertIn("401", content)
+        self.assertIn("***", content)
+
+    def test_the_model_list_comes_from_the_gateway(self):
+        names, error = cloud.fetch_models(force=True)
+        self.assertEqual(names, ["qwen/qwen3.7-flash"])
+        self.assertIsNone(error)
+        self.assertEqual(self.gateway.last_request()["path"], "/v1/models")
+
+    def test_a_cloud_model_is_checked_on_the_gateway_not_in_ollama(self):
+        self.assertTrue(ollama_api.check_models_available([self.MODEL])["ok"])
+
+        wrong = ollama_api.check_models_available(["cloud:нет-такой-модели"])
+        self.assertFalse(wrong["ok"])
+        message = ollama_api.models_problem_message(wrong)
+        self.assertIn("нет-такой-модели", message)
+        self.assertNotIn("ollama pull", message, "скачивать облачную модель бессмысленно")
+
+    def test_without_a_key_a_cloud_participant_is_not_ready(self):
+        settings.CLOUD_API_KEY = ""
+        status = ollama_api.check_models_available([self.MODEL])
+        self.assertFalse(status["ok"])
+        self.assertIn(settings.CLOUD_KEY_ENV, ollama_api.models_problem_message(status))
+
+    def test_a_cast_of_cloud_models_does_not_worry_about_vram(self):
+        """Облачная модель видеопамяти не занимает — и ругаться тут не на что."""
+        fit = ollama_api.check_vram_fit([self.MODEL, "human"])
+        self.assertTrue(fit["checked"])
+        self.assertFalse(fit["warnings"])
+        self.assertEqual(fit["error"], "")
+
+    def test_the_panel_list_shows_cloud_models_with_their_prefix(self):
+        data = web_app.app.test_client().get("/api/models").get_json()
+        self.assertIn(self.MODEL, data["cloud_models"])
+        self.assertTrue(data["cloud"]["configured"])
+
+    def test_the_key_never_reaches_the_page(self):
+        """Ключ — серверный: страница и ответы ей о нём не говорят."""
+        self.assertNotIn(self.KEY, page.HTML_TEMPLATE)
+        session = make_session()
+        session.runtime_participants = session.runtime_participants[:1]
+        session.runtime_participants[0]["model"] = self.MODEL
+        strip_session_patch(self, session)
+        client = web_app.app.test_client()
+        for route in ("/api/models", "/api/participants", "/api/status"):
+            with self.subTest(route=route):
+                self.assertNotIn(self.KEY, client.get(route).get_data(as_text=True))
+
+    def test_the_standalone_olama_helpers_still_work(self):
+        """Облако не должно было сломать обычный путь: местная модель — не облачная."""
+        self.assertFalse(cloud.is_cloud_model("r1"))
+        self.assertEqual(cloud.bare_model_name("r1"), "r1")
+        self.assertEqual(cloud.untranslated_options({"min_p": 0.2, "temperature": 0.8}), ["min_p"])
+
+
+class TestCloudPanel(unittest.TestCase):
+    """Пульт должен честно показывать, что модель играет в интернете."""
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+
+    def model_options(self) -> str:
+        start = self.page.index("function modelOptions(")
+        return self.page[start:self.page.index("function collectCast()", start)]
+
+    def test_the_model_list_tells_local_from_cloud(self):
+        body = self.model_options()
+        self.assertIn("cloudModels", body)
+        self.assertIn("optgroup", body, "иначе не видно, уйдёт ли реплика в интернет")
+
+    def test_the_cloud_models_come_to_the_page(self):
+        self.assertIn("data.cloud_models", self.page)
+
+    def test_the_cloud_explains_itself_when_it_is_not_configured(self):
+        """Пустой раздел «Облако» без объяснения выглядит как поломка, а не как «нет ключа»."""
+        self.assertIn("data.cloud", self.page)
+        self.assertIn("cloudHint", self.page)
+
+    def test_the_ready_warning_uses_the_servers_words(self):
+        """Причины бывают местные и облачные: текст собирает сервер, а не страница."""
+        start = self.page.index("function renderModelsWarning(")
+        body = self.page[start:self.page.index("function searchAvatar(", start)]
+        self.assertIn("status.message", body)
+        self.assertNotIn("Проверьте, что Ollama запущена", body)
 
 
 # ---------------------------------------------------------------- опрос статуса

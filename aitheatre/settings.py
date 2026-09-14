@@ -383,3 +383,41 @@ OLLAMA_GENERATE_URL = f"{OLLAMA_BASE_URL}/api/generate"
 OLLAMA_SHOW_URL = f"{OLLAMA_BASE_URL}/api/show"
 OLLAMA_TAGS_URL = f"{OLLAMA_BASE_URL}/api/tags"
 OLLAMA_PS_URL = f"{OLLAMA_BASE_URL}/api/ps"
+
+# ============================================================
+# ОБЛАЧНЫЕ МОДЕЛИ (шлюз в формате OpenAI)
+# ============================================================
+# Участником спектакля может быть не только модель Ollama, но и облачная — из
+# шлюза, который говорит на формате OpenAI (/v1/chat/completions; так работают
+# proxyapi.ru, OpenRouter и подобные). Всё, что нужно, — адрес и ключ: сама
+# модель ставится в пульте как «cloud:вендор/модель».
+#
+# КЛЮЧ. Его берут из переменной окружения, чтобы он не мог попасть ни в git,
+# ни в переписку. Если удобнее держать ключ прямо здесь — впишите его
+# в CLOUD_API_KEY ниже и помните: файл settings.py отправится вместе с проектом.
+CLOUD_KEY_ENV = "THEATRE_CLOUD_API_KEY"
+CLOUD_API_KEY = ""                 # пусто — берём из CLOUD_KEY_ENV
+CLOUD_BASE_URL = "https://api.proxyapi.ru/v1"   # без слэша на конце
+CLOUD_TIMEOUT = 180                # секунд: большие модели отвечают небыстро
+CLOUD_MODELS_CACHE_TTL = 60        # секунд: список моделей шлюза меняется редко
+
+# Так начинается модель на облаке: «cloud:qwen/qwen3.7-flash». Префикс нужен,
+# чтобы было видно с одного взгляда, куда уйдёт реплика: в Ollama или в интернет
+CLOUD_MODEL_PREFIX = "cloud:"
+
+# Что из чисел участника уходит на облако. В схеме OpenAI есть только эти поля:
+# остальные придуманы в Ollama, и часть шлюзов отвечает на них ошибкой.
+CLOUD_PARAM_KEYS = (
+    ("temperature", "temperature"),
+    ("top_p", "top_p"),
+    ("presence_penalty", "presence_penalty"),
+    ("frequency_penalty", "frequency_penalty"),
+    ("seed", "seed"),
+    ("num_predict", "max_tokens"),     # в Ollama это num_predict, у OpenAI — max_tokens
+)
+
+# min_p, top_k и repeat_penalty в схему OpenAI не входят, но их понимают
+# современные движки (vLLM, SGLang), на которых стоят шлюзы. Включите, если ваш
+# шлюз их принимает: без них характеры на min_p («Циркуль», «Импровизатор»)
+# на облаке будут вести себя как обычная модель
+CLOUD_PASS_OLLAMA_EXTRAS = False

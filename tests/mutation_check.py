@@ -125,6 +125,30 @@ BUGS = {
          "    if not ROLE_OPTIONS.get(role):\n"
          "        return"),
     ],
+    "облачная модель снова ищется в Ollama": [
+        ("aitheatre/ollama_api.py",
+         '    local = [m for m in required if not cloud.is_cloud_model(m)]\n'
+         '    remote = [m for m in required if cloud.is_cloud_model(m)]',
+         '    local = list(required)\n'
+         "    remote = []"),
+    ],
+    "ключ шлюза уехал в текст ошибки, а тот — в ленту": [
+        ("aitheatre/cloud.py",
+         '        return None, hide_key(f"шлюз ответил HTTP {e.code} {e.reason}: {detail}".strip())',
+         '        return None, f"шлюз ответил HTTP {e.code} {e.reason}: {detail}".strip()'),
+    ],
+    "префикс пульта уехал на шлюз вместо имени модели": [
+        ("aitheatre/cloud.py",
+         '    if name.startswith(settings.CLOUD_MODEL_PREFIX):\n'
+         '        return name[len(settings.CLOUD_MODEL_PREFIX):]',
+         "    if False:\n"
+         "        return name"),
+    ],
+    "облачные модели пропали из списка в пульте": [
+        ("aitheatre/page.py",
+         "                cloudModels = data.cloud_models || [];",
+         "                cloudModels = [];"),
+    ],
     "одна пустая ошибка связи снова закрывает театр": [
         ("aitheatre/page.py",
          "                if (statusFailures < STATUS_FAILURES_BEFORE_CLOSED) return;",

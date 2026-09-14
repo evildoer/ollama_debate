@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 
+from . import cloud
 from . import deps
 from . import search
 from . import settings
@@ -58,6 +59,11 @@ def model_supports_thinking(model: str) -> bool:
     с think=true она отклонит, поэтому спрашиваем заранее.
     """
     if not model or model == "human":
+        return False
+    if cloud.is_cloud_model(model):
+        # Спрашивать про размышления некого: /api/show — это Ollama, у которой
+        # такой модели нет. А поле think мы на облако не отправляем: там у него
+        # другой вид (и включать его — отдельная работа)
         return False
     if model in MODELS_THINKING_SUPPORT:
         return MODELS_THINKING_SUPPORT[model]
@@ -289,8 +295,11 @@ def fetch_model_parameters(model: str) -> dict:
     Параметры генерации, вшитые в саму модель (Modelfile). Ollama отдаёт их
     в /api/show строкой вида «temperature 0.8». Именно эти значения действуют,
     пока поле участника пустое, поэтому интерфейс показывает их как подсказку.
+
+    У облачной модели своего Modelfile нет: её значения по умолчанию живут на
+    шлюзе, и спрашивать о них Ollama бессмысленно (и она ответит ошибкой).
     """
-    if not model or model == "human":
+    if not model or model == "human" or cloud.is_cloud_model(model):
         return {}
     if model in _MODEL_PARAMS_CACHE:
         return _MODEL_PARAMS_CACHE[model]
@@ -489,10 +498,19 @@ def check_vram_fit(models: list, num_ctx: int = None) -> dict:
         "warnings": [],
         "error": "",
     }
+    # Спектакль из одних облачных моделей видеопамяти не касается: незачем
+    # ругаться и на видеокарту, которой может не быть, и на Ollama, которую для
+    # такого спектакля вообще можно не запускать
+    local_models = [m for m in (models or [])
+                    if m and m != "human" and not cloud.is_cloud_model(m)]
+    if not local_models:
+        result["checked"] = True
+        return result
+
     if not result["gpu_total"]:
         result["error"] = "объём видеопамяти неизвестен (nvidia-smi не отвечает)"
         return result
-    
+
     available, models_error = fetch_ollama_models()
     if models_error:
         result["error"] = models_error
@@ -611,12 +629,36 @@ def check_models_available(models: list, force: bool = False) -> dict:
     required = [m for m in models if m and m != "human"]
     if not required:
         return {"ok": True, "missing": [], "error": None}
-    
-    available, error = fetch_ollama_models(force=force)
-    if error:
-        return {"ok": False, "missing": required, "error": error}
-    
-    missing = [m for m in required if not model_is_installed(m, available)]
+
+    # Местные модели ищутся в Ollama, облачные — на шлюзе: искать облачную
+    # в /api/tags значило бы объявить «модель не скачана» той, которую и не надо
+    # скачивать
+    local = [m for m in required if not cloud.is_cloud_model(m)]
+    remote = [m for m in required if cloud.is_cloud_model(m)]
+    missing = []
+
+    if local:
+        available, error = fetch_ollama_models(force=force)
+        if error:
+            return {"ok": False, "missing": list(local), "error": error}
+        missing.extend(m for m in local if not model_is_installed(m, available))
+
+    if remote:
+        if not cloud.is_configured():
+            return {"ok": False, "missing": list(remote),
+                    "error": ("для облачных участников нужен ключ шлюза: впишите его в "
+                              f"settings.CLOUD_API_KEY или положите в переменную "
+                              f"{settings.CLOUD_KEY_ENV}")}
+        # Список моделей шлюза кэшируется, поэтому проверка ничего не стоит
+        names, cloud_error = cloud.fetch_models()
+        if cloud_error:
+            return {"ok": False, "missing": list(remote),
+                    "error": f"облачные модели: {cloud_error}"}
+        known = {cloud.cloud_model_id(n) for n in names}
+        if known:
+            # Пустой список — это «шлюз ничего не отдал», а не «все модели пропали»
+            missing.extend(m for m in remote if m not in known)
+
     return {"ok": not missing, "missing": missing, "error": None}
 
 def report_models_status(models: list):
@@ -667,16 +709,31 @@ def report_models_status(models: list):
         print(f"  📦 Сейчас в памяти: {parts}")
 
 def models_problem_message(status: dict) -> str:
-    """Человекочитаемое объяснение, почему спектакль нельзя начать."""
-    if status.get("error"):
-        return f"{status['error']}. Проверьте, что Ollama запущена."
-    
+    """Человекочитаемое объяснение, почему спектакль нельзя начать.
+
+    Местные и облачные причины разделены: «проверьте, что Ollama запущена» —
+    бесполезный совет тому, у кого не вписан ключ шлюза, а «скачайте модель» —
+    тому, чья модель живёт в интернете.
+    """
     missing = status.get("missing") or []
-    if missing:
-        pulls = " ; ".join(f"ollama pull {m}" for m in missing)
-        return f"В Ollama нет моделей: {', '.join(missing)}. Скачайте их: {pulls}"
-    
-    return ""
+    local_missing = [m for m in missing if not cloud.is_cloud_model(m)]
+    cloud_missing = [m for m in missing if cloud.is_cloud_model(m)]
+
+    lines = []
+    if status.get("error"):
+        lines.append(status["error"])
+        if not cloud_missing or local_missing:
+            lines[-1] += ". Проверьте, что Ollama запущена."
+
+    if local_missing:
+        pulls = " ; ".join(f"ollama pull {m}" for m in local_missing)
+        lines.append(f"В Ollama нет моделей: {', '.join(local_missing)}. Скачайте их: {pulls}")
+
+    if cloud_missing:
+        lines.append("На облачном шлюзе нет моделей: " + ", ".join(cloud_missing)
+                     + ". Сверьтесь с каталогом моделей шлюза.")
+
+    return " ".join(lines)
 
 
 def _merge_options(participant: dict) -> dict:
@@ -701,6 +758,16 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         think: True/False - явно включить/выключить размышления (см. resolve_think),
                None - не трогать режим модели
     """
+    # Облачная модель играет не в Ollama: ход уходит на шлюз, в формате OpenAI.
+    # Возвращаемая форма та же (текст, вызовы инструментов), поэтому весь цикл
+    # поиска в интернете и разбор ошибок в ask_model остаются нетронутыми
+    if cloud.is_cloud_model(model):
+        # Инструменты облачные модели умеют, а спросить про это не у кого:
+        # /api/show спрашивает Ollama, у которой такой модели нет. Эта метка ещё и
+        # разрешает принудительный поиск в ask_model - он смотрит в тот же кэш
+        MODELS_TOOLS_SUPPORT[model] = True
+        return cloud.chat(model, messages, options=options, tool_choice=tool_choice)
+
     # Проверяем кэш поддержки tools
     if model not in MODELS_TOOLS_SUPPORT:
         # Первый запрос - проверяем через /api/show
@@ -926,26 +993,13 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         })
         
         try:
-            data = {
-                "model": model,
-                "messages": messages,
-                "options": options or settings.OPTIONS,
-                "stream": False,
-                "think": False
-            }
-            
-            req = urllib.request.Request(
-                settings.OLLAMA_URL,
-                data=json.dumps(data).encode('utf-8'),
-                headers={'Content-Type': 'application/json'}
-            )
-            
-            with urllib.request.urlopen(req, timeout=120) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                if "message" in result:
-                    content = result["message"].get("content", "")
-                    if content and content.strip():
-                        return content, search_count, search_queries
+            # Через общий вход, а не своим запросом: так облачная модель тоже
+            # получит последний шанс ответить (у неё размышлений в формате Ollama нет,
+            # но пустой ответ бывает и по своим причинам)
+            content, _tool_calls = ask_model_with_tools(model, messages, tool_choice=None,
+                                                        options=options, think=False)
+            if content and content.strip():
+                return content, search_count, search_queries
         except Exception as e:
             print(f"  ⚠️  Ошибка финального запроса: {e}")
     

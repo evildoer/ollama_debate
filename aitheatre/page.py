@@ -408,6 +408,8 @@ HTML_TEMPLATE = """
         // поэтому страница не держит вторую (свою) копию настроек
         let cast = [];
         let models = [];               // скачанные модели Ollama для выбора в составе
+        let cloudModels = [];          // модели облачного шлюза, с префиксом «cloud:»
+        let cloudHint = '';            // почему облачных моделей нет: нет ключа или шлюз молчит
         let thinkingModels = [];       // из них те, что умеют размышлять (capabilities Ollama)
         let debateRunning = false;
         let pollInterval = null;
@@ -430,8 +432,14 @@ HTML_TEMPLATE = """
             .then(r => r.json())
             .then(data => {
                 models = data.models || [];
+                cloudModels = data.cloud_models || [];
                 thinkingModels = data.thinking_models || [];
                 if (data.error) console.warn('Список моделей недоступен: ' + data.error);
+                // Облако без ключа — не ошибка, а «ещё не настроено»: скажем об этом
+                // в разделе готовности, а не молчанием в списке моделей
+                if (data.cloud && !data.cloud.configured) cloudHint = 'не настроено';
+                else if (data.cloud && data.cloud.error) cloudHint = data.cloud.error;
+                else cloudHint = '';
                 renderCastEditor();
             })
             .catch(err => console.warn('Не удалось получить список моделей:', err));
@@ -965,16 +973,34 @@ HTML_TEMPLATE = """
         }
         
         function modelOptions(current) {
-            const list = models.slice();
+            const local = models.slice();
+            const remote = cloudModels.slice();
             // Модель из PARTICIPANTS может быть с тегом: показываем её, даже если список иной
-            if (current && !list.includes(current)) list.unshift(current);
-            if (!list.length) return `<option value="${escapeHtml(current || '')}" selected>${escapeHtml(current || 'нет моделей')}</option>`;
+            const known = name => local.includes(name) || remote.includes(name);
+            if (current && !known(current)) {
+                (current.indexOf('cloud:') === 0 ? remote : local).unshift(current);
+            }
+            const option = name => `<option value="${escapeHtml(name)}" ${name === current ? 'selected' : ''}>${escapeHtml(name)}</option>`;
             // Место без модели — это «ещё не выбрана», а не «первая в списке».
             // Раньше подходящего варианта не находилось, и браузер сам показывал
             // первую модель: перестановка или удаление соседа молча записывали её
             // в участника, а сайдбар показывал чужую модель вместо прочерка
             const blank = current ? '' : '<option value="" selected>— выберите модель —</option>';
-            return blank + list.map(name => `<option value="${escapeHtml(name)}" ${name === current ? 'selected' : ''}>${escapeHtml(name)}</option>`).join('');
+            if (!local.length && !remote.length) {
+                return `<option value="${escapeHtml(current || '')}" selected>${escapeHtml(current || 'нет моделей')}</option>`;
+            }
+            // Две группы, а не один список: с одного взгляда видно, играет ли
+            // участник на этом компьютере (и займёт видеопамять) или в интернете
+            const localGroup = local.length
+                ? '<optgroup label="💻 На этом компьютере (Ollama)">' + local.map(option).join('') + '</optgroup>'
+                : '';
+            const cloudLabel = cloudHint
+                ? '☁️ Облако — ' + cloudHint
+                : '☁️ Облако (' + remote.length + ')';
+            const cloudGroup = remote.length
+                ? '<optgroup label="' + escapeHtml(cloudLabel) + '">' + remote.map(option).join('') + '</optgroup>'
+                : (cloudHint ? '<optgroup label="' + escapeHtml(cloudLabel) + '"></optgroup>' : '');
+            return blank + localGroup + cloudGroup;
         }
         
         function collectCast() {
@@ -1045,11 +1071,11 @@ HTML_TEMPLATE = """
                 box.innerHTML = '';
                 return;
             }
-            box.innerHTML = `⚠️ ${
-                status.error
-                    ? `${status.error}. Проверьте, что Ollama запущена.`
-                    : `В Ollama нет моделей: <b>${missing.join(', ')}</b>. Скачайте: <code>${missing.map(m => 'ollama pull ' + m).join(' ; ')}</code>`
-            }`;
+            // Текст собирает сервер: причина бывает и местная, и облачная, и две
+            // копии этой формулировки неизбежно разошлись бы
+            const text = status.message
+                || `В моделях что-то не так: ${missing.join(', ')}`;
+            box.textContent = '⚠️ ' + text;
             box.style.display = 'block';
         }
         

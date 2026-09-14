@@ -15,6 +15,7 @@ from flask import Flask, jsonify, render_template_string, request, send_from_dir
 from flask_socketio import SocketIO, emit
 
 from . import avatars
+from . import cloud
 from . import ollama_api
 from . import page
 from . import settings
@@ -69,15 +70,35 @@ def get_static_instructions():
 
 @app.route('/api/models')
 def get_models():
-    """Скачанные модели Ollama: ими заполняется список выбора модели в составе."""
+    """Скачанные модели Ollama и доступные облачные: ими заполняется список выбора."""
     models, error = ollama_api.fetch_ollama_models(force=True)
     names = sorted(models.keys()) if models else []
+    # Облачные идут отдельным списком: в пульте они будут своей группой, чтобы
+    # было видно, куда уйдёт реплика — в свой компьютер или в интернет
+    cloud_state = cloud.status()
     return jsonify({
         "models": names,
         # Кто из моделей умеет размышлять: интерфейс не даст включить это там, где нельзя
         "thinking_models": [n for n in names if ollama_api.model_supports_thinking(n)],
+        "cloud_models": [cloud.cloud_model_id(n) for n in cloud_state["models"]],
+        "cloud": {"configured": cloud_state["configured"],
+                  "base_url": cloud_state["base_url"],
+                  "error": cloud_state["error"]},
         "error": error or "",
     })
+
+def models_status_payload(models: list, force: bool = False) -> dict:
+    """Статус моделей вместе с готовым объяснением.
+
+    Причины бывают разные — модели нет в Ollama, нет ключа облачного шлюза,
+    модели нет на шлюзе, — и собирать текст из полей дважды (на сервере и на
+    странице) значит рано или поздно разойтись в объяснениях. Страница просто
+    показывает то, что пришло.
+    """
+    status = ollama_api.check_models_available(models, force=force)
+    status["message"] = ollama_api.models_problem_message(status)
+    return status
+
 
 def cast_payload() -> list:
     """
@@ -149,7 +170,7 @@ def participants():
         "finished": show.session.finished,
         "topic": show.session.topic,
         # Сразу сообщаем интерфейсу, если нужных моделей нет в Ollama
-        "models_status": ollama_api.check_models_available(models),
+        "models_status": models_status_payload(models),
         # И если они не влезают в видеопамять при текущем num_ctx
         "vram_status": ollama_api.check_vram_fit(models),
     })
@@ -247,9 +268,9 @@ def start():
         })
 
     # Живая проверка перед стартом: модели могли удалить, а Ollama - перезапустить
-    models_status = ollama_api.check_models_available(
-        [p.get("model", "") for p in cast], force=True
-    )
+    # force=True: модели могли удалить или Ollama — перезапустить, поэтому перед
+    # стартом список спрашиваем заново, а не берём из кэша
+    models_status = models_status_payload([p.get("model", "") for p in cast], force=True)
     if not models_status["ok"]:
         problem = ollama_api.models_problem_message(models_status)
         print(f"⛔ Спектакль не начат: {problem}")
