@@ -168,8 +168,6 @@ _MODEL_INFO_CACHE = {}
 _VRAM_MEASUREMENTS = {}
 VRAM_MEASUREMENTS_FILE = Path(__file__).resolve().parent / ".vram_cache.json"
 
-# Настройки, которые не должны теряться при перезапуске (правила судьи)
-SETTINGS_FILE = Path(__file__).resolve().parent / ".theatre_settings.json"
 # Чтобы не повторять одно и то же предупреждение на каждом опросе статуса
 _RAM_SPILL_WARNED = set()
 
@@ -729,29 +727,6 @@ def fetch_gpu_memory() -> dict:
 # ============================================================
 # ВЛЕЗЕТ ЛИ МОДЕЛЬ В ВИДЕОПАМЯТЬ (num_ctx и подсказка безопасного значения)
 # ============================================================
-
-def load_theatre_settings():
-    """
-    Возвращает правила судьи, сохранённые в прошлых запусках: имена участников
-    каждый спектакль новые, а правила судьи - общая настройка роли.
-    """
-    try:
-        if SETTINGS_FILE.exists():
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-            rules = data.get("judge_rules")
-            if isinstance(rules, list) and rules:
-                session.judge_rules = [str(r) for r in rules]
-                print(f"⚖️  Загружены сохранённые правила судьи: {len(session.judge_rules)} пунктов")
-    except Exception as e:
-        print(f"  ⚠️  Не читается {SETTINGS_FILE.name}: {e}")
-
-def save_theatre_settings():
-    try:
-        SETTINGS_FILE.write_text(
-            json.dumps({"judge_rules": session.judge_rules}, ensure_ascii=False, indent=1),
-            encoding="utf-8")
-    except Exception as e:
-        print(f"  ⚠️  Не сохраняется {SETTINGS_FILE.name}: {e}")
 
 def resolve_model_name(model: str, available: dict) -> str:
     """«r1» -> «r1:latest»: имя, под которым модель реально лежит в Ollama."""
@@ -1412,8 +1387,17 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
     }
 
 class DebateSession:
-    """Инкапсулирует состояние и логику дебатов"""
-    
+    """
+    Инкапсулирует состояние и логику дебатов.
+
+    Разделение сущностей:
+      * instructions[name]      — личные инструкции (редактор)
+      * static_instructions     — общие правила (редактор)
+      * judge_rules             — правила судьи (редактор)
+      * moderator_guidelines    — постоянные руководства модератора (редактор)
+      * conversation_history    — поток: посты участников, бусты модератора, вердикты судьи
+    """
+
     def __init__(self):
         self.running = False
         self.topic = ""
@@ -1424,20 +1408,19 @@ class DebateSession:
         self.search_query = None
         self.finished = False
         self.avatars = {}
-        self.avatar_emojis = {}  # {"display_name": "🎭"}
+        self.avatar_emojis = {}
         self.instructions = {}
-        self.static_instructions = []  # Настраиваемые статичные инструкции
-        self.judge_rules = list(DEFAULT_JUDGE_RULES)  # настраиваемые правила судьи
+        self.static_instructions = []
+        self.judge_rules = list(DEFAULT_JUDGE_RULES)
+        self.moderator_guidelines = []
         self.waiting_for_human = False
         self.moderator_message = None
         self.moderator_finished = False
         self.runtime_participants = []
         self.conversation_history = []
-    
-    def reset(self, topic: str, runtime_participants: list, avatars: dict, 
-              instructions: dict, avatar_emojis: dict = None, static_instructions: list = None,
-              judge_rules: list = None):
-        """Сброс состояния для новых дебатов"""
+
+    def reset(self, topic, runtime_participants, avatars, instructions,
+              avatar_emojis=None, static_instructions=None, judge_rules=None):
         self.running = True
         self.topic = topic
         self.posts = []
@@ -1450,337 +1433,312 @@ class DebateSession:
         self.avatar_emojis = avatar_emojis or {}
         self.instructions = instructions
         self.static_instructions = static_instructions or []
-        # Правила судьи - глобальная настройка, а не свойство спектакля: при новом
-        # спектакле они сохраняются, иначе правки модератора терялись бы
         self.judge_rules = list(judge_rules) if judge_rules else (self.judge_rules or list(DEFAULT_JUDGE_RULES))
         self.waiting_for_human = False
         self.moderator_message = None
         self.moderator_finished = False
         self.runtime_participants = runtime_participants
         self.conversation_history = []
-    
+
     def clear(self):
-        """Полный сброс состояния (кнопка «Новый спектакль»)"""
+        """Полный сброс (кнопка «Новый спектакль»)."""
+        guidelines = list(self.moderator_guidelines)
         self.__init__()
-    
-    def add_post(self, display_name: str, model_used: str, content: str, round_num: int,
-                 search_count: int = 0, search_queries: list = None, is_moderator: bool = False, is_judge: bool = False, gender: str = "male"):
-        """Добавляет пост в историю и список постов"""
+        self.moderator_guidelines = guidelines
+
+    # ------------------------------------------------------------
+    # Работа с постами
+    # ------------------------------------------------------------
+
+    def add_post(self, display_name, model_used, content, round_num,
+                 search_count=0, search_queries=None,
+                 is_moderator=False, is_judge=False, gender="male"):
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
-        
-        # Определяем роль
+
         role = "participant"
         if is_moderator:
             role = "moderator"
         elif is_judge:
             role = "judge"
-        
-        post = create_post(display_name, model_used, content, round_num, 
+
+        post = create_post(display_name, model_used, content, round_num,
                           avatar_url, avatar_emoji, search_count, search_queries, role, gender)
         self.posts.append(post)
-        
+
         if content.strip():
             self.conversation_history.append({
                 "display_name": display_name,
                 "content": content,
                 "is_moderator": is_moderator,
                 "is_judge": is_judge,
-                "round": round_num
+                "round": round_num,
             })
-        
         return post
-    
+
     def current_participant_is_moderator(self) -> bool:
-        """Ждёт ли сейчас хода режиссёр (участник с is_moderator)."""
         if not (self.waiting_for_human and self.current_participant):
             return False
-        
         return any(
             p["display_name"] == self.current_participant and p.get("is_moderator", False)
             for p in self.runtime_participants
         )
-    
-    def moderator_messages(self) -> list:
-        """Указания режиссёра из истории (пустые отбрасываются)."""
-        return [
-            post["content"] for post in self.conversation_history
-            if post.get("is_moderator", False) and post["content"].strip()
-        ]
+
+    # ------------------------------------------------------------
+    # Свежий буст модератора
+    # ------------------------------------------------------------
 
     def last_moderator_message_since(self, participant_name: str) -> str:
-        """
-        Возвращает последнюю реплику модератора, если она появилась
-        ПОСЛЕ последнего поста данного участника. Иначе — пустую строку.
-        Это «свежее» указание, которое стоит напомнить прямо перед ответом.
-        """
-        last_mod_idx = -1
-        last_mod_msg = ""
-        last_participant_idx = -1
+        last_mod_idx, last_mod_msg, last_participant_idx = -1, "", -1
         for i, post in enumerate(self.conversation_history):
-            if post.get("is_moderator", False) and post["content"].strip():
-                last_mod_idx = i
-                last_mod_msg = post["content"]
+            if post.get("is_moderator") and post["content"].strip():
+                last_mod_idx, last_mod_msg = i, post["content"]
             elif post.get("display_name") == participant_name:
                 last_participant_idx = i
-        if last_mod_idx > last_participant_idx:
-            return last_mod_msg
-        return ""
-    
-    def get_system_prompt(self, participant: dict, all_names: list) -> str:
-        """Генерирует системный промпт для участника с заменой плейсхолдеров"""
-        # Исключаем модератора и судью из списка собеседников
-        other_names = [
-            name for name in all_names 
-            if name != participant["display_name"]
-            and not any(p["display_name"] == name and (p.get("is_moderator") or p.get("is_judge")) 
-                       for p in self.runtime_participants)
-        ]
-        
-        # Проверяем, является ли этот участник судьёй
-        is_judge = participant.get("is_judge", False)
-        
-        # Определяем правила общения (статичные инструкции)
-        if is_judge:
-            # Правила судьи настраиваются в интерфейсе, по умолчанию - DEFAULT_JUDGE_RULES
-            rules = [instr for instr in (self.judge_rules or DEFAULT_JUDGE_RULES) if instr.strip()]
-            print(f"  ⚖️  Используем правила судьи для {participant['display_name']} ({len(rules)} пунктов)")
-        elif self.static_instructions and len(self.static_instructions) > 0:
-            rules = [instr for instr in self.static_instructions if instr.strip()]
-            print(f"  📋 Используем пользовательские правила для {participant['display_name']}: {len(rules)} пунктов")
-        else:
-            rules = DEFAULT_STATIC_INSTRUCTIONS
-            print(f"  📋 Используем дефолтные правила для {participant['display_name']}")
-        
-        # Заменяем плейсхолдеры в каждом правиле
-        processed_rules = []
-        for rule in rules:
-            # {ИМЯ} → имя текущего участника
-            rule = rule.replace("{ИМЯ}", participant["display_name"])
-            # {СОБЕСЕДНИКИ} → список других участников через запятую
-            rule = rule.replace("{СОБЕСЕДНИКИ}", ", ".join(other_names))
-            # {ТЕМА} → тема обсуждения
-            rule = rule.replace("{ТЕМА}", self.topic)
-            processed_rules.append(rule)
-        
-        # Объединяем все правила
-        ## system_prompt = " ".join(processed_rules)
-        system_prompt = "\n".join(processed_rules)
-        ## system_prompt = "\n".join(f"• {r}" for r in processed_rules)
-        
-        # Добавляем индивидуальную инструкцию участника с чётким заголовком
-        custom_instruction = self.instructions.get(participant["display_name"], "")
-        
-        # Для судьи используем дефолтную инструкцию если нет своей
-        if is_judge and not (custom_instruction and custom_instruction.strip()):
-            custom_instruction = DEFAULT_JUDGE_INSTRUCTION
-            print(f"  ⚖️  Применяю дефолтную инструкцию судьи для {participant['display_name']}")
-        
-        if custom_instruction and custom_instruction.strip():
-            # Заменяем плейсхолдеры в личной инструкции тоже
-            custom_instruction = custom_instruction.replace("{ИМЯ}", participant["display_name"])
-            custom_instruction = custom_instruction.replace("{СОБЕСЕДНИКИ}", ", ".join(other_names))
-            custom_instruction = custom_instruction.replace("{ТЕМА}", self.topic)
-            
-            system_prompt += f"\n\nТВОИ ЛИЧНЫЕ ИНСТРУКЦИИ (обязательны к исполнению):\n{custom_instruction.strip()}"
-            print(f"  📝 Применяю индивидуальную инструкцию для {participant['display_name']}: {custom_instruction[:50]}...")
-        
-        # Добавляем инструкции по поиску
-        if ENABLE_SEARCH:
-            min_search_text = ""
-            if MIN_SEARCHES > 0:
-                min_search_text = f" Сделай минимум {MIN_SEARCHES} поиск(ов) перед ответом."
-            
-            system_prompt += (
-                " Если есть сомнения в фактах или мнениях - используй поиск для уточнения. "
-                "При поиске НЕ указывай год."
-                + min_search_text
-            )
-        
-        # Реплики модератора НЕ идут в системный промпт — они появляются
-        # inline в истории диалога (см. build_messages_for_ai) и напоминаются
-        # прямо перед ответом (см. last_moderator_message_since).
-        # Постоянные правила задаются через ЛИЧНЫЕ ИНСТРУКЦИИ выше.
+        return last_mod_msg if last_mod_idx > last_participant_idx else ""
 
-        # Объясняем модели, кто такой модератор и почему его надо слушать
-        if not is_judge:
-            moderators = [
-                p["display_name"] for p in self.runtime_participants
-                if p.get("is_moderator", False)
-            ]
-            if moderators:
-                system_prompt += (
-                    "\n\nВ этом диалоге также присутствует МОДЕРАТОР: "
-                    + ", ".join(moderators)
-                    + ". Это ведущий обсуждения — такой же участник, но с особыми полномочиями. "
-                    + "Указания модератора имеют наивысший приоритет, обязательны к исполнению "
-                    + "и могут менять тему, условия и правила диалога по ходу обсуждения."
-                )
-        
-        return system_prompt
-    
-    def build_messages_for_ai(self, participant: dict, round_num: int) -> list:
-        """Строит список сообщений для AI модели"""
-        # Исключаем модераторов и судей из списка участников для промпта
-        non_moderator_names = [
-            p["display_name"] for p in self.runtime_participants 
-            if not p.get("is_moderator", False) and not p.get("is_judge", False)
-        ]
-        
-        # Вычисляем имена один раз
-        participant_name = participant["display_name"]
-        participant_name_normalized = participant_name.lower().replace(" ", "_")
-        
-        # Проверяем, является ли этот участник судьёй
-        is_judge = participant.get("is_judge", False)
-        
-        # Получаем полный системный промпт (включая все инструкции)
-        system_prompt = self.get_system_prompt(participant, non_moderator_names)
-        
-        messages = [
-            {"role": "system", "content": system_prompt, "name": "system"},
-        ]
-        
-        # Фильтруем реплики модератора и судьи (они уже в системном промпте)
-        non_moderator_history = [
-            post for post in self.conversation_history 
-            if not post.get("is_moderator", False) and not post.get("is_judge", False)
-        ]
-        
-        # Для обычных участников: реплики модератора включаются inline,
-        # чтобы читаться как оперативные указания в потоке диалога
-        participant_history = [
-            post for post in self.conversation_history
-            if not post.get("is_judge", False)
+    # ------------------------------------------------------------
+    # Списки для плейсхолдеров
+    # ------------------------------------------------------------
+
+    def _get_participants_list(self) -> list:
+        return [
+            p["display_name"] for p in self.runtime_participants
+            if not p.get("is_moderator") and not p.get("is_judge")
         ]
 
-        # Для судьи: что оценивать — текущий раунд или всю историю
-        if is_judge:
-            JUDGE_SEES_ALL_ROUNDS = True  # True = вся история, False = только текущий раунд
+    def _get_moderators_list(self) -> list:
+        return [
+            p["display_name"] for p in self.runtime_participants
+            if p.get("is_moderator")
+        ]
 
-            if JUDGE_SEES_ALL_ROUNDS:
-                posts_to_evaluate = list(non_moderator_history)
-            else:
-                posts_to_evaluate = [
-                    post for post in non_moderator_history
-                    if post.get("round", 0) == round_num
-                ]
+    # ------------------------------------------------------------
+    # Единый фильтр истории
+    # ------------------------------------------------------------
 
-            # Преобразуем в формат сообщений
-            history_messages = []
-            for post in posts_to_evaluate:
-                speaker_name = post["display_name"]
-                content = post["content"]
-                speaker_name_normalized = speaker_name.lower().replace(" ", "_")
+    def _get_history_for(self, viewer: dict, mode: str = "dialog") -> list:
+        """
+        mode:
+          "dialog"            — поток диалога (без вердиктов судьи, бусты inline)
+          "participants_only" — только посты обычных участников (для судьи)
+        """
+        viewer_name = viewer.get("display_name", "")
+        result = []
+        for post in self.conversation_history:
+            is_mod = post.get("is_moderator", False)
+            is_judge = post.get("is_judge", False)
 
-                history_messages.append({
-                    "role": "user",
-                    "content": f"{speaker_name} говорит: {content}",
-                    "name": speaker_name_normalized
-                })
+            if mode == "participants_only":
+                if is_mod or is_judge:
+                    continue
+            elif mode == "dialog":
+                if is_judge and post.get("display_name") != viewer_name:
+                    continue
+            result.append(post)
+        return result
 
-            messages.extend(history_messages)
+    # ------------------------------------------------------------
+    # Формат истории в messages
+    # ------------------------------------------------------------
 
-            # Финальный запрос судье
-            if posts_to_evaluate:
+    def _format_history(self, viewer_name: str, history: list) -> list:
+        messages = []
+        for post in history:
+            speaker = post.get("display_name", "")
+            speaker_norm = speaker.lower().replace(" ", "_")
+            content = post.get("content", "")
+
+            if post.get("is_moderator"):
                 messages.append({
                     "role": "user",
                     "content": (
-                        f'Как {participant_name}, оцени выступления участников. '
-                        f'Для каждого участника укажи оценку от 1 до 10 баллов '
-                        f'и краткое содержание его речи.'
-                    ),
-                    "name": participant_name_normalized
-                })
-            else:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f'Как {participant_name}, пока никто не говорил. '
-                        f'Скажи, что оценивать нечего.'
-                    ),
-                    "name": participant_name_normalized
-                })
-
-            return messages
-        
-        # Преобразуем в формат сообщений
-        history_messages = []
-        for post in participant_history:
-            speaker_name = post["display_name"]
-            content = post["content"]
-            speaker_name_normalized = speaker_name.lower().replace(" ", "_")
-            
-            if post.get("is_moderator", False):
-                history_messages.append({
-                    "role": "user",
-                    "content": (
-                        f"⚙️ МОДЕРАТОР ДИАЛОГА {speaker_name} "
+                        f"⚙️ МОДЕРАТОР ДИАЛОГА {speaker} "
                         f"(ведущий обсуждения) даёт указание: {content}"
                     ),
-                    "name": "moderator"
+                    "name": "moderator",
                 })
-            elif speaker_name == participant_name:
-                history_messages.append({
+            elif speaker == viewer_name:
+                messages.append({
                     "role": "assistant",
                     "content": content,
-                    "name": speaker_name_normalized
+                    "name": speaker_norm,
                 })
             else:
-                history_messages.append({
+                messages.append({
                     "role": "user",
-                    "content": f"{speaker_name} говорит: {content}",
-                    "name": speaker_name_normalized
+                    "content": f"{speaker} говорит: {content}",
+                    "name": speaker_norm,
                 })
-        
-        # Умная обрезка истории на основе подсчёта токенов
-        system_prompt_tokens = estimate_tokens(system_prompt)
-        trimmed_history = trim_history_by_tokens(history_messages, system_prompt_tokens)
-        
-        # Добавляем обрезанную историю в messages
-        messages.extend(trimmed_history)
-        
-        if round_num == 1 and len([p for p in self.conversation_history if not p.get("is_moderator", False)]) == 0:
-            # Первый участник начинает обсуждение - не нужно обращаться к другим, они ещё не говорили
+        return messages
+
+    # ------------------------------------------------------------
+    # Блоки системного промпта
+    # ------------------------------------------------------------
+
+    def _substitute(self, text: str, participant: dict, other_names: list) -> str:
+        text = text.replace("{ИМЯ}", participant.get("display_name", ""))
+        text = text.replace("{СОБЕСЕДНИКИ}", ", ".join(other_names))
+        text = text.replace("{ТЕМА}", self.topic)
+        return text
+
+    def _base_rules_block(self, participant: dict) -> list:
+        other_names = [
+            n for n in self._get_participants_list()
+            if n != participant.get("display_name")
+        ]
+        if participant.get("is_judge"):
+            rules = [r for r in (self.judge_rules or DEFAULT_JUDGE_RULES) if r.strip()]
+        elif self.static_instructions:
+            rules = [r for r in self.static_instructions if r.strip()]
+        else:
+            rules = DEFAULT_STATIC_INSTRUCTIONS
+        return [self._substitute(r, participant, other_names) for r in rules]
+
+    def _guidelines_block(self) -> list:
+        if not self.moderator_guidelines:
+            return []
+        return [
+            "ПРАВИЛА ОТ РУКОВОДИТЕЛЯ ДИАЛОГА (обязательны к исполнению):\n"
+            + "\n".join(f"• {g}" for g in self.moderator_guidelines if g.strip())
+        ]
+
+    def _moderator_intro_block(self) -> list:
+        moderators = self._get_moderators_list()
+        if not moderators:
+            return []
+        return [
+            "В этом диалоге также присутствует МОДЕРАТОР: " + ", ".join(moderators)
+            + ". Это ведущий обсуждения — такой же участник, но с особыми полномочиями. "
+              "Указания модератора имеют наивысший приоритет, обязательны к исполнению "
+              "и могут менять тему, условия и правила диалога по ходу обсуждения."
+        ]
+
+    def _personal_instruction_block(self, participant: dict) -> list:
+        other_names = [
+            n for n in self._get_participants_list()
+            if n != participant.get("display_name")
+        ]
+        custom = self.instructions.get(participant.get("display_name", ""), "")
+        if not (custom and custom.strip()) and participant.get("is_judge"):
+            custom = DEFAULT_JUDGE_INSTRUCTION
+        if not (custom and custom.strip()):
+            return []
+        return [
+            "ТВОИ ЛИЧНЫЕ ИНСТРУКЦИИ (обязательны к исполнению):\n"
+            + self._substitute(custom.strip(), participant, other_names)
+        ]
+
+    def _search_block(self) -> list:
+        if not ENABLE_SEARCH:
+            return []
+        min_text = f" Сделай минимум {MIN_SEARCHES} поиск(ов) перед ответом." if MIN_SEARCHES > 0 else ""
+        return [
+            "Если есть сомнения в фактах или мнениях - используй поиск для уточнения. "
+            "При поиске НЕ указывай год." + min_text
+        ]
+
+    def get_system_prompt(self, participant: dict) -> str:
+        is_judge = participant.get("is_judge", False)
+        blocks = []
+        blocks.extend(self._base_rules_block(participant))
+        blocks.extend(self._guidelines_block())
+        if not is_judge:
+            blocks.extend(self._moderator_intro_block())
+        blocks.extend(self._personal_instruction_block(participant))
+        blocks.extend(self._search_block())
+        return "\n\n".join(b for b in blocks if b)
+
+    # ------------------------------------------------------------
+    # Сборка сообщений для модели
+    # ------------------------------------------------------------
+
+    def build_messages_for_ai(self, participant: dict, round_num: int) -> list:
+        name = participant.get("display_name", "")
+        name_norm = name.lower().replace(" ", "_")
+        is_judge = participant.get("is_judge", False)
+
+        system_prompt = self.get_system_prompt(participant)
+        messages = [{"role": "system", "content": system_prompt, "name": "system"}]
+
+        # ---- Судья ----
+        if is_judge:
+            history = self._get_history_for(participant, mode="participants_only")
+            history_messages = self._format_history(name, history)
+            trimmed = trim_history_by_tokens(history_messages, estimate_tokens(system_prompt))
+            messages.extend(trimmed)
+
+            if trimmed:
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Как {name}, оцени выступления участников. "
+                        f"Для каждого участника укажи оценку от 1 до 10 баллов "
+                        f"и краткое содержание его речи."
+                    ),
+                    "name": name_norm,
+                })
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": f"Как {name}, пока никто не говорил. Скажи, что оценивать нечего.",
+                    "name": name_norm,
+                })
+            return messages
+
+        # ---- Участник ----
+        history = self._get_history_for(participant, mode="dialog")
+        history_messages = self._format_history(name, history)
+        trimmed = trim_history_by_tokens(history_messages, estimate_tokens(system_prompt))
+        messages.extend(trimmed)
+
+        participant_posts = [
+            p for p in self.conversation_history
+            if not p.get("is_moderator") and not p.get("is_judge")
+        ]
+
+        if round_num == 1 and not participant_posts:
             messages.append({
-                "role": "user", 
-                "content": f'Как {participant_name}, ты начинаешь обсуждение на тему "{self.topic}". Представься, обозначь свою позицию по теме и предложи другим участникам высказаться.',
-                "name": participant_name_normalized
+                "role": "user",
+                "content": (
+                    f'Как {name}, ты начинаешь обсуждение на тему "{self.topic}". '
+                    f'Представься, обозначь свою позицию по теме и предложи другим высказаться.'
+                ),
+                "name": name_norm,
             })
         else:
-            # Находим последний пост НЕ от модератора (модератор уже в системном промпте)
-            non_moderator_posts = [p for p in self.conversation_history if not p.get("is_moderator", False)]
-            last_post = non_moderator_posts[-1] if non_moderator_posts else None
-            
+            last_post = participant_posts[-1] if participant_posts else None
             if last_post:
                 last_speaker = last_post["display_name"]
-                
-                # Проверяем количество постов в истории
-                if len(non_moderator_posts) == 1:
-                    # Только один участник говорил - отвечаем только ему
+                if len(participant_posts) == 1:
                     messages.append({
                         "role": "user",
-                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ты тоже начинаешь обсуждение. Ответь {last_speaker} и вырази свою позицию по теме.',
-                        "name": participant_name_normalized
+                        "content": (
+                            f'{last_speaker} только что сказал: "{last_post["content"]}". '
+                            f'Как {name}, ты тоже начинаешь обсуждение. Ответь {last_speaker} '
+                            f'и вырази свою позицию по теме.'
+                        ),
+                        "name": name_norm,
                     })
                 else:
-                    # Несколько участников уже говорили - отвечаем последнему и другим
                     messages.append({
                         "role": "user",
-                        "content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ответь ему и другим участникам, обращаясь по именам.',
-                        #"content": f'{last_speaker} только что сказал: "{last_post["content"]}". Как {participant_name}, ответь ему и другим участникам. НЕ повторяй уже сказанное — добавь новый аргумент, пример или контраргумент. Если тема исчерпана — предложи новый аспект или смежный вопрос.',
-                        "name": participant_name_normalized
+                        "content": (
+                            f'{last_speaker} только что сказал: "{last_post["content"]}". '
+                            f'Как {name}, ответь ему и другим участникам. '
+                            f'НЕ повторяй уже сказанное — добавь новый аргумент, пример или контраргумент. '
+                            f'Если тема исчерпана — предложи новый аспект или смежный вопрос.'
+                        ),
+                        "name": name_norm,
                     })
             else:
                 messages.append({
                     "role": "user",
-                    "content": f'Как {participant_name}, продолжай диалог, обращаясь к другим участникам по именам.',
-                    "name": participant_name_normalized
+                    "content": f"Как {name}, продолжай диалог, обращаясь к другим участникам по именам.",
+                    "name": name_norm,
                 })
 
-        # Свежее указание модератора — прямо перед ответом
-        # (только для не-судья; ветка судьи возвращает messages выше)
-        last_mod_msg = self.last_moderator_message_since(participant_name)
+        last_mod_msg = self.last_moderator_message_since(name)
         if last_mod_msg:
             messages.append({
                 "role": "user",
@@ -1789,24 +1747,25 @@ class DebateSession:
                     "(приоритет выше всех остальных правил, обязательно учесть в этом ответе):\n"
                     f"{last_mod_msg}"
                 ),
-                "name": "moderator"
+                "name": "moderator",
             })
-        
-        print("🔍 MESSAGES:", json.dumps(messages, ensure_ascii=False, indent=1)) ## DEBUG!
+
         return messages
-    
+
+    # ------------------------------------------------------------
+    # Ход AI
+    # ------------------------------------------------------------
+
     def handle_ai_turn(self, participant: dict, round_num: int) -> tuple:
-        """Обрабатывает ход AI участника. Возвращает (response, search_count, search_queries)"""
         self.current_action = "thinking"
-        
         messages = self.build_messages_for_ai(participant, round_num)
-        
+
         response, search_count, search_queries = ask_model(
             model=participant["model"],
             messages=messages,
-            participant_name=participant["display_name"]
+            participant_name=participant["display_name"],
         )
-        
+
         self.add_post(
             display_name=participant["display_name"],
             model_used=participant["model"],
@@ -1815,19 +1774,16 @@ class DebateSession:
             search_count=search_count,
             search_queries=search_queries,
             is_judge=participant.get("is_judge", False),
-            gender=participant.get("gender", "male")
+            gender=participant.get("gender", "male"),
         )
-        
         self.current_action = None
         time.sleep(0.5)
-        
         return response, search_count, search_queries
+
 
 # Глобальный экземпляр сессии
 session = DebateSession()
 
-# Правила судьи из прошлых запусков (можно менять в интерфейсе на ходу режиссёра)
-load_theatre_settings()
 
 def run_debate_thread(topic: str):
     print(f"🎬 Поток дебатов запущен для темы: {topic}")
@@ -3223,29 +3179,22 @@ def moderator_finish():
 
 @app.route('/api/moderator/instructions', methods=['GET'])
 def get_moderator_instructions():
-    """Возвращает текущие static_instructions, moderator_messages и индивидуальные инструкции участников"""
-    moderator_messages = session.moderator_messages()
-    
-    # Собираем индивидуальные инструкции участников
+    """Возвращает текущие настройки редактора и индивидуальные инструкции участников"""
     participant_instructions = []
     for participant in session.runtime_participants:
-        if participant.get("model") != "human":  # Только AI участники
+        if participant.get("model") != "human":
             name = participant.get("display_name", "")
-            instruction = session.instructions.get(name, "")
-            
             participant_instructions.append({
                 "name": name,
-                "instruction": instruction,
-                "is_judge": participant.get("is_judge", False)
+                "instruction": session.instructions.get(name, ""),
+                "is_judge": participant.get("is_judge", False),
             })
-    
+
     return jsonify({
         "static_instructions": session.static_instructions or DEFAULT_STATIC_INSTRUCTIONS,
-        "moderator_messages": moderator_messages,
+        "moderator_messages": session.moderator_guidelines,
         "participant_instructions": participant_instructions,
-        # Правила судьи редактируются так же, как правила участников
         "judge_rules": session.judge_rules or DEFAULT_JUDGE_RULES,
-        # Ими заполняется пустое поле личного промпта судьи в редакторе
         "default_judge_prompt": DEFAULT_JUDGE_INSTRUCTION or "",
         "default_static_instructions": DEFAULT_STATIC_INSTRUCTIONS,
     })
@@ -3262,32 +3211,17 @@ def update_moderator_instructions():
         for i, instr in enumerate(session.static_instructions, 1):
             print(f"   {i}. {instr}")
     
-    # Обновляем moderator_messages если переданы
+    # Обновляем постоянные руководства модератора
+    # (НЕ трогаем бусты в истории — они живут отдельно)
     if isinstance(data.get("moderator_messages"), list):
-        new_messages = data["moderator_messages"]
-        
-        # Удаляем старые moderator_messages из истории
-        session.conversation_history = [
-            post for post in session.conversation_history 
-            if not post.get("is_moderator", False)
+        session.moderator_guidelines = [
+            str(m).strip() for m in data["moderator_messages"] if str(m).strip()
         ]
-        
-        # Добавляем новые moderator_messages
-        for msg in new_messages:
-            text = str(msg).strip() if msg is not None else ""
-            if text:  # Только непустые сообщения
-                session.conversation_history.append({
-                    "display_name": "Руководство",
-                    "content": text,
-                    "is_moderator": True
-                })
-        
-        print(f"📝 Обновлены руководства: {len(new_messages)} пунктов")
+        print(f"📝 Обновлены руководства: {len(session.moderator_guidelines)} пунктов")
     
     # Обновляем правила судьи если переданы
     if isinstance(data.get("judge_rules"), list):
         session.judge_rules = [str(instr) for instr in data["judge_rules"]]
-        save_theatre_settings()
         print(f"⚖️  Обновлены правила судьи: {len(session.judge_rules)} пунктов")
     
     # Обновляем индивидуальные инструкции участников если переданы
