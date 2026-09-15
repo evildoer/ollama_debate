@@ -67,6 +67,23 @@ def app_module_of(name):
     raise AssertionError(f"нет такого имени приложения: {name}")
 
 
+def _printed_text(fake_print):
+    """Всё, что было напечатано, одной строкой — чтобы проверять консоль."""
+    return " ".join(str(call.args[0]) for call in fake_print.call_args_list if call.args)
+
+
+def cloud_setting(test, name, value):
+    """Поставить настройку облака на время проверки.
+
+    Настройки облака читаются из settings.py и только оттуда: .env держит ключ
+    и адрес шлюза, потому что это данные облачного сервиса. Раньше эти же
+    настройки можно было задать строкой в .env, и проверки выставляли их через
+    окружение — теперь правится сама настройка, а после проверки возвращается.
+    """
+    test.addCleanup(setattr, settings, name, getattr(settings, name))
+    setattr(settings, name, value)
+
+
 def setUpModule():
     """Набор не должен зависеть от вашего .env и не пишет в проект.
 
@@ -1687,6 +1704,30 @@ class TestCloudContextWindow(unittest.TestCase):
             self.assertEqual(text.trim_history_by_tokens(messages, 100, model="cloud:x/y"),
                              messages, "CLOUD_NUM_CTX = 0 — истории не режут вовсе")
 
+    def test_an_unbounded_window_is_paid_for_at_every_turn(self):
+        """CLOUD_NUM_CTX = 0 — это не «память без границ», а счёт без границ.
+
+        Ноль ставят, думая про память модели, а платит за него режиссёр: история
+        уезжает целиком не один раз, а на каждом ходу и на каждом круге поиска.
+        Поэтому в консоли об этом говорится — и ровно один раз за запуск, иначе
+        строка-предупреждение на каждом ходу превратилась бы в шум, который
+        перестают читать.
+        """
+        with mock.patch.object(settings, "CLOUD_NUM_CTX", 0), \
+                mock.patch.object(text, "_UNBOUNDED_HISTORY_WARNED", False):
+            with mock.patch("builtins.print") as first:
+                text.trim_history_by_tokens(self._long_history(reels=50, count=2), 100,
+                                            model="cloud:x/y")
+            with mock.patch("builtins.print") as second:
+                text.trim_history_by_tokens([{"role": "user", "content": "слово"}], 0,
+                                            model="cloud:x/y")
+
+        self.assertIn("CLOUD_NUM_CTX", _printed_text(first))
+        self.assertIn("оплач", _printed_text(first),
+                      "про плату за каждый ход надо сказать словами, а не намёком")
+        self.assertNotIn("💸", _printed_text(second),
+                         "предупреждение повторяется на каждом ходу")
+
     def test_window_smaller_than_the_answer_reserve_keeps_the_scene(self):
         with mock.patch.object(settings, "CLOUD_NUM_CTX", 4096):
             messages = self._long_history(reels=40, count=1)
@@ -1694,33 +1735,46 @@ class TestCloudContextWindow(unittest.TestCase):
                              len(messages),
                              "узкое окно не должно отнимать историю целиком")
 
-    def test_window_can_be_set_in_dotenv(self):
+    def test_the_window_lives_in_the_settings_file_not_in_dotenv(self):
+        """Окно правится в settings.py, а строка в .env его больше не двигает.
+
+        В .env остаются только ключ и адрес шлюза — данные вашего облачного
+        сервиса. Всё остальное про облако должно жить в одном месте: пока
+        настройку можно было задать и там, и тут, правящий одно не знал, что
+        решает другое.
+        """
         with mock.patch.dict(os.environ, {"CLOUD_NUM_CTX": "8192"}):
-            self.assertEqual(settings.context_budget("cloud:qwen/qwen3.8-flash")[0], 8192,
-                             "настройку из .env должно быть слышно")
-        with mock.patch.dict(os.environ, {"CLOUD_NUM_CTX": "побольше"}):
             self.assertEqual(settings.context_budget("cloud:qwen/qwen3.8-flash")[0],
                              settings.CLOUD_NUM_CTX,
-                             "непонятное значение — берём из settings, а не падаем")
+                             "строка из .env больше не меняет окно")
+        with mock.patch.object(settings, "CLOUD_NUM_CTX", 8192):
+            self.assertEqual(settings.context_budget("cloud:qwen/qwen3.8-flash")[0], 8192,
+                             "настройку из settings.py должно быть слышно")
 
-    def test_every_cloud_setting_read_from_env_is_a_known_name(self):
-        """Список имён настроек облака не должен отставать от кода.
+    def test_dotenv_holds_only_the_key_and_the_address(self):
+        """В .env читаются ровно две вещи: ключ и адрес шлюза.
 
-        Строка, которой нет в CLOUD_ENV_NAMES, считается в .env незнакомой,
-        и человек с рабочей настройкой читает «приложение её не применило».
-        Так и вышло с CLOUD_STREAM, CLOUD_SHOW_THINKING, CLOUD_LIMIT_PARAMS
-        и CLOUD_TURN_LIMIT: четыре ложных предупреждения на старте.
+        Смотрит в сам код: если облачная настройка снова начнёт читаться из
+        окружения, её имя окажется вне CLOUD_ENV_NAMES — и на файл настроек,
+        где оно объявлено, станет два хозяина.
         """
-        sources = {cloud.__file__: cloud.CLOUD_ENV_NAMES,
-                   settings.__file__: cloud.CLOUD_ENV_NAMES}
-        missing = set()
-        for filename, known in sources.items():
+        extra = set()
+        for filename in (cloud.__file__, settings.__file__):
             source = Path(filename).read_text(encoding="utf-8")
-            read = re.findall(r'_(?:env_flag|env_int|env_number_list)\(' +
-                              r'"(CLOUD_[A-Z0-9_]+)"', source)
-            missing |= set(read) - set(known)
-        self.assertEqual(missing, set(),
-                         f"про эти строки в .env приложение скажет «не знакома»: {sorted(missing)}")
+            extra |= set(re.findall(
+                r'os\.environ(?:\.get\()?\s*\[?\s*["\'](CLOUD_[A-Z0-9_]+)["\']', source))
+        self.assertEqual(extra - set(cloud.CLOUD_ENV_NAMES), set(),
+                         f"эти строки читаются из .env, хотя им место в "
+                         f"{cloud.CLOUD_SETTINGS_FILE}: {sorted(extra)}")
+
+        # И каждая переехавшая настройка должна быть в файле настроек:
+        # подсказка «поставьте её там» без самой настройки — это ложь
+        for name in cloud.CLOUD_MOVED_TO_SETTINGS:
+            with self.subTest(setting=name):
+                self.assertTrue(hasattr(settings, name),
+                                f"{name} нет в settings.py — переезду некуда")
+                self.assertNotIn(name, cloud.CLOUD_ENV_NAMES,
+                                 f"{name} осталась в обоих местах сразу")
 
     def test_the_log_names_whose_window_is_used(self):
         with mock.patch("builtins.print") as fake_print:
@@ -2202,11 +2256,9 @@ class TestCloudGateway(unittest.TestCase):
 
     def test_the_numbers_and_tools_can_be_turned_on(self):
         """Числа характеров и поиск — не запрет, а отдельные выключатели."""
-        for name, value in (("CLOUD_SEND_PARAMS", "1"),
-                            ("CLOUD_SEND_TOOLS", "1"),
-                            ("CLOUD_SEND_MESSAGE_NAMES", "1")):
-            os.environ[name] = value
-            self.addCleanup(os.environ.pop, name, None)
+        for name in ("CLOUD_SEND_PARAMS", "CLOUD_SEND_TOOLS",
+                     "CLOUD_SEND_MESSAGE_NAMES"):
+            cloud_setting(self, name, True)
 
         cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!", "name": "иван"}],
                    options={"temperature": 0.8, "num_predict": 512, "min_p": 0.2})
@@ -2233,8 +2285,7 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(sent["presence_penalty"], 1.0)
         self.assertEqual(sent["top_p"], 1.0, "в пределах диапазона число не трогаем")
 
-        os.environ["CLOUD_LIMIT_PARAMS"] = "0"
-        self.addCleanup(os.environ.pop, "CLOUD_LIMIT_PARAMS", None)
+        cloud_setting(self, "CLOUD_LIMIT_PARAMS", False)
         self.assertEqual(cloud.translate_options({"temperature": 2.0}, self.MODEL)["temperature"],
                          2.0, "выключатель на месте: без него числа уезжают как есть")
 
@@ -2342,8 +2393,7 @@ class TestCloudGateway(unittest.TestCase):
 
     def test_streaming_can_be_switched_off(self):
         """Выключатель на месте: без него ответ приходит целиком, как раньше."""
-        os.environ["CLOUD_STREAM"] = "0"
-        self.addCleanup(os.environ.pop, "CLOUD_STREAM", None)
+        cloud_setting(self, "CLOUD_STREAM", False)
 
         pieces = []
         content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
@@ -2388,8 +2438,7 @@ class TestCloudGateway(unittest.TestCase):
 
     def test_the_thinking_is_not_shown_when_switched_off(self):
         """Выключатель на месте: тогда лента показывает только сказанное."""
-        os.environ["CLOUD_SHOW_THINKING"] = "0"
-        self.addCleanup(os.environ.pop, "CLOUD_SHOW_THINKING", None)
+        cloud_setting(self, "CLOUD_SHOW_THINKING", False)
         self.gateway.stream_text = self._sse(
             {"choices": [{"delta": {"reasoning": "Мысль"}}]}, self._piece("Ответ."))
         thoughts = []
@@ -2408,8 +2457,7 @@ class TestCloudGateway(unittest.TestCase):
         """
         self.addCleanup(cloud._RENAMED_MAX_TOKENS.discard, self.MODEL)
         # Отказ возникает именно из-за числа характера: без него поля в теле нет
-        os.environ["CLOUD_SEND_PARAMS"] = "1"
-        self.addCleanup(os.environ.pop, "CLOUD_SEND_PARAMS", None)
+        cloud_setting(self, "CLOUD_SEND_PARAMS", True)
         self.gateway.statuses = [400, 200]
         self.gateway.texts = [
             json.dumps({"error": {"message": "Unsupported parameter: 'max_tokens' is not "
@@ -2456,19 +2504,21 @@ class TestCloudGateway(unittest.TestCase):
         # и только тогда, когда инструмент правда отправляется
         self.assertEqual(ollama_api.MODELS_TOOLS_SUPPORT[self.MODEL], cloud.send_tools())
 
-    def test_a_label_in_front_of_the_name_still_switches_it_on(self):
-        """Подпись перед именем настройки — ошибка копирования, а не «выключено».
+    def test_a_stale_dotenv_line_points_to_the_settings_file(self):
+        """Строка, переехавшая в settings.py, не молчит, а говорит, куда её нести.
 
-        Из образца .env настройку копировали строкой «Включить: CLOUD_SEND_TOOLS=1».
-        Убрав решётку, человек получал настройку с именем
-        «Включить: CLOUD_SEND_TOOLS» — приложение читало её как чужую строку
-        и молча ничего не включало. Потом причину искали в шлюзе, а её там не было.
+        Из образца .env в старом виде такие строки копировали пачкой, и после
+        переезда они остались бы в файле — а вместе с ними и включённый поиск,
+        который теперь не включается. Молча не применённую настройку потом ищут
+        в шлюзе; поэтому приложение называет строку и печатает готовую строку
+        для settings.py — с тем самым значением, что стояло в .env.
         """
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / ".env").write_text(
                 "CLOUD_API_KEY=test-key\n"
                 "Включить: CLOUD_SEND_PARAMS=1\n"
-                "Включить: CLOUD_SEND_TOOLS=1\n",
+                "CLOUD_SEND_TOOLS=1\n"
+                "CLOUD_RETRY_DELAYS=1, 2, 4\n",
                 encoding="utf-8")
             env = mock.patch.dict(os.environ)
             env.start()
@@ -2476,11 +2526,22 @@ class TestCloudGateway(unittest.TestCase):
             for name in cloud.CLOUD_ENV_NAMES:
                 os.environ.pop(name, None)
             with mock.patch.object(settings, "PROJECT_ROOT", Path(folder)):
-                cloud._load_dotenv()
+                with mock.patch("builtins.print") as fake_print:
+                    cloud._load_dotenv()
+        printed = _printed_text(fake_print)
 
-        self.assertEqual(os.environ.get("CLOUD_SEND_PARAMS"), "1")
-        self.assertEqual(os.environ.get("CLOUD_SEND_TOOLS"), "1")
-        self.assertTrue(cloud.send_tools(), "поиск должен оказаться включённым")
+        self.assertIn("CLOUD_SEND_TOOLS = True", printed,
+                      "переезд обязан подсказать готовую строку для settings.py")
+        self.assertIn("CLOUD_SEND_PARAMS = True", printed,
+                      "и подпись перед именем — это та же настройка")
+        self.assertIn("CLOUD_RETRY_DELAYS = (1, 2, 4)", printed,
+                      "подсказка должна быть того же типа, что в settings.py, "
+                      "а не строкой «1, 2, 4»")
+        self.assertIn(cloud.CLOUD_SETTINGS_FILE, printed)
+        self.assertNotIn("CLOUD_SEND_TOOLS", os.environ,
+                         "строку из .env применять нельзя: у настройки один хозяин")
+        self.assertEqual(os.environ.get("CLOUD_API_KEY"), "test-key",
+                      "ключ из .env по-прежнему подхватывается")
 
     def test_an_unknown_cloud_line_is_not_applied_silently(self):
         """Опечатку в имени (CLOUD_SEND_TOOL) нельзя принимать за настройку."""
@@ -2491,10 +2552,13 @@ class TestCloudGateway(unittest.TestCase):
             self.addCleanup(env.stop)
             os.environ.pop("CLOUD_SEND_TOOL", None)
             with mock.patch.object(settings, "PROJECT_ROOT", Path(folder)):
-                cloud._load_dotenv()
+                with mock.patch("builtins.print") as fake_print:
+                    cloud._load_dotenv()
 
         self.assertNotIn("CLOUD_SEND_TOOL", os.environ,
                          "непонятную строку применять нельзя: о ней надо сказать, а не угадывать")
+        self.assertIn("CLOUD_SEND_TOOL", _printed_text(fake_print),
+                      "о лишней строке надо сказать словами")
 
     def test_the_search_round_trip_goes_in_the_openai_shape(self):
         """Круг поиска держится на идентификаторах: без них шлюз не поймёт ответ.
@@ -2503,8 +2567,7 @@ class TestCloudGateway(unittest.TestCase):
         полем tool_calls с id в сообщении ассистента и полем tool_call_id
         в ответе инструмента.
         """
-        os.environ["CLOUD_SEND_TOOLS"] = "1"
-        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
 
         cloud.chat(self.MODEL, [
             {"role": "user", "content": "Столица Австралии?"},
@@ -2539,10 +2602,8 @@ class TestCloudGateway(unittest.TestCase):
         а остальные числа остаются.
         """
         self.addCleanup(cloud._DROPPED_PARAMS.clear)
-        os.environ["CLOUD_SEND_PARAMS"] = "1"
-        os.environ["CLOUD_PASS_OLLAMA_EXTRAS"] = "1"
-        self.addCleanup(os.environ.pop, "CLOUD_SEND_PARAMS", None)
-        self.addCleanup(os.environ.pop, "CLOUD_PASS_OLLAMA_EXTRAS", None)
+        cloud_setting(self, "CLOUD_SEND_PARAMS", True)
+        cloud_setting(self, "CLOUD_PASS_OLLAMA_EXTRAS", True)
         self.gateway.statuses = [400, 200]
         self.gateway.texts = [
             json.dumps({"error": {"message": "Unknown parameter: 'repeat_penalty'.",
@@ -2574,11 +2635,8 @@ class TestCloudGateway(unittest.TestCase):
         приходилось человеку, а ход кончался ошибкой в ленте, хотя поиск был ни
         при чём.
         """
-        os.environ["CLOUD_SEND_PARAMS"] = "1"
-        os.environ["CLOUD_SEND_TOOLS"] = "1"
-        os.environ["CLOUD_PASS_OLLAMA_EXTRAS"] = "1"
         for name in ("CLOUD_SEND_PARAMS", "CLOUD_SEND_TOOLS", "CLOUD_PASS_OLLAMA_EXTRAS"):
-            self.addCleanup(os.environ.pop, name, None)
+            cloud_setting(self, name, True)
         self.addCleanup(cloud._DROPPED_PARAMS.clear)
         self.gateway.statuses = [400, 200]
         self.gateway.texts = [
@@ -2601,8 +2659,7 @@ class TestCloudGateway(unittest.TestCase):
         за него были оплачены. Теперь инструмент требуется в самом первом запросе
         хода, и реплика в ленте начинается один раз.
         """
-        os.environ["CLOUD_SEND_TOOLS"] = "1"
-        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
         self.gateway.texts = [
             json.dumps({"choices": [{"message": {"content": "", "tool_calls": [
                 {"id": "call-1", "type": "function",
@@ -2637,8 +2694,7 @@ class TestCloudGateway(unittest.TestCase):
 
         Иначе каждый ход возвращал бы ошибку, а серия 400 уводит ключ в паузу.
         """
-        os.environ["CLOUD_SEND_TOOLS"] = "1"
-        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
         self.gateway.statuses = [400, 200]
 
         content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
@@ -2660,8 +2716,7 @@ class TestCloudGateway(unittest.TestCase):
         в CLOUD_TURN_LIMIT: вместо готовой реплики — ещё две минуты ожидания.
         Спрашивать поиск у той, кто инструмент не берёт, не за что — он не сработает.
         """
-        os.environ["CLOUD_SEND_TOOLS"] = "1"
-        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
         # Отказ от инструмента и реплика приходят в одном ходу — именно так это
         # и было в логе: шлюз ругается на tools, а следом отдаёт обычный ответ
         self.gateway.statuses = [400, 200]
@@ -2683,8 +2738,7 @@ class TestCloudGateway(unittest.TestCase):
         приложение просило у модели поиск — то есть ещё один ход ожидания вместо
         честно показанной ошибки.
         """
-        os.environ["CLOUD_SEND_TOOLS"] = "1"
-        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
         calls = []
 
         def failing(*_args, **kwargs):

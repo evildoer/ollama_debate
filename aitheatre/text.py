@@ -98,6 +98,32 @@ def estimate_tokens(text: str) -> int:
         cyrillic = sum(1 for ch in text if "а" <= ch.lower() <= "я" or ch in "ёЁ")
         return max(1, cyrillic // 2 + (len(text) - cyrillic) // 4)
 
+# Про неограниченное окно говорим один раз за запуск: строка «оплата растёт
+# с квадратом числа реплик» на каждом ходу превратилась бы в шум, который
+# перестают читать, — а сказать это надо хотя бы раз, потому что человек,
+# поставивший CLOUD_NUM_CTX = 0, скорее всего думал про память модели,
+# а не про счёт за токены
+_UNBOUNDED_HISTORY_WARNED = False
+
+
+def _warn_about_paying_for_the_whole_scene(total_tokens: int) -> None:
+    """Предупредить, что вся сцена уезжает в каждом запросе и оплачивается.
+
+    Смысл именно в арифметике: история уезжает целиком не один раз, а на каждом
+    ходу и на каждом круге поиска, поэтому плата за спектакль растёт не с числом
+    реплик, а с их квадратом — при сорока репликах по тысяче токенов это сотни
+    тысяч оплаченных входных токенов, а не сорок тысяч.
+    """
+    global _UNBOUNDED_HISTORY_WARNED
+    if _UNBOUNDED_HISTORY_WARNED:
+        return
+    _UNBOUNDED_HISTORY_WARNED = True
+    print(f"  💸 CLOUD_NUM_CTX = 0: история облачного участника не обрезается. "
+          f"Вся сцена ({total_tokens} токенов сейчас) уедет в КАЖДОМ запросе "
+          f"и будет оплачена каждый ход — и на каждом круге поиска сверх того. "
+          f"Для платного ключа лучше вернуть конечное окно в settings.py")
+
+
 def trim_history_by_tokens(messages: list, system_prompt_tokens: int, model: str = "") -> list:
     """
     Обрезает историю сообщений на основе подсчёта токенов.
@@ -128,6 +154,7 @@ def trim_history_by_tokens(messages: list, system_prompt_tokens: int, model: str
     # Окно не ограничено (CLOUD_NUM_CTX = 0): история остаётся целой
     if num_ctx <= 0:
         print(f"  📊 История: {total_tokens} токенов (окно облака не ограничено) ✅")
+        _warn_about_paying_for_the_whole_scene(total_tokens)
         return messages
 
     # Вычисляем доступное пространство для истории

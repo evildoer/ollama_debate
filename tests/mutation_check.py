@@ -149,10 +149,23 @@ BUGS = {
          '            if False:\n'
          '                item["tool_calls"] = calls'),
     ],
-    "подпись перед именем настройки в .env снова гасит её молча": [
+    "строку из .env, переехавшую в settings.py, снова применяют молча": [
         ("aitheatre/cloud.py",
-         "    for name in CLOUD_ENV_NAMES:\n        if re.search(",
-         "    for name in ():\n        if re.search("),
+         "    for name in CLOUD_MOVED_TO_SETTINGS:\n        if _mentions(key, name):\n",
+         "    for name in CLOUD_MOVED_TO_SETTINGS:\n        if _mentions(key, name):\n"
+         "            os.environ.setdefault(name, raw_value)\n"),
+    ],
+    "в подсказке о переезде снова стоит единица вместо True": [
+        ("aitheatre/cloud.py",
+         '    if value.lower() in ("1", "true", "yes", "on", "да", "вкл"):\n'
+         '        return "True"',
+         '    if value.lower() in ("1", "true", "yes", "on", "да", "вкл"):\n'
+         '        return value'),
+    ],
+    "про неограниченное окно снова молчат, хотя за него платят": [
+        ("aitheatre/text.py",
+         "        _warn_about_paying_for_the_whole_scene(total_tokens)\n",
+         ""),
     ],
     "отказ модели от инструмента поиска снова не запоминается": [
         ("aitheatre/cloud.py",
@@ -505,15 +518,11 @@ BUGS = {
          "    num_ctx, num_predict = settings.context_budget(model)",
          '    num_ctx, num_predict = settings.context_budget("")'),
     ],
-    "строку CLOUD_NUM_CTX в .env снова не читают": [
-        ("aitheatre/settings.py",
-         '        window = _env_int("CLOUD_NUM_CTX", CLOUD_NUM_CTX)',
-         "        window = int(CLOUD_NUM_CTX)"),
-    ],
-    "настоящую настройку облака снова объявляют незнакомой строкой": [
+    "облачную настройку снова читают из .env, а не из settings.py": [
         ("aitheatre/cloud.py",
-         '"CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS", "CLOUD_NUM_CTX",',
-         '"CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS",'),
+         "    return bool(settings.ENABLE_SEARCH and settings.CLOUD_SEND_TOOLS)",
+         "    return bool(settings.ENABLE_SEARCH and\n"
+         '                (os.environ.get("CLOUD_SEND_TOOLS") or settings.CLOUD_SEND_TOOLS))'),
     ],
     "запас на ответ снова съедает узкое окно": [
         ("aitheatre/settings.py",

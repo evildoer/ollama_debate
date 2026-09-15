@@ -38,6 +38,15 @@ tool_calls с id, в ответе инструмента — tool_call_id. Бе�
 в этом заголовке. Ни в текст ответа, ни в сообщения об ошибках, ни на страницу
 он не попадает: вычистить его из чужого текста — обязанность этого модуля,
 потому что ошибку шлюза мы показываем прямо в ленте спектакля.
+
+ГДЕ ЧТО НАСТРАИВАЕТСЯ. Файл .env держит только CLOUD_BASE_URL и CLOUD_API_KEY:
+это данные вашего облачного сервиса, и им незачем уезжать в репозиторий. Всё
+остальное (числа характера, поиск, окно истории, сроки) живёт в settings.py,
+где его видно и можно объяснить словами. Раньше каждую из этих настроек можно
+было задать ещё и строкой в .env — и человек, правящий одно место, не знал,
+что решает другое: теперь такого второго места нет, а старые строки в .env
+приложение называет вслух при запуске (см. _load_dotenv), потому что молча
+не применённая настройка — это потом часы поиска причины в шлюзе.
 """
 
 import json
@@ -56,31 +65,34 @@ _MODELS_CACHE = {"at": 0.0, "names": [], "error": None}
 
 # ── ФАЙЛ .env ────────────────────────────────────────────────────────────────
 # Ключ не должен жить ни в коде, ни в git: файл .env рядом с проектом уже
-# в .gitignore, и все настройки облака можно держать там. Парсер свой, без
-# зависимостей — файл простой: строки КЛЮЧ=ЗНАЧЕНИЕ, комментарии с решётки.
+# в .gitignore, и два имени вашего облачного сервиса — адрес шлюза и ключ —
+# живут там. Парсер свой, без зависимостей: файл простой — строки
+# КЛЮЧ=ЗНАЧЕНИЕ, комментарии с решётки.
 
-# Имена настроек облака, которые приложение читает из окружения и из .env.
-# Список нужен не для чтения (читаем по имени), а чтобы узнавать опечатки
-# и склейки: строка в .env, которая упоминает настройку, но не совпадает с её
-# именем ровно, — почти всегда ошибка копирования, и молчать про неё нельзя.
-#
-# Поэтому список должен покрывать ВСЁ, что читается из .env, включая настройки,
-# которые читаются не здесь (CLOUD_NUM_CTX — в settings.context_budget): иначе
-# человек с настоящей строкой в .env читал бы «строка не знакома приложению —
-# настройка НЕ применена», хотя она применена. Ровно это и случилось со
-# CLOUD_STREAM, CLOUD_SHOW_THINKING, CLOUD_LIMIT_PARAMS и CLOUD_TURN_LIMIT:
-# ложные предупреждения на каждой строке, в которых настоящие опечатки тонули.
-# Что список не отстал от кода — отдельная проверка в tests/test_theatre.py
+# ЕДИНСТВЕННЫЕ настройки облака, которые приложение читает из .env. Список
+# нужен не для чтения (читаем по имени), а чтобы узнавать лишние строки:
+# в .env нечего делать ничему, кроме данных вашего облачного сервиса.
+# Что список не разошёлся с кодом — отдельная проверка в tests/test_theatre.py
 CLOUD_ENV_NAMES = tuple(dict.fromkeys(
     name for name in (
-        "CLOUD_API_KEY", "CLOUD_KEY_ENV", "CLOUD_BASE_URL", "CLOUD_TIMEOUT",
-        "CLOUD_SEND_PARAMS", "CLOUD_SEND_TOOLS", "CLOUD_SEND_MESSAGE_NAMES",
-        "CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS", "CLOUD_NUM_CTX",
-        "CLOUD_STREAM", "CLOUD_SHOW_THINKING", "CLOUD_LIMIT_PARAMS",
-        "CLOUD_TURN_LIMIT",
+        "CLOUD_BASE_URL",     # адрес шлюза тот же, что в settings, — это удобно
+        "CLOUD_API_KEY",      # ключ: единственная по-настоящему закрытая вещь
         settings.CLOUD_KEY_ENV,      # имя ключа, заданное в настройках
     ) if name
 ))
+
+# Настройки, которые раньше можно было задать строкой в .env, а теперь живут
+# только в settings.py. Список нужен для переезда: у человека в .env остались
+# старые строки (он копировал образец .env.example), и он должен увидеть, куда
+# именно их перенести, — а не гадать, почему поиск вдруг выключился.
+# Ставить эти значения по-прежнему можно, но в одном месте — в settings.py
+CLOUD_SETTINGS_FILE = "aitheatre/settings.py"
+CLOUD_MOVED_TO_SETTINGS = (
+    "CLOUD_TIMEOUT", "CLOUD_SEND_PARAMS", "CLOUD_SEND_TOOLS",
+    "CLOUD_SEND_MESSAGE_NAMES", "CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS",
+    "CLOUD_NUM_CTX", "CLOUD_STREAM", "CLOUD_SHOW_THINKING", "CLOUD_LIMIT_PARAMS",
+    "CLOUD_TURN_LIMIT", "CLOUD_MODELS_CACHE_TTL",
+)
 
 
 def _parse_dotenv(text: str) -> dict:
@@ -107,23 +119,66 @@ def _parse_dotenv(text: str) -> dict:
     return parsed
 
 
-def _recognized_key(raw_key: str) -> tuple:
-    """Настоящее имя настройки по строке из .env и замечание, если строка кривая.
+def _mentions(text: str, name: str) -> bool:
+    """Упоминает ли строка имя настройки как отдельное слово.
 
-    Зачем это появилось. В образце .env подсказки были написаны одной строкой:
-    «Включить: CLOUD_SEND_TOOLS=1». Человек убирал решётку — и получал настройку
-    с именем «Включить: CLOUD_SEND_TOOLS». Приложение читало её как чужую
-    строку и молча ничего не включало: потом причину искали в шлюзе, а причина
-    была в лишних словах перед именем. Теперь такое имя узнаётся, и об этом
-    говорится вслух — чтобы строку переименовали, а не гадали.
+    Не просто вхождение подстроки: CLOUD_SEND_TOOL — это НЕ CLOUD_SEND_TOOLS,
+    а именно опечатка, и советовать по ней «поставьте в settings.py» было бы
+    подсказкой не туда.
+    """
+    return bool(re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", text))
+
+
+def _is_number(text: str) -> bool:
+    """Похоже ли на число: «180», «0.5» — да; пустое и «1, 2, 4» — нет."""
+    try:
+        float(text)
+        return True
+    except ValueError:
+        return False
+
+
+def _python_value(raw: str) -> str:
+    """Значение строки .env так, как его записывают в settings.py.
+
+    «1» в файле настроек выглядит чужеродно, а «Правда» — вовсе непонятно:
+    переключатели переводим в True/False, числа в числа, список секунд —
+    в кортеж, остальное в кавычки. Это не применение настройки, а подсказка
+    для переезда, и она должна быть готовой строкой, которую можно скопировать:
+    подсказка «CLOUD_RETRY_DELAYS = "1, 2, 4"» привела бы к чужому типу.
+    """
+    value = str(raw or "").strip()
+    if value.lower() in ("1", "true", "yes", "on", "да", "вкл"):
+        return "True"
+    if value.lower() in ("0", "false", "no", "off", "нет", "выкл"):
+        return "False"
+    parts = [part.strip() for part in value.replace(";", ",").split(",")]
+    if parts and all(_is_number(part) for part in parts):
+        return value if len(parts) == 1 else "(" + ", ".join(parts) + ")"
+    return '"' + value + '"'
+
+
+def _recognized_key(raw_key: str, raw_value: str = "") -> tuple:
+    """Настоящее имя настройки по строке из .env и замечание, если строка лишняя.
+
+    В .env живут ровно две вещи — адрес шлюза и ключ. Всё остальное облако
+    настраивается в settings.py, и строка вроде CLOUD_SEND_TOOLS=1 там больше
+    ничего не значит. Об этом говорится вслух и с готовой строкой для переезда:
+    молча не применённая настройка — это выключенный поиск, который потом ищут
+    в шлюзе (так и было с четырьмя настройками, которые приложение объявляло
+    незнакомыми, хотя читало их же).
     """
     key = str(raw_key or "").strip()
     if key in CLOUD_ENV_NAMES:
         return key, ""
-    for name in CLOUD_ENV_NAMES:
-        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", key):
-            return name, (f".env: строка «{key}» — это настройка {name}. "
-                          f"Она прочитана, но строку лучше переименовать")
+    for name in CLOUD_MOVED_TO_SETTINGS:
+        if _mentions(key, name):
+            line = f"{name} = {_python_value(raw_value)}"
+            note = (f".env: «{key}» больше не читается — настройка переехала в "
+                    f"{CLOUD_SETTINGS_FILE}, поставьте её там: {line}")
+            if key != name:
+                note += f" (в файле настроек имя — ровно «{name}»)"
+            return "", note
     if "cloud" in key.lower():
         return "", (f".env: строка «{key}» не знакома приложению — "
                      f"настройка НЕ применена")
@@ -135,6 +190,11 @@ def _load_dotenv() -> None:
 
     setdefault — настоящая переменная окружения важнее файла: ключ, заданный
     в системе, файл не перекроет.
+
+    О лишних строках говорим одним списком, а не по строке на каждую: у человека
+    из образца .env их набирается десяток, и десяток предупреждений подряд
+    читать никто не станет — то есть переезд заметят только тогда, когда
+    отключится поиск.
     """
     dotenv_file = settings.PROJECT_ROOT / ".env"
     if not dotenv_file.is_file():
@@ -143,12 +203,21 @@ def _load_dotenv() -> None:
         text = dotenv_file.read_text(encoding="utf-8")
     except OSError:
         return    # файл пропал в момент чтения — ничего страшного
+    notes = []
     for raw_key, value in _parse_dotenv(text).items():
-        key, note = _recognized_key(raw_key)
+        key, note = _recognized_key(raw_key, value)
         if note:
-            print(f"  ⚠️  {note}")
+            notes.append(note)
         if key:
             os.environ.setdefault(key, value)
+    if notes:
+        base, key, *_ = CLOUD_ENV_NAMES
+        print(f"  ⚠️  .env: лишних строк — {len(notes)}. Настройки облака живут "
+              f"в {CLOUD_SETTINGS_FILE}, а в .env остаются только {base} и {key}:")
+        for note in notes:
+            print(f"     • {note}")
+        print("     (у каждой настройки один хозяин — settings.py, а в .env остаётся "
+              "то, что в репозиторий не уедет)")
 
 
 _load_dotenv()
@@ -156,46 +225,38 @@ _load_dotenv()
 
 # ── ЧТО СЧИТАЕТСЯ ОБЛАЧНОЙ МОДЕЛЬЮ ──────────────────────────────────────────
 
-def _env_flag(name: str, default: bool) -> bool:
-    """Переключатель из .env: «1», «true», «да» — включено, «0» — выключено.
-
-    Пусто или непонятное значение — берётся то, что стоит в settings: иначе
-    опечатка в .env молча выключала бы то, что человек только что включил.
-    """
-    value = (os.environ.get(name) or "").strip().lower()
-    if not value:
-        return default
-    return value in ("1", "true", "yes", "on", "да", "вкл")
-
+# Настройки облака читаются из settings.py и только оттуда. Функции ниже не просто
+# возвращают значение, а называют его смысл — и остаются: они и есть то место,
+# где видно все выключатели сразу (и где их подменяет проверка)
 
 def send_params() -> bool:
     """Отправлять ли на шлюз числа участника (temperature и прочие)."""
-    return _env_flag("CLOUD_SEND_PARAMS", settings.CLOUD_SEND_PARAMS)
+    return bool(settings.CLOUD_SEND_PARAMS)
 
 
 def send_tools() -> bool:
     """Отправлять ли шлюзу инструмент поиска. Без поиска в проекте — и тут нет."""
-    return settings.ENABLE_SEARCH and _env_flag("CLOUD_SEND_TOOLS", settings.CLOUD_SEND_TOOLS)
+    return bool(settings.ENABLE_SEARCH and settings.CLOUD_SEND_TOOLS)
 
 
 def send_message_names() -> bool:
     """Оставлять ли у сообщений поле «name»."""
-    return _env_flag("CLOUD_SEND_MESSAGE_NAMES", settings.CLOUD_SEND_MESSAGE_NAMES)
+    return bool(settings.CLOUD_SEND_MESSAGE_NAMES)
 
 
 def pass_extras() -> bool:
     """Отправлять ли min_p, top_k и repeat_penalty: их понимают не все шлюзы."""
-    return _env_flag("CLOUD_PASS_OLLAMA_EXTRAS", settings.CLOUD_PASS_OLLAMA_EXTRAS)
+    return bool(settings.CLOUD_PASS_OLLAMA_EXTRAS)
 
 
 def stream_replies() -> bool:
     """Печатать ли ответ облачной модели в ленте по мере генерации."""
-    return _env_flag("CLOUD_STREAM", settings.CLOUD_STREAM)
+    return bool(settings.CLOUD_STREAM)
 
 
 def limit_params() -> bool:
     """Приводить ли числа характера к области, которую понимает вендор."""
-    return _env_flag("CLOUD_LIMIT_PARAMS", settings.CLOUD_LIMIT_PARAMS)
+    return bool(settings.CLOUD_LIMIT_PARAMS)
 
 
 def turn_limit() -> int:
@@ -205,7 +266,7 @@ def turn_limit() -> int:
     Разница важна: «думающая» модель шлёт кусочки исправно, но зацикливается
     и молотит случайные токены полчаса — спектакль при этом стоит.
     """
-    return _env_int("CLOUD_TURN_LIMIT", settings.CLOUD_TURN_LIMIT)
+    return max(1, int(settings.CLOUD_TURN_LIMIT))
 
 
 def show_thinking() -> bool:
@@ -214,43 +275,23 @@ def show_thinking() -> bool:
     Размышлений бывает больше самого ответа (у gpt-5-nano — 65 порций против 6),
     и они уже оплачены: это те же выходные токены. Поэтому по умолчанию видны.
     """
-    return _env_flag("CLOUD_SHOW_THINKING", settings.CLOUD_SHOW_THINKING)
-
-
-def _env_int(name: str, default: int) -> int:
-    """Целое из .env: пусто или мусор — берём значение из settings."""
-    try:
-        return max(1, int(float((os.environ.get(name) or "").strip())))
-    except (TypeError, ValueError):
-        return default
-
-
-def _env_number_list(name: str, default: tuple) -> tuple:
-    """Список секунд из .env: «1, 2, 4» или «(1, 2, 4)». Мусор — берём settings."""
-    text = (os.environ.get(name) or "").strip().strip("()[]")
-    if not text:
-        return tuple(default or ())
-    numbers = []
-    for part in text.replace(";", ",").split(","):
-        try:
-            numbers.append(max(0.0, float(part.strip())))
-        except ValueError:
-            return tuple(default or ())     # непонятная строка — не гадаем
-    return tuple(numbers)
+    return bool(settings.CLOUD_SHOW_THINKING)
 
 
 def timeout_seconds() -> int:
     """Сколько секунд ждать ответа шлюза.
 
-    Вынесено в .env не для красоты: ответ «думающих» моделей бывает дольше
-    любой разумной задержки, и поднять предел должно быть можно без правки кода.
+    Стоит в settings.py отдельным именем не для красоты: ответ «думающих»
+    моделей бывает дольше любой разумной задержки, и поднять предел должно
+    быть можно, не трогая код этого модуля.
     """
-    return _env_int("CLOUD_TIMEOUT", settings.CLOUD_TIMEOUT)
+    return max(1, int(settings.CLOUD_TIMEOUT))
 
 
 def retry_delays() -> tuple:
-    """Паузы перед повтором после 429: свои из .env или те, что в settings."""
-    return _env_number_list("CLOUD_RETRY_DELAYS", settings.CLOUD_RETRY_DELAYS)
+    """Паузы перед повтором после 429 — те, что стоят в settings.py."""
+    return tuple(max(0.0, float(seconds))
+                 for seconds in (settings.CLOUD_RETRY_DELAYS or ()))
 
 
 # Роли, которые понимает схема OpenAI. Всё остальное — слова человека: лучше
@@ -429,10 +470,10 @@ def hide_key(text: str) -> str:
 
 
 def base_url() -> str:
-    """Адрес шлюза: настройка settings или строка CLOUD_BASE_URL в .env.
+    """Адрес шлюза: строка CLOUD_BASE_URL в .env или настройка в settings.py.
 
-    Адрес — вещь подвижная (у шлюзов бывают зеркала), поэтому его можно
-    переопределить, не трогая код.
+    Адрес — вещь подвижная (у шлюзов бывают зеркала), и вместе с ключом он входит
+    в те две вещи, которые .env держит: это данные самого облачного сервиса.
     """
     return (os.environ.get("CLOUD_BASE_URL") or settings.CLOUD_BASE_URL).rstrip("/")
 
