@@ -156,13 +156,13 @@ BUGS = {
     ],
     "отказ модели от инструмента поиска снова не запоминается": [
         ("aitheatre/cloud.py",
-         "        if not retry_error:\n            _MODELS_WITHOUT_TOOLS.add(model)",
-         "        if not retry_error:\n            pass"),
+         '    if not error and uses_tools and "tools" not in body:',
+         '    if not error and uses_tools and "tools" not in body and False:'),
     ],
     "поток шлюза снова читается как обычный ответ": [
         ("aitheatre/cloud.py",
-         "            if streaming:\n                return _read_stream(response, on_delta)",
-         "            if False:\n                return _read_stream(response, on_delta)"),
+         "            if streaming:\n                return _read_stream(response, on_delta, on_thought)",
+         "            if False:\n                return _read_stream(response, on_delta, on_thought)"),
     ],
     "части вызова инструмента снова читаются как готовый вызов": [
         ("aitheatre/cloud.py",
