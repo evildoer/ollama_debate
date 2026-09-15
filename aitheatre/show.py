@@ -186,11 +186,15 @@ def step_period(step: dict) -> str:
 def ask_line(step: dict) -> str:
     """Один запрос хода одной строкой — с числами и их названиями.
 
-    Именно здесь закрывается вопрос «что значит 3431 + 1246»: вход — это то,
-    что уехало (системный промпт, история, найденное), вывод — то, что вендор
+    Именно здесь закрывается вопрос «что значит 3431 + 1246»: **ввод** — это то,
+    что уехало (системный промпт, история, найденное), **вывод** — то, что вендор
     вернул, включая оплаченные размышления, которые в реплику не попадают.
-    Если вендор чисел не прислал, рядом стоит своя оценка: без неё на месте
-    входа была бы дыра, а «сколько уехало» — первое, что хочется знать.
+    Рядом с числом вендора стоит наш собственный счёт (тот же счётчик, каким
+    театр мерит историю): вендор считает своими токенами, поэтому числа и
+    расходятся — и об этом лучше знать, чем удивляться разнице.
+
+    Если же вендор чисел не прислал вовсе, остаётся только наш счёт: без него
+    на месте ввода была бы дыра, а «сколько уехало» — первое, что хочется знать.
     """
     if step.get("error"):
         return f"не прошёл — {step['error']}"
@@ -198,11 +202,11 @@ def ask_line(step: dict) -> str:
     if step.get("tokens_in") is None and step.get("tokens_out") is None:
         weight = "числа токенов вендор не сообщил"
         if estimate:
-            weight += f" · на глаз вход ≈{numbers_word(estimate)} токенов"
+            weight += f" · наш счёт ≈{numbers_word(estimate)} токенов"
     else:
-        weight = f"вход {numbers_word(step.get('tokens_in'))}"
+        weight = f"ввод {numbers_word(step.get('tokens_in'))}"
         if estimate:
-            weight += f" (на глаз ≈{numbers_word(estimate)})"
+            weight += f" (наш счёт ≈{numbers_word(estimate)})"
         weight += f" · вывод {numbers_word(step.get('tokens_out'))} токенов"
     parts = [weight]
     if step.get("reasoning_tokens"):
@@ -244,6 +248,49 @@ def step_markdown(step: dict, with_text: bool = True) -> str:
     return f"{head}{mark} {step.get('text')}"
 
 
+def window_line(budget: dict) -> str:
+    """Строка об окне говорящего — и куда делось остальное.
+
+    Четыре числа здесь — не украшение, а честный ответ на «куда делись токены»:
+    окно целиком, сколько из него оставлено модели на ответ (у облака запас
+    берётся из CLOUD_MAX_TOKENS, а если он не задан — из олламовского предела
+    ответа, см. settings.context_budget), технический запас на неточность
+    счёта и сколько после всего этого оставалось истории.
+    """
+    available = ("без предела (CLOUD_NUM_CTX = 0)" if budget.get("available") is None
+                 else numbers_word(budget.get("available")))
+    return (f"**Окно говорящего:** {WINDOW_NAMES.get(budget.get('kind'), 'окно модели')} "
+            f"{numbers_word(budget.get('window'))} токенов целиком — из них "
+            f"{numbers_word(budget.get('reserve'))} оставлено на ответ модели, "
+            f"{numbers_word(budget.get('safety'))} — технический запас, "
+            f"на историю оставалось {available}\n")
+
+
+def history_line(summary: dict, budget: dict) -> str:
+    """Строка «что уехало» — без «3 из 1»: у каждого числа своё имя.
+
+    Раньше здесь стояло «уехало 3 сообщ. (…) из 1», и это читалось как ошибка
+    арифметики: «уехало» считало все сообщения запроса (системный промпт, сцена,
+    задания хода), а «из» — только сообщения сцены до обрезки. Теперь оба числа
+    названы тем, чем они являются (см. build_turn_report).
+    """
+    scene = int(budget.get("messages_after") or 0)
+    tasks = max(0, int(summary.get("messages") or 0) - 1 - scene)
+    line = (f"**Что уехало:** {summary.get('messages')} сообщ. "
+            f"({numbers_word(summary.get('tokens'))} токенов) — системный промпт "
+            f"{numbers_word(budget.get('system_tokens'))} токенов, из сцены {scene} "
+            f"сообщ. ({numbers_word(budget.get('kept_tokens'))} токенов)")
+    if tasks:
+        line += f", и ещё {tasks} — задания хода"
+    if summary.get("removed_messages"):
+        line += (f". Обрезка выбросила {summary.get('removed_messages')} сообщ. "
+                 f"({numbers_word(summary.get('removed_tokens'))} токенов) — "
+                 f"самое раннее перечислено ниже")
+    else:
+        line += ". Обрезка ничего не тронула: сцена влезла в окно целиком"
+    return line + "\n"
+
+
 def dump_turn_header(post_id: int, turn: dict) -> str:
     """Начало записи о ходе: кто, откуда, что уехало — до первого события.
 
@@ -261,19 +308,8 @@ def dump_turn_header(post_id: int, turn: dict) -> str:
            f"· Акт {who.get('round')}\n"]
     out.append(f"**Кто:** {who.get('name')} · {who.get('model')} · "
                f"{who.get('role_name') or who.get('role')} · {who.get('time')}\n")
-    out.append(f"**Откуда ход:** {WINDOW_NAMES.get(budget.get('kind'), 'окно модели')} "
-               f"{numbers_word(budget.get('window'))} · запас на ответ "
-               f"{numbers_word(budget.get('reserve'))} · служебный запас "
-               f"{numbers_word(budget.get('safety'))} · на историю оставалось "
-               f"{'без предела (CLOUD_NUM_CTX = 0)' if budget.get('available') is None else numbers_word(budget.get('available'))}\n")
-    cut = ("обрезать не пришлось" if not summary.get("removed_messages")
-           else f"выброшено {summary.get('removed_messages')} сообщ. "
-                f"({numbers_word(summary.get('removed_tokens'))} токенов)")
-    out.append(f"**История:** уехало {summary.get('messages')} сообщ. "
-               f"({numbers_word(summary.get('tokens'))} токенов) из "
-               f"{budget.get('messages_before')} — {cut}; из этого системный "
-               f"промпт — {numbers_word(budget.get('system_tokens'))} токенов, "
-               f"остальное — реплики сцены и задания\n")
+    out.append(window_line(budget))
+    out.append(history_line(summary, budget))
     out.append("### Что уехало в модель\n")
     for index, message in enumerate(turn.get("messages") or [], 1):
         out.append(f"- №{index} · {message.get('role')} · "
@@ -409,7 +445,14 @@ def start_dump(topic: str) -> None:
         f"Хронология последнего спектакля: что уехало в модель, что она попросила,\n"
         f"что ей принесли и что она сказала — со временем и числами токенов.\n"
         f"Пишется по ходу дела, заново на каждый новый спектакль "
-        f"(порт {settings.PORT}).\n"
+        f"(порт {settings.PORT}).\n\n"
+        f"Как читать. **ввод** — сколько уехало в модель в этом запросе;\n"
+        f"**вывод** — сколько она вернула (размышления считаются выводом,\n"
+        f"но в реплику не попадают); **наш счёт** — то, что театр посчитал сам\n"
+        f"(tiktoken — тот же счётчик, каким мерится история), а число рядом —\n"
+        f"счёт вендора, и они расходятся, потому что токенизаторы разные;\n"
+        f"**вес найденного** — сколько токенов принёс поиск (они едут сверх\n"
+        f"истории и оплачиваются тоже).\n"
     )
     try:
         settings.DUMP_FILE.write_text(header, encoding="utf-8")
@@ -513,14 +556,25 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
             "available": trim_report.get("available"),
             "history_tokens": int(trim_report.get("history_tokens") or 0),
             "kept_tokens": int(trim_report.get("kept_tokens") or 0),
-            "messages_before": int(trim_report.get("messages_before") or len(messages)),
-            "messages_after": int(trim_report.get("messages_after") or len(messages)),
+            # Ноль — это тоже ответ («сцены в запросе не было»), и подменять его
+            # общим числом сообщений нельзя: иначе в шапке хода появлялось
+            # «из сцены 2», хотя сцены там нет вовсе
+            "messages_before": _as_number(trim_report.get("messages_before"), len(messages)),
+            "messages_after": _as_number(trim_report.get("messages_after"), len(messages)),
         },
         "messages": messages,
         "added": extra,
         "removed": removed,
         "steps": steps,
     }
+
+
+def _as_number(value, fallback: int) -> int:
+    """Число из отчёта, а если его там нет — запасное: ноль тоже число."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(fallback)
 
 
 def refresh_turn_report(turn: dict, added: list, search_count: int,

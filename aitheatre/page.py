@@ -1625,10 +1625,10 @@ HTML_TEMPLATE = """
         // местах. Сложить из этого картину было нельзя: числа в одном блоке,
         // поиски в другом, а связь между ними — только в голове. Теперь это
         // одна хронология: откуда ход взялся, что происходило по порядку
-        // (запросы с их входом и выводом, поиски с формулировкой и находками),
+        // (запросы с их вводом и выводом, поиски с формулировкой и находками),
         // и только потом — что модель сказала.
         const SKETCH_HINT = 'Так бывает, когда модель сначала отвечает, а потом её просят поискать.';
-        const TURN_HINT = 'Весь путь к этой реплике по порядку: что уехало в модель, что она попросила, что ей принесли и сколько токенов за это заплачено. Вход — это то, что ушло в одном запросе, вывод — то, что вернул вендор (включая оплаченные размышления).';
+        const TURN_HINT = 'Весь путь к этой реплике по порядку: что уехало в модель, что она попросила, что ей принесли и сколько токенов за это заплачено. Ввод — это то, что ушло в одном запросе, вывод — то, что вернул вендор (включая оплаченные размышления); «наш счёт» — то, что театр посчитал сам (tiktoken), а число рядом — счёт вендора.';
 
         function thinkingBlockHtml(hint, text) {
             const body = (text || '').trim();
@@ -1638,7 +1638,7 @@ HTML_TEMPLATE = """
         }
 
         // Один запрос хода одной строкой: здесь и объясняется, что значит
-        // «1 431 + 1 246». Вход — то, что уехало (промпт, история, найденное),
+        // «1 431 + 1 246». Ввод — то, что уехало (промпт, история, найденное),
         // вывод — то, что вернул вендор, вместе с оплаченными размышлениями
         // Когда событие случилось: начало и конец — с тысячными долями. Без времени
         // в хронологии нельзя ответить на «чем модель занималась две минуты»
@@ -1654,12 +1654,13 @@ HTML_TEMPLATE = """
             const parts = [];
             if (step.tokens_in === undefined && step.tokens_out === undefined) {
                 parts.push('числа токенов вендор не сообщил');
-                if (step.tokens_in_est) parts.push(`на глаз вход ≈${tokensText(step.tokens_in_est)} токенов`);
+                if (step.tokens_in_est) parts.push(`наш счёт ≈${tokensText(step.tokens_in_est)} токенов`);
             } else {
-                // Рядом со числом вендора — своя оценка: по ней видно, сколько
-                // уехало, и когда вендор чисел не дал
-                const estimate = step.tokens_in_est ? ` (на глаз ≈${tokensText(step.tokens_in_est)})` : '';
-                parts.push(`вход ${tokensText(step.tokens_in)}${estimate} → вывод ${tokensText(step.tokens_out)} токенов`);
+                // Рядом с числом вендора — наш счёт: вендор считает своими
+                // токенами, и числа расходятся; когда вендор чисел не дал,
+                // наш счёт — единственное, что есть
+                const estimate = step.tokens_in_est ? ` (наш счёт ≈${tokensText(step.tokens_in_est)})` : '';
+                parts.push(`ввод ${tokensText(step.tokens_in)}${estimate} → вывод ${tokensText(step.tokens_out)} токенов`);
             }
             if (step.reasoning_tokens) parts.push(`из них размышлений ${tokensText(step.reasoning_tokens)}`);
             if (step.finish_reason) parts.push(`конец: ${escapeHtml(step.finish_reason)}`);
@@ -1707,15 +1708,21 @@ HTML_TEMPLATE = """
             const parts = [];
             parts.push(`<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> · `
                 + `${escapeHtml(who.model || '')} · Акт ${who.round} · ${escapeHtml(who.time || '')}</div>`);
-            parts.push(`<div class="prompt-line"><b>Откуда ход:</b> ${WINDOW_WORDS[b.kind] || 'окно модели'} ${tokensText(b.window)}`
-                + ` · запас на ответ ${tokensText(b.reserve)} · служебный запас ${tokensText(b.safety)}`
-                + ` · на историю оставалось ${b.available === null ? 'без предела' : tokensText(b.available)}</div>`);
-            parts.push(`<div class="prompt-line"><b>История:</b> стало ${s.messages} сообщ. `
-                + `(${tokensText(s.tokens)} токенов) из ${b.messages_before} — `
+            // Четыре числа окна — не украшение, а ответ на «куда делись токены»
+            parts.push(`<div class="prompt-line"><b>Окно говорящего:</b> ${WINDOW_WORDS[b.kind] || 'окно модели'} ${tokensText(b.window)} токенов целиком`
+                + ` — из них ${tokensText(b.reserve)} оставлено на ответ модели, ${tokensText(b.safety)} — технический запас,`
+                + ` на историю оставалось ${b.available === null ? 'без предела' : tokensText(b.available)}</div>`);
+            // У каждого числа — своё имя: раньше тут стояло «уехало 3 сообщ. из 1»,
+            // где первое считало все сообщения запроса, а второе — только сцену
+            const tasks = Math.max(0, (s.messages || 0) - 1 - (b.messages_after || 0));
+            parts.push(`<div class="prompt-line"><b>Что уехало:</b> ${s.messages} сообщ. `
+                + `(${tokensText(s.tokens)} токенов) — системный промпт ${tokensText(b.system_tokens)} токенов, `
+                + `из сцены ${b.messages_after} сообщ. (${tokensText(b.kept_tokens)} токенов)`
+                + (tasks ? `, и ещё ${tasks} — задания хода` : '')
                 + (s.removed_messages
-                    ? `выброшено ${s.removed_messages} сообщ. (${tokensText(s.removed_tokens)} токенов)`
-                    : 'обрезать не пришлось')
-                + `; системный промпт — ${tokensText(b.system_tokens)} токенов</div>`);
+                    ? `. Обрезка выбросила ${s.removed_messages} сообщ. (${tokensText(s.removed_tokens)} токенов)`
+                    : '. Обрезка ничего не тронула: сцена влезла в окно целиком')
+                + `</div>`);
             // Одна хронология на всё: запросы, размышления и поиски идут в том
             // порядке, как случились, — со временем и весом. Отдельных разделов
             // под поиск и размышления нет нарочно: те же данные дважды — это
@@ -1786,7 +1793,7 @@ HTML_TEMPLATE = """
             const parts = [`запросов ${info.asks || 0}`];
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
             if (info.thought_steps) parts.push(`размышлений ${info.thought_steps}`);
-            parts.push(`${tokensText(info.tokens)} токенов на вход`);
+            parts.push(`${tokensText(info.tokens)} токенов на ввод`);
             if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
             if (info.problems) parts.push(`заминок ${info.problems}`);
             return `<details class="post-thinking post-prompt" data-post-id="${post.id}">`

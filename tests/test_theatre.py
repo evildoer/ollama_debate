@@ -2243,11 +2243,39 @@ class TestTurnReport(unittest.TestCase):
         self.assertRegex(search["clock_end"], number)
         self.assertEqual(post["turn"]["thought_steps"], 1,
                          "о размышлениях должно быть сказано в свёрнутой строке")
-        self.assertIn("на глаз", show.ask_line(ask),
-                      "рядом с числом вендора видна и своя оценка")
+        self.assertIn("наш счёт", show.ask_line(ask),
+                      "рядом с числом вендора виден и наш счёт")
+        self.assertIn("ввод", show.ask_line(ask), "числа запроса — это ввод и вывод")
+        self.assertNotIn("на глаз", show.ask_line(ask),
+                         "«на глаз» звучало как угадывание, а это тот же счётчик")
         line = show.step_markdown(search)
         self.assertIn("население", line, "в хронологии ДАМПа видна формулировка запроса")
         self.assertIn("900", line, "и вес найденного")
+
+    def test_the_dump_header_names_every_number(self):
+        """У чисел в шапке хода — свои имена: «уехало 3 сообщ. из 1» больше нет.
+
+        То самое место, где шапка выглядела ошибкой арифметики: «уехало» считало
+        все сообщения запроса (промпт, сцена, задания), а «из» — только сообщения
+        сцены до обрезки. Разбираться в этом приходилось самому режиссёру.
+        """
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Проверочная тема")
+            self._turn()
+            written = dump.read_text(encoding="utf-8")
+
+        self.assertIn("**Окно говорящего:**", written)
+        self.assertIn("оставлено на ответ модели", written,
+                      "запас на ответ нужно объяснить словами, а не назвать «запасом")
+        self.assertIn("технический запас", written)
+        self.assertIn("**Что уехало:**", written)
+        self.assertIn("из сцены", written, "сцена и задания — разные вещи, и это видно")
+        self.assertNotIn(") из ", written,
+                         "«уехало N из M» сравнивало разные вещи: это забыто")
+        # И ни одного выдуманного числа: сцены в этом ходу нет, и так и сказано
+        self.assertIn("из сцены 0 сообщ.", written)
 
     def test_the_dump_is_written_while_the_turn_is_still_going(self):
         """ДАМП пишется по ходу дела, а не в конце: у оборванного хода не было следов.
@@ -2450,10 +2478,10 @@ class TestTurnPanel(unittest.TestCase):
         self.assertIn("step.results", body, "и то, что по нему нашлось")
 
     def test_the_ask_line_explains_what_the_numbers_mean(self):
-        """«3431 + 1246» — это вход и вывод, и в ленте это должно быть сказано."""
+        """«3431 + 1246» — это ввод и вывод, и в ленте это должно быть сказано."""
         start = self.page.index("function turnAskText(")
         body = self.page[start:self.page.index("function ", start + 10)]
-        self.assertIn("вход", body)
+        self.assertIn("ввод", body)
         self.assertIn("вывод", body)
         self.assertIn("reasoning_tokens", body, "размышления считаются в вывод — их надо назвать")
 

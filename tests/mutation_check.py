@@ -749,6 +749,30 @@ BUGS = {
          '    summary["thought_steps"] = sum(1 for step in steps if step.get("kind") == "thought")',
          '    summary["thought_steps"] = 0'),
     ],
+    # Из жизни: режиссёр читал шапку хода и не понимал «уехало 3 сообщ. из 1»:
+    # первое число считало все сообщения запроса, второе — только сцену
+    "шапка хода снова с прежними путаными именами": [
+        ("aitheatre/show.py",
+         '            f"{numbers_word(budget.get(\'reserve\'))} оставлено на ответ модели, "',
+         '            f"{numbers_word(budget.get(\'reserve\'))} — запас на ответ, "'),
+    ],
+    "ноль в шапке снова затыкают общим числом сообщений": [
+        ("aitheatre/show.py",
+         '            "messages_after": _as_number(trim_report.get("messages_after"), len(messages)),',
+         '            "messages_after": int(trim_report.get("messages_after") or len(messages)),'),
+    ],
+    # «Вход» рядом с «выводом» читалось как разные слова об одном и том же
+    "ввод снова называют входом": [
+        ("aitheatre/page.py",
+         '                parts.push(`ввод ${tokensText(step.tokens_in)}${estimate}',
+         '                parts.push(`вход ${tokensText(step.tokens_in)}${estimate}'),
+    ],
+    # «На глаз» звучало как угадывание, а это тот же счётчик, каким мерится история
+    "наш счёт снова обозвали «на глаз»": [
+        ("aitheatre/show.py",
+         '            weight += f" (наш счёт ≈{numbers_word(estimate)})"',
+         '            weight += f" (на глаз ≈{numbers_word(estimate)})"'),
+    ],
     # Из жизни: в промпте «сделай минимум поиск», а инструмента шлюз модели
     # не дал — и она дважды ушла в петлю размышлений вместо ответа
     "модель снова просят искать, не дав ей инструмента": [
