@@ -416,19 +416,20 @@ def reset_settings():
     return jsonify({"success": True, "participants": cast_payload(),
                     "topic": show.session.topic})
 
-@app.route('/api/post/<int:post_id>/prompt')
-def post_prompt(post_id):
-    """Что именно уехало в модель на ходу, которым сказана эта реплика.
+@app.route('/api/post/<int:post_id>/turn')
+def post_turn(post_id):
+    """Полный отчёт о ходе, которым сказана эта реплика.
 
-    Отдельным запросом, а не полем в самом посте: снимок хода весит как сцена,
+    Отдельным запросом, а не полем в самом посте: отчёт хода весит как сцена,
     и держать его в ленте — значит гонять мегабайты на каждой перерисовке ради
-    того, что открывают редко. Снимок и сам отдаётся не всегда: он живёт
-    в памяти и только у последних ходов (см. PROMPT_KEEP_TURNS).
+    того, что открывают редко. Отчёта нет только у человека (он никуда ничего
+    не отправлял) или если спектакль уже сменился: отчёты живут в памяти и
+    относятся к текущему спектаклю.
     """
-    payload = show.session.prompt_payload(post_id)
+    payload = show.session.turn_report(post_id)
     if payload is None:
-        return jsonify({"error": "снимок этого хода не сохранён: он живёт только "
-                                 "у последних ходов текущего запуска"}), 404
+        return jsonify({"error": "отчёта об этом ходе нет: он относится к текущему "
+                                 "спектаклю, а у реплик человека его не бывает"}), 404
     response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store"
     return response

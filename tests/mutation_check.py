@@ -700,6 +700,60 @@ BUGS = {
          "(\"reasoning_tokens\", details.get(\"reasoning_tokens\"))):",
          "(\"reasoning_tokens\", None)):"),
     ],
+    # Из жизни: реплика собеседника уезжала в модель дважды — один раз строкой
+    # истории, второй раз — целиком в задании «X только что сказал: "..."».
+    "реплика собеседника снова едет в модель дважды": [
+        ("aitheatre/show.py",
+         "                            f'выше, в истории диалога. Как {name}, ты тоже '",
+         "                            f'выше, в истории диалога. Ещё раз: '"
+         " f'{last_post[\"content\"]}. Как {name}, ты тоже '"),
+    ],
+    # И то, ради чего всё затевалось: «откуда взялось это число» и «что
+    # происходило по порядку» должны быть видны и в ленте, и в ДАМПе.
+    "журнал хода снова не пополняется: числа и поиски неоткуда взять": [
+        ("aitheatre/cloud.py",
+         '    report.setdefault("steps", []).append(entry)',
+         "    pass"),
+    ],
+    "шаги хода снова не доезжают до отчёта у реплики": [
+        ("aitheatre/show.py",
+         '            steps=journal.get("steps"))',
+         "            steps=None)"),
+    ],
+    "ход снова не попадает в ДАМП": [
+        ("aitheatre/show.py",
+         "            handle.write(dump_turn_markdown(post, turn))",
+         '            handle.write("")'),
+    ],
+    "ДАМП снова растёт от спектакля к спектаклю": [
+        ("aitheatre/show.py",
+         '        settings.DUMP_FILE.write_text(header, encoding="utf-8")',
+         '        open(settings.DUMP_FILE, "a", encoding="utf-8").write(header)'),
+    ],
+    "отчёты ходов снова забываются через несколько ходов": [
+        ("aitheatre/show.py",
+         "        self.turn_log[int(post_id)] = payload",
+         "        self.turn_log = {int(post_id): payload}"),
+    ],
+    "числа поиска снова спрятаны в коде, а не в настройках": [
+        ("aitheatre/ollama_api.py",
+         "    return (max(0, _as_int(settings.MIN_SEARCHES)),\n"
+         "            max(1, _as_int(settings.MAX_SEARCHES)),\n"
+         "            max(1, _as_int(settings.SEARCH_MAX_RESULTS)),\n"
+         "            max(0, _as_int(settings.MAX_SEARCH_ATTEMPTS)))",
+         "    return (0, 3, 5, 2)"),
+    ],
+    "модель снова заказывает себе сколько результатов захочет": [
+        ("aitheatre/ollama_api.py",
+         "    asked = min(_as_int(max_results) or limit, limit)",
+         "    asked = _as_int(max_results) or limit"),
+    ],
+    "потолок поисков снова не назван модели": [
+        ("aitheatre/show.py",
+         "        max_text = (f\" За один ход разрешено не больше {max_searches} поиск(ов): \"\n"
+         '                    f"израсходовал их — говори по тому, что уже нашлось.")',
+         '        max_text = ""'),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,

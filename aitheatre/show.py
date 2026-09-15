@@ -12,7 +12,6 @@
 import copy
 import json
 import random
-import re
 import threading
 import time
 import traceback
@@ -128,94 +127,180 @@ def forget_theatre_settings():
         print(f"  ⚠️  Не сохраняется {settings.SETTINGS_FILE.name}: {e}")
 
 
-# Заголовок раздела стенограммы — тот же, что пишет start_thinking_log.
-# Ищем по нему, а не по любому «# » в начале строки: модели пишут заголовки
-# и в самих мыслях, и обрезка по чужим заголовкам резала бы спектакль пополам
-_THINKING_SECTION = re.compile(r"(?m)^(?=# \d{2}\.\d{2}\.\d{4} \d{2}:\d{2} — )")
+# ── ДАМП СПЕКТАКЛЯ ─────────────────────────────────────────────────────────
+#
+# Раньше подробности хода лежали в двух местах и в двух видах: размышления
+# моделей — в стенограмме, которая росла от спектакля к спектаклю, а снимок
+# запроса («что уехало в модель») — только в памяти и только у последних ходов.
+# Нужны они с одной целью: разобраться, что произошло в последнем спектакле.
+# Поэтому теперь это один файл — и в нём один спектакль.
+
+# Как называть окно, которым мерили историю: то же слово, что и в ленте
+WINDOW_NAMES = {"cloud": "окно облака", "local": "окно модели",
+                "unbounded": "окно не ограничено (CLOUD_NUM_CTX = 0)"}
 
 
-def trim_thinking_log(keep: int = None) -> int:
-    """Обрезает стенограмму до последних `keep` спектаклей.
+def numbers_word(value) -> str:
+    """Число с разрядами: «23 318» читается, а «23318» — уже нет."""
+    try:
+        return f"{int(value):,}".replace(",", " ")
+    except (TypeError, ValueError):
+        return str(value if value is not None else "—")
 
-    Стенограмма растёт с каждым ходом и никогда не чистилась: после десятков
-    спектаклей это мегабайты, а читают её глазами и всегда с конца. Возвращает,
-    сколько разделов убрано (0 — обрезать было нечего или запрещено настройкой).
+
+def quoted(text: str) -> str:
+    """Текст куском: каждая строка с «> », чтобы границы были видны в файле.
+
+    Фенсы (```) для этого не годятся: модели сами пишут их в ответах, и такой
+    блок закрывался бы посреди реплики.
     """
-    keep = int(settings.THINKING_KEEP_SHOWS if keep is None else keep)
-    if keep <= 0:                      # 0 — не чистить вовсе
-        return 0
-
-    path = settings.THINKING_FILE
-    try:
-        if not path.exists():
-            return 0
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError as e:
-        print(f"  ⚠️  Не читается {path.name}: {e}")
-        return 0
-
-    parts = _THINKING_SECTION.split(raw)
-    sections = parts[1:]
-    if len(sections) <= keep:
-        return 0
-
-    dropped = len(sections) - keep
-    try:
-        path.write_text(parts[0] + "".join(sections[-keep:]), encoding="utf-8")
-    except OSError as e:
-        print(f"  ⚠️  Не обрезается {path.name}: {e}")
-        return 0
-    return dropped
+    lines = (text or "").splitlines()
+    return "\n".join(f"> {line}" if line.strip() else ">" for line in lines) or ">"
 
 
-def start_thinking_log(topic: str):
-    """Начинает раздел размышлений этого спектакля в стенограмме.
+def ask_line(step: dict) -> str:
+    """Один запрос хода одной строкой — с числами и их названиями.
 
-    В ленте мысли видны только пока идёт ход, и после занавеса они бы пропали.
-    Стенограмма (обычный markdown-файл рядом с проектом) остаётся: её можно
-    прочитать позже — там видно, о чём модель думала на каждом своём ходу.
-
-    Перед записью стенограмма обрезается до последних спектаклей: иначе файл
-    рос бы вечно (см. THINKING_KEEP_SHOWS).
+    Именно здесь закрывается вопрос «что значит 3431 + 1246»: вход — это то,
+    что уехало (системный промпт, история, найденное), вывод — то, что вендор
+    вернул, включая оплаченные размышления, которые в реплику не попадают.
     """
-    dropped = trim_thinking_log()
-    if dropped:
-        print(f"  🧹 Стенограмма: убрано {dropped} прежних спектаклей, "
-              f"оставлено {settings.THINKING_KEEP_SHOWS}")
+    if step.get("error"):
+        return f"отказ — {step['error']}"
+    parts = [f"вход {numbers_word(step.get('tokens_in'))} · "
+             f"вывод {numbers_word(step.get('tokens_out'))} токенов"]
+    if step.get("reasoning_tokens"):
+        parts.append(f"из них размышлений {numbers_word(step['reasoning_tokens'])}")
+    if step.get("finish_reason"):
+        parts.append(f"конец: {step['finish_reason']}")
+    parts.append("инструмент поиска отправлен" if step.get("tools")
+                 else "без инструмента поиска")
+    return ", ".join(parts)
+
+
+def dump_turn_markdown(post: dict, turn: dict = None) -> str:
+    """Ход в ДАМПе — то же, что раскрывается в ленте у реплики, только текстом.
+
+    В посте уже лежит всё нужное (см. build_turn_report); здесь это разложено
+    по строкам, чтобы файл читался глазами и в нём не оставалось ни одного числа
+    без объяснения: откуда ход (чьё окно), что уехало (промпт и история целиком),
+    что происходило по порядку (запросы, поиски с формулировкой и результатами,
+    отказы и примечания) и что модель в итоге сказала.
+
+    Отчёт передаётся отдельно, а не берётся из поста: в посте от него остаётся
+    только сводка (см. create_post) — сам отчёт весит как сцена, и держать его
+    в ленте незачем.
+    """
+    turn = turn or {}
+    who = turn.get("who") or {}
+    budget = turn.get("budget") or {}
+    summary = turn.get("summary") or {}
+    out = [f"\n## {post.get('id')} · {post.get('timestamp')} · {post.get('display_name')} "
+           f"· {post.get('model_used')} · {post.get('role_name')} "
+           f"· Акт {post.get('round')}\n"]
+
+    if not turn:
+        # Ход живого участника: отправлять никуда нечего, но в хронологии он есть
+        out.append("Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n")
+        out.append(quoted(post.get("content")))
+        return "\n".join(out) + "\n"
+
+    out.append(f"**Кто:** {who.get('name')} · {who.get('model')} · "
+               f"{who.get('role_name') or who.get('role')} · {who.get('time')}\n")
+    out.append(f"**Откуда ход:** {WINDOW_NAMES.get(budget.get('kind'), 'окно модели')} "
+               f"{numbers_word(budget.get('window'))} · запас на ответ "
+               f"{numbers_word(budget.get('reserve'))} · служебный запас "
+               f"{numbers_word(budget.get('safety'))} · на историю оставалось "
+               f"{'без предела (CLOUD_NUM_CTX = 0)' if budget.get('available') is None else numbers_word(budget.get('available'))}\n")
+    cut = ("обрезать не пришлось" if not summary.get("removed_messages")
+           else f"выброшено {summary.get('removed_messages')} сообщ. "
+                f"({numbers_word(summary.get('removed_tokens'))} токенов)")
+    out.append(f"**История:** уехало {summary.get('messages')} сообщ. "
+               f"({numbers_word(summary.get('tokens'))} токенов) из "
+               f"{budget.get('messages_before')} — {cut}; из этого системный "
+               f"промпт — {numbers_word(budget.get('system_tokens'))} токенов, "
+               f"остальное — реплики сцены и задания\n")
+
+    out.append("### Что уехало в модель\n")
+    for index, message in enumerate(turn.get("messages") or [], 1):
+        out.append(f"- №{index} · {message.get('role')} · "
+                   f"{message.get('name') or '—'} · "
+                   f"{numbers_word(message.get('tokens'))} токенов")
+        out.append(quoted(message.get("content")))
+    if turn.get("added"):
+        out.append("\n**Дописано ходом сверх истории:**")
+        for message in turn["added"]:
+            out.append(f"- {message.get('role')} · {message.get('name') or '—'} · "
+                       f"{numbers_word(message.get('tokens'))} токенов")
+            out.append(quoted(message.get("content")))
+    if summary.get("removed_messages"):
+        out.append("\n**Что выбросила обрезка (самое раннее):**")
+        for gone in turn.get("removed") or []:
+            out.append(f"- {gone.get('speaker')} · {numbers_word(gone.get('tokens'))} токенов · "
+                       f"{gone.get('preview')}")
+
+    if turn.get("steps"):
+        out.append("\n### Ход по порядку\n")
+        for step in turn["steps"]:
+            kind = step.get("kind")
+            if kind == "ask":
+                out.append(f"- **запрос {step.get('n')}** — {ask_line(step)}")
+            elif kind == "search":
+                out.append(f"- **поиск {step.get('n')}** (лимит {step.get('limit')}): "
+                           f"«{step.get('query')}» — принесено:")
+                out.append(quoted(step.get("results")))
+            elif kind == "refused":
+                out.append(f"- ⛔ {step.get('text')}")
+            elif kind == "force":
+                out.append(f"- 🔍 {step.get('text')}")
+            elif kind == "silence":
+                out.append(f"- ⚠️ {step.get('text')}")
+            else:
+                out.append(f"- {step.get('text')}")
+
+    if post.get("thinking"):
+        out.append("\n### Размышления модели\n")
+        out.append(quoted(post["thinking"]))
+    if post.get("sketch"):
+        out.append("\n### Сказано раньше — первая версия реплики\n")
+        out.append(quoted(post["sketch"]))
+    out.append("\n### Реплика\n")
+    out.append(quoted(post.get("content")))
+    return "\n".join(out) + "\n"
+
+
+def start_dump(topic: str) -> None:
+    """Начать ДАМП спектакля — заново, а не дописать к прежнему.
+
+    Файл переписывается целиком на каждом спектакле: ДАМП — про последний
+    спектакль, а не летопись. Иначе он рос бы вечно, а читают его всегда ради
+    разбора свежего случая — так и было со стенограммой, которая никого не
+    чистилась и после десятков спектаклей стала мегабайтами.
+    """
+    when = time.strftime("%d.%m.%Y %H:%M")
+    header = (
+        f"# ДАМП · {when} · {(topic or '').strip() or 'без темы'}\n\n"
+        f"Хронология последнего спектакля, по ходам: что уехало в модель, \n"
+        f"что она попросила, что ей принесли и что она сказала — с числами.\n"
+        f"Пишется заново на каждый новый спектакль (порт {settings.PORT}).\n"
+    )
     try:
-        with open(settings.THINKING_FILE, "a", encoding="utf-8") as handle:
-            handle.write(f"\n\n# {time.strftime('%d.%m.%Y %H:%M')} — "
-                         f"{(topic or '').strip() or 'без темы'}\n")
+        settings.DUMP_FILE.write_text(header, encoding="utf-8")
     except Exception as e:
-        print(f"  ⚠️  Не открывается {settings.THINKING_FILE.name}: {e}")
+        print(f"  ⚠️  Не открывается {settings.DUMP_FILE.name}: {e}")
 
 
-def save_thinking_entry(post: dict):
-    """Складывает размышления хода в стенограмму — по одной записи на реплику.
+def save_dump_entry(post: dict, turn: dict = None) -> None:
+    """Дописать ход в ДАМП — по одной записи на реплику, в том порядке, как шли.
 
-    Туда же идёт набросок — прежняя версия реплики, которую модель сказала
-    до поиска, а потом переписала: в ленте он живёт свёрнутым блоком, но после
-    занавеса ленты уже нет, и прочитать его можно только здесь.
-
-    Пустые размышления не пишутся: у местных моделей их не бывает вовсе,
-    и файл не должен пухнуть заголовками без единой мысли.
+    Пишется и для человека, и для модели: в хронологии важны все голоса,
+    а у живой реплики просто не будет ни токенов, ни поиска (см. dump_turn_markdown).
     """
-    thoughts = (post.get("thinking") or "").strip()
-    sketch = (post.get("sketch") or "").strip()
-    if not thoughts and not sketch:
-        return
-    title = (f"\n### {post.get('timestamp', '')} · {post.get('display_name', '')} "
-             f"({post.get('model_used', '')}) · Акт {post.get('round', '?')}\n\n")
-    body = ""
-    if thoughts:
-        body += thoughts + "\n"
-    if sketch:
-        body += f"\n**Сказано раньше (потом модель ответила заново):**\n\n{sketch}\n"
     try:
-        with open(settings.THINKING_FILE, "a", encoding="utf-8") as handle:
-            handle.write(title + body)
+        with open(settings.DUMP_FILE, "a", encoding="utf-8") as handle:
+            handle.write(dump_turn_markdown(post, turn))
     except Exception as e:
-        print(f"  ⚠️  Не сохраняются размышления в {settings.THINKING_FILE.name}: {e}")
+        print(f"  ⚠️  Не сохраняется ход в {settings.DUMP_FILE.name}: {e}")
 
 def _message_view(msg: dict) -> dict:
     """Сообщение в том виде, в каком его показывают: роль, говорящий, вес и текст.
@@ -232,24 +317,29 @@ def _message_view(msg: dict) -> dict:
     }
 
 
-def build_prompt_payload(participant: dict, round_num: int, sent: list, added: list,
-                         trim_report: dict, topic: str = "", search_count: int = 0) -> dict:
-    """Снимок того, что уехало в модель на этом ходу.
+def build_turn_report(participant: dict, round_num: int, sent: list, added: list,
+                      trim_report: dict, topic: str = "", search_count: int = 0,
+                      steps: list = None) -> dict:
+    """Полный отчёт о ходе: что уехало в модель, что происходило и чем кончилось.
 
-    В ленте видно только ответ, а сколько истории к нему приложено, чьим окном
-    она мерена и что из неё выброшено — не было видно нигде: это жило в консоли,
-    то есть уходило вместе с ней. Здесь это лежит рядом с репликой.
+    Раньше это было разложено по трём блокам (размышления, набросок, снимок
+    запроса) и по двум местам хранения — и сложить общую картину из этого было
+    нельзя: числа были тут, поиски там, а их связь — только в голове. Теперь
+    отчёт один, и в нём строгая хронология: сначала откуда ход взялся (окно,
+    история, обрезка), потом что происходило по порядку (запросы с числами,
+    поиски с формулировкой и со всем принесённым), потом что сказала модель.
 
-    Сам снимок весит как сцена (десятки килобайт на ход), поэтому в посте
-    остаётся его сводка, а текст уходит странице отдельным запросом — когда
-    зритель блок раскроет (см. /api/post/<id>/prompt).
+    Отчёт весит как сцена (десятки килобайт на ход), поэтому в посте остаётся его
+    сводка, а текст уходит странице отдельным запросом — когда зритель блок
+    раскроет (см. /api/post/<id>/turn). Тот же отчёт целиком уезжает в ДАМП
+    спектакля (см. dump_turn_markdown).
     """
     messages = [_message_view(m) for m in sent]
     extra = [_message_view(m) for m in added]
     removed = list(trim_report.get("removed") or [])
     window = int(trim_report.get("window") or 0)
+    steps = [dict(step) for step in (steps or [])]
     summary = {
-        "stored": True,
         "messages": len(messages),
         "tokens": sum(m["tokens"] for m in messages),
         "window": window,
@@ -264,6 +354,8 @@ def build_prompt_payload(participant: dict, round_num: int, sent: list, added: l
         "extra_messages": len(extra),
         "extra_tokens": sum(m["tokens"] for m in extra),
         "search_rounds": int(search_count or 0),
+        "asks": sum(1 for step in steps if step.get("kind") == "ask"),
+        "problems": sum(1 for step in steps if step.get("kind") in ("refused", "silence")),
     }
     return {
         "summary": summary,
@@ -272,6 +364,11 @@ def build_prompt_payload(participant: dict, round_num: int, sent: list, added: l
             "model": participant.get("model", ""),
             "role": role_of(participant.get("is_moderator", False),
                             participant.get("is_judge", False)),
+            # То же слово по-русски: в ДАМПе читают глазами, а «participant»
+            # по-русски не читается (см. dump_turn_markdown)
+            "role_name": ROLE_NAMES.get(role_of(participant.get("is_moderator", False),
+                                                participant.get("is_judge", False)),
+                                        "Участник"),
             "round": round_num,
             "topic": topic or "",
             "time": time.strftime("%H:%M"),
@@ -291,14 +388,23 @@ def build_prompt_payload(participant: dict, round_num: int, sent: list, added: l
         "messages": messages,
         "added": extra,
         "removed": removed,
+        "steps": steps,
     }
+
+
+# Как называть роль по-русски: и в ленте, и в ДАМПе (см. dump_turn_markdown)
+ROLE_NAMES = {
+    "participant": "Участник",
+    "moderator": "Модератор",
+    "judge": "Судья",
+}
 
 
 def create_post(display_name: str, model_used: str, content: str, round_num: int, 
                 avatar_url: str = None, avatar_emoji: str = None,
                 search_count: int = 0, search_queries: list = None,
                 role: str = "participant", gender: str = "male",
-                thinking: str = "", sketch: str = "", prompt: dict = None) -> dict:
+                thinking: str = "", sketch: str = "", turn: dict = None) -> dict:
     """Единая функция создания поста для любого участника (human или AI)"""
     if search_queries is None:
         search_queries = []
@@ -310,11 +416,7 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "judge": "⚖️"
     }
     
-    role_names = {
-        "participant": "Участник",
-        "moderator": "Модератор",
-        "judge": "Судья"
-    }
+    role_names = ROLE_NAMES
     
     return {
         "id": len(session.posts) + 1,
@@ -325,19 +427,19 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "content": content,
         "content_html": text.markdown_to_html(content),
         # Размышления модели — не реплика, но и не мусор: их тратят наши токены.
-        # В ленте они живут свёрнутым блоком, так что прочитать их можно и после
-        # спектакля, а не только пока модель говорит (см. _StreamingReply)
+        # В ленте они живут внутри блока «ход»: это часть пути к ответу, а не
+        # отдельная сущность (см. _StreamingReply)
         "thinking": thinking or "",
         # А это прежняя версия самой реплики: модель сказала её до поиска и потом
-        # ответила заново. В ленте ей отведён свой свёрнутый блок
+        # ответила заново — в том же блоке, отдельным разделом
         "sketch": sketch or "",
         "round": round_num,
         "timestamp": time.strftime("%H:%M"),
         "search_count": search_count,
         "search_queries": search_queries,
-        # Что именно уехало в модель на этом ходу: в посте — только сводка,
-        # сам снимок живёт в памяти сессии (см. DebateSession.prompt_payload)
-        "prompt": (prompt or {}).get("summary"),
+        # Что именно уехало в модель и что происходило на этом ходу: в посте —
+        # только сводка, сам отчёт живёт в памяти сессии (см. DebateSession.turn_report)
+        "turn": (turn or {}).get("summary"),
         "role": role,
         "role_icon": role_icons.get(role, "🎭"),
         "role_name": role_names.get(role, "Участник"),
@@ -531,9 +633,11 @@ class DebateSession:
         self.moderator_finished = False
         self.runtime_participants = []
         self.conversation_history = []
-        # Снимки запросов по номеру реплики: что именно уехало в модель
-        self.prompt_log = {}
-        self.prompt_forget_warned = False
+        # Отчёты ходов по номеру реплики: что именно уехало в модель, что
+        # происходило по порядку и чем кончилось. В памяти — за весь
+        # спектакль: читают это ради разбора свежего случая, а новый спектакль
+        # начинает список заново (см. start_show), как и ДАМП переписывается
+        self.turn_log = {}
         # Сцена: места состава без имён, аватаров и личных инструкций — роли,
         # модели, порядок и числа. None значит «своей сцены нет»: места берутся
         # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
@@ -624,8 +728,8 @@ class DebateSession:
         self.moderator_message = None
         self.moderator_finished = False
         self.conversation_history = []
-        # Новый спектакль — новые реплики: снимки прежних ходов к ним не подходят
-        self.prompt_log = {}
+        # Новый спектакль — новые реплики: отчёты прежних ходов к ним не подходят
+        self.turn_log = {}
         self.sync_cast_media()
 
     def new_show(self):
@@ -655,7 +759,7 @@ class DebateSession:
     def add_post(self, display_name, model_used, content, round_num,
                  search_count=0, search_queries=None,
                  is_moderator=False, is_judge=False, gender="male", thinking="",
-                 sketch="", prompt=None):
+                 sketch="", turn=None):
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
 
@@ -663,7 +767,7 @@ class DebateSession:
 
         post = create_post(display_name, model_used, content, round_num,
                           avatar_url, avatar_emoji, search_count, search_queries, role,
-                          gender, thinking, sketch, prompt)
+                          gender, thinking, sketch, turn)
         self.posts.append(post)
 
         if content.strip():
@@ -675,40 +779,30 @@ class DebateSession:
                 "round": round_num,
             })
         # Размышления в память спектакля не идут (иначе следующая модель прочитала
-        # бы чужой черновик мыслей как сказанное вслух), а в файл — идут: там
-        # стенограмма, и её читают после занавеса, а не посреди разговора
-        save_thinking_entry(post)
+        # бы чужой черновик мыслей как сказанное вслух), а в ДАМП — идут: там
+        # хронология спектакля, и её читают после занавеса, а не посреди разговора
+        save_dump_entry(post, turn)
         return post
 
     # ------------------------------------------------------------
-    # Снимки запросов: что именно уехало в модель
+    # Отчёты ходов: что именно уехало в модель и что происходило
     # ------------------------------------------------------------
 
-    def remember_prompt(self, post_id: int, payload: dict) -> None:
-        """Запомнить снимок запроса этого хода, забыв самые старые снимки.
+    def remember_turn(self, post_id: int, payload: dict) -> None:
+        """Запомнить отчёт о ходе — до конца спектакля.
 
-        Снимок живёт в памяти, а не в файле: один ход весит как сама сцена,
-        а через сотню ходов это уже десятки мегабайт — при том, что после
-        перезапуска приложения посты исчезают вместе со снимками, и хранить
-        их дольше просто не для кого (см. PROMPT_KEEP_TURNS).
+        Держим все ходы текущего спектакля, а не последние несколько: отчёт
+        нужен ровно тогда, когда в нём что-то понадобилось посмотреть, а это
+        может быть и первая реплика («что мы вообще отправили модели?»).
+        Память это не обременяет: после «Нового спектакля» список начинается
+        заново, как и ДАМП на диске, а в файлы отчёты не пишутся — там лежит
+        их же текст, собранный для чтения (см. save_dump_entry).
         """
-        self.prompt_log[post_id] = payload
-        overflow = len(self.prompt_log) - max(0, int(settings.PROMPT_KEEP_TURNS))
-        for old_id in list(self.prompt_log)[:max(0, overflow)]:
-            forgotten = self.prompt_log.pop(old_id, None)
-            # Сводка в посте и снимок — один и тот же словарь: пост сразу честно
-            # говорит, что раскрывать больше нечего. Стереть блок молча нельзя:
-            # «открыть и посмотреть» — это ровно то, зачем блок и делался
-            if forgotten:
-                forgotten["summary"]["stored"] = False
-        if overflow > 0 and not self.prompt_forget_warned:
-            self.prompt_forget_warned = True
-            print(f"  🗂  Снимки запросов: держим последние {settings.PROMPT_KEEP_TURNS}, "
-                  f"старые забываются — в старых репликах блок скажет об этом сам")
+        self.turn_log[int(post_id)] = payload
 
-    def prompt_payload(self, post_id: int) -> dict:
-        """Снимок запроса по номеру реплики (None — снимка нет и уже не будет)."""
-        return self.prompt_log.get(int(post_id))
+    def turn_report(self, post_id: int) -> dict:
+        """Отчёт о ходе по номеру реплики (None — отчёта нет)."""
+        return self.turn_log.get(int(post_id))
 
     def current_participant_role(self) -> str:
         """Роль того, кто сейчас говорит: пустая строка, "moderator" или "judge".
@@ -898,12 +992,23 @@ class DebateSession:
         ]
 
     def _search_block(self) -> list:
+        """Правила поиска для модели — с обоими числами из настроек.
+
+        Минимум — чтобы модель искала до первого слова, а не после (см.
+        SEARCH_BEFORE_REPLY). Максимум назван не зря: модель, не знающая
+        потолка, просит поиск снова и снова — а ей отказывают молча,
+        и со стороны это выглядит как задумавшаяся модель (см. MAX_SEARCHES).
+        """
         if not settings.ENABLE_SEARCH:
             return []
-        min_text = f" Сделай минимум {settings.MIN_SEARCHES} поиск(ов) перед ответом." if settings.MIN_SEARCHES > 0 else ""
+        min_text = (f" Сделай минимум {settings.MIN_SEARCHES} поиск(ов) перед ответом."
+                    if settings.MIN_SEARCHES > 0 else "")
+        max_searches = max(1, int(settings.MAX_SEARCHES))
+        max_text = (f" За один ход разрешено не больше {max_searches} поиск(ов): "
+                    f"израсходовал их — говори по тому, что уже нашлось.")
         return [
             "Если есть сомнения в фактах или мнениях - используй поиск для уточнения. "
-            "При поиске НЕ указывай год." + min_text
+            "При поиске НЕ указывай год." + min_text + max_text
         ]
 
     def get_system_prompt(self, participant: dict) -> str:
@@ -1002,12 +1107,19 @@ class DebateSession:
             last_post = participant_posts[-1] if participant_posts else None
             if last_post:
                 last_speaker = last_post["display_name"]
+                # Реплика собеседника здесь НЕ цитуется повторно: она уже уехала
+                # строкой истории чуть выше (см. _format_history), и раньше
+                # модель читала одно и то же сообщение дважды — один раз как
+                # реплику сцены, второй — в этом задании. Каждое слово сцены
+                # должно уезжать в модель ровно один раз: дубли искажают и вес
+                # истории, и то, как модель читает разговор
                 if len(participant_posts) == 1:
                     messages.append({
                         "role": "user",
                         "content": (
-                            f'{last_speaker} только что сказал: "{last_post["content"]}". '
-                            f'Как {name}, ты тоже начинаешь обсуждение. Ответь {last_speaker} '
+                            f'{last_speaker} только что высказался — его реплика '
+                            f'выше, в истории диалога. Как {name}, ты тоже '
+                            f'начинаешь обсуждение. Ответь {last_speaker} '
                             f'и вырази свою позицию по теме.'
                         ),
                         "name": name_norm,
@@ -1016,8 +1128,9 @@ class DebateSession:
                     messages.append({
                         "role": "user",
                         "content": (
-                            f'{last_speaker} только что сказал: "{last_post["content"]}". '
-                            f'Как {name}, ответь ему и другим участникам. '
+                            f'{last_speaker} только что высказался — его реплика '
+                            f'выше, в истории диалога. Как {name}, ответь ему и '
+                            f'другим участникам. '
                             f'НЕ повторяй уже сказанное — добавь новый аргумент, пример или контраргумент. '
                             f'Если тема исчерпана — предложи новый аспект или смежный вопрос.'
                         ),
@@ -1058,6 +1171,10 @@ class DebateSession:
         # результаты поиска прямо на месте, и к концу хода «что уехало» было бы
         # уже не тем, с чего ход начался
         sent = copy.deepcopy(messages)
+        # Журнал хода: сюда ляжет всё, что происходит по порядку — запросы с их
+        # входом и выводом (пишет облачный путь и путь Ollama) и поиски с их
+        # формулировками и результатами (пишет цикл поиска)
+        journal = {}
 
         # Черновик реплики: если спектакль умеет показывать её по кускам, текст
         # растёт в ленте, пока модель говорит (у местных моделей порций не будет —
@@ -1075,6 +1192,7 @@ class DebateSession:
                 think=ollama_api.resolve_think(participant),
                 on_delta=draft.feed if draft else None,
                 on_thought=draft.think if draft else None,
+                report=journal,
             )
         finally:
             # Черновик закрываем при любом выходе, в том числе при ошибке: иначе
@@ -1082,11 +1200,13 @@ class DebateSession:
             if draft is not None:
                 draft.finish()
 
-        # Что ход дописал в запрос уже на своих кругах: реплик там нет, но токены
-        # за них платятся — и в снимке это должно быть видно отдельной строкой
-        prompt = build_prompt_payload(
+        # Отчёт о ходе: что уехало, что происходило по порядку и чем кончилось.
+        # Лишнее («ход дописал в запрос вот это») видно отдельно — токены за это
+        # платятся, а в самой истории его нет
+        turn = build_turn_report(
             participant, round_num, sent, messages[len(sent):], trim_report,
-            topic=self.topic, search_count=search_count)
+            topic=self.topic, search_count=search_count,
+            steps=journal.get("steps"))
 
         post = self.add_post(
             display_name=participant["display_name"],
@@ -1100,18 +1220,21 @@ class DebateSession:
             # назначить модератором не только живого человека, но и модель
             is_moderator=participant.get("is_moderator", False),
             gender=participant.get("gender", "male"),
-            # Мысли, сказанные по дороге к ответу: в ленте — свёрнутым блоком,
-            # в стенограмме — текстом. Черновик держит их для этого (см. think)
+            # Мысли, сказанные по дороге к ответу: в ленте они внутри того же
+            # блока о ходе, в ДАМПе — текстом. Черновик держит их для этого
             thinking=draft.thinking_full() if draft else "",
             # А это прежняя версия реплики, от которой модель отказалась по пути
-            # (обычно — чтобы сначала поискать): тоже свёрнутым блоком, чтобы
-            # зритель мог дочитать то, что мелькнуло в ленте и пропало
+            # (обычно — чтобы сначала поискать): тем же блоком, чтобы зритель
+            # мог дочитать то, что мелькнуло в ленте и пропало
             sketch=draft.sketch if draft else "",
-            # А это снимок отправленного запроса: у этой реплики его можно
-            # раскрыть и посмотреть, что именно прочитала модель
-            prompt=prompt,
+            # А это полный отчёт о ходе: у этой реплики его можно раскрыть
+            # и посмотреть, что именно прочитала модель
+            turn=turn,
         )
-        self.remember_prompt(post["id"], prompt)
+        # Ответ едет в отчёте вместе с остальным: в ленте он и так есть, а вот
+        # в ДАМПе ход должен заканчиваться тем, чем он кончился
+        turn["answer"] = response
+        self.remember_turn(post["id"], turn)
         self.current_action = None
         time.sleep(0.5)
         return response, search_count, search_queries
@@ -1811,8 +1934,10 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     его позвал.
     """
     print(f"🎬 Поток дебатов запущен для темы: {topic}")
-    # Размышления ходов уйдут в стенограмму: после занавеса ленты уже не будет
-    start_thinking_log(topic)
+    # Хронология ходов уйдёт в ДАМП: после занавеса ленты уже не будет,
+    # а по ДАМПу можно разобрать любой ход — от промпта до токенов
+    start_dump(topic)
+    print(f"  🗒  ДАМП спектакля: {settings.DUMP_FILE} (пишется заново на каждый спектакль)")
     runtime_participants = session.runtime_participants
     print(f"👥 Участников в сессии: {len(runtime_participants)}")
     

@@ -786,14 +786,17 @@ def model_takes_tools(model: str) -> bool:
 def _tool_schema() -> list:
     """Описание инструмента поиска — то же, что уходит в Ollama.
 
-    Без поля «default»: значение по умолчанию у нас и так пять (см. разбор
-    вызова в ollama_api), а лишний ключ в схеме — ещё один повод для 400.
+    Без поля «default»: сколько результатов приносить, решает настройка
+    SEARCH_MAX_RESULTS (см. разбор вызова в ollama_api), а лишний ключ в схеме —
+    ещё один повод для 400. Сколько их будет на самом деле, сказано в описании: иначе
+    модель просит «побольше», а получает потолок из настроек.
     """
     return [{
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Ищет информацию в интернете",
+            "description": (f"Ищет информацию в интернете — до "
+                            f"{max(1, int(settings.SEARCH_MAX_RESULTS))} результатов на запрос"),
             "parameters": {
                 "type": "object",
                 "required": ["query"],
@@ -1019,14 +1022,18 @@ def _turn_notes(answer: dict) -> dict:
     весь предел, и от очередной просьбы поискать, и оттого, что шлюз посчитал
     токены, но текста не прислал. finish_reason и счётчик размышлений различают
     эти случаи словами, а не догадкой (см. ollama_api.silence_reason).
+
+    Числа называются «входом» и «выводом», а не prompt_tokens и completion_tokens:
+    в ленте и в ДАМПе это читает человек, а по строке «3431 + 1246» без подписи
+    не понять ни что это, ни откуда взялось (см. ollama_api._journal_ask).
     """
     answer = answer or {}
     usage = answer.get("usage") or {}
     details = usage.get("completion_tokens_details") or {}
     notes = {"finish_reason": str(answer.get("finish_reason") or "")}
     for name, value in (
-            ("prompt_tokens", usage.get("prompt_tokens")),
-            ("completion_tokens", usage.get("completion_tokens")),
+            ("tokens_in", usage.get("prompt_tokens")),
+            ("tokens_out", usage.get("completion_tokens")),
             # Размышления считаются в вывод и оплачиваются как вывод, но в
             # реплику не попадают: у OpenAI-формы они лежат отдельным счётчиком
             ("reasoning_tokens", details.get("reasoning_tokens"))):
@@ -1034,6 +1041,28 @@ def _turn_notes(answer: dict) -> dict:
             notes[name] = int(value)
         except (TypeError, ValueError):
             pass
+    return notes
+
+
+def journal_ask(report: dict, notes: dict) -> dict:
+    """Дописать в журнал хода одну строку: этот запрос глазами чисел.
+
+    Журнал (report["steps"]) и есть «полная картина» хода: в нём по порядку лежит
+    всё, что случилось, — сколько уехало на входе, что модель попросила, что ей
+    принесли и чем каждый запрос кончился. Читают его в ленте у реплики и в ДАМПе
+    спектакля (см. show.build_turn_report), поэтому строка отвечает на вопрос
+    «откуда взялось вот это число», а не просто хранит его.
+
+    Живёт здесь, а не в ollama_api, потому что числа запроса рождаются тут —
+    а цикл поиска только дописывает между ними свои строки.
+    """
+    if report is None:
+        return notes
+    entry = dict(notes or {})
+    entry["kind"] = "ask"
+    entry["n"] = sum(1 for step in (report.get("steps") or [])
+                     if step.get("kind") == "ask") + 1
+    report.setdefault("steps", []).append(entry)
     return notes
 
 
@@ -1133,11 +1162,15 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
 
     if error:
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {error}")
+        # Отказ тоже — часть хода: без него в ДАМПе была бы дыра там, где что-то
+        # пошло не так, а по журналу видно, что запрос был и чем он кончился
+        journal_ask(report, {"error": str(error), "tokens_out": 0})
         return f"[ОШИБКА: {error}]", []
 
     if answer.get("error"):
         problem = hide_key(answer["error"])
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {problem}")
+        journal_ask(report, {"error": problem, "tokens_out": 0})
         return f"[ОШИБКА: {problem}]", []
 
     if answer.get("cut"):
@@ -1149,17 +1182,21 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
             return f"[ОШИБКА: {note}]", []
 
     notes = _turn_notes(answer)
+    # Был ли у этого запроса инструмент поиска: по журналу потом видно, почему
+    # модель не искала — не дали инструмент или сама не стала
+    notes["tools"] = bool(uses_tools and "tools" in body)
+    journal_ask(report, notes)
     if report is not None:
         report.update(notes)
     usage = answer.get("usage") or {}
     if usage:
-        # Размышления отдельной скобкой: они считаются выводом и оплачиваются,
-        # но в реплику не попадают — без этой скобки казалось бы, что модель
-        # наговорила тысячу токенов, а показала пустоту
+        # Вход и вывод — словами: по строке «3431 + 1246» нельзя понять, что
+        # это токены, а тем более что первое — история с промптом, а второе —
+        # ответ (вместе с размышлениями, которые в реплику не попадают)
         thoughts = notes.get("reasoning_tokens")
         note = f" (из них размышлений {thoughts})" if thoughts else ""
-        print(f"  ☁️  {bare_model_name(model)}: токенов {usage.get('prompt_tokens', '?')} "
-              f"+ {usage.get('completion_tokens', '?')}{note}")
+        print(f"  ☁️  {bare_model_name(model)}: вход {usage.get('prompt_tokens', '?')} "
+              f"+ вывод {usage.get('completion_tokens', '?')} токенов{note}")
 
     return answer.get("content") or "", answer.get("tool_calls") or []
 

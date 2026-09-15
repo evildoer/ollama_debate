@@ -104,7 +104,7 @@ CLOUD_DEFAULTS = (
     ("CLOUD_STREAM", True), ("CLOUD_SHOW_THINKING", True),
     ("CLOUD_LIMIT_PARAMS", True), ("CLOUD_NUM_CTX", 32768),
     ("CLOUD_MAX_TOKENS", 0), ("CLOUD_TURN_LIMIT", 120),
-    ("THINKING_KEEP_SHOWS", 20), ("PROMPT_KEEP_TURNS", 40),
+    ("MAX_SEARCHES", 3), ("SEARCH_MAX_RESULTS", 5), ("MAX_SEARCH_ATTEMPTS", 2),
 )
 
 
@@ -116,7 +116,7 @@ def setUpModule():
     на чистой. Убираем их из окружения — каждая проверка сама решает, что ей
     нужно, а не наследует чужие настройки.
 
-    И второе: стенограмма размышлений пишется на каждом ходу, а прогон не должен
+    И второе: ДАМП спектакля пишется на каждом ходу, а прогон не должен
     оставлять следы в проекте — уводим файл в временную папку на время набора.
     """
     for name in cloud.CLOUD_ENV_NAMES + (settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV"):
@@ -127,15 +127,15 @@ def setUpModule():
     for name, value in CLOUD_DEFAULTS:
         setattr(settings, name, value)
 
-    global SCRATCH_DIR, SAVED_THINKING_FILE
+    global SCRATCH_DIR, SAVED_DUMP_FILE
     SCRATCH_DIR = tempfile.TemporaryDirectory()
-    SAVED_THINKING_FILE = settings.THINKING_FILE
-    settings.THINKING_FILE = Path(SCRATCH_DIR.name) / ".theatre_thinking.md"
+    SAVED_DUMP_FILE = settings.DUMP_FILE
+    settings.DUMP_FILE = Path(SCRATCH_DIR.name) / "damp.md"
 
 
 def tearDownModule():
     """После прогона возвращаем настройки как были и убираем временную папку."""
-    settings.THINKING_FILE = SAVED_THINKING_FILE
+    settings.DUMP_FILE = SAVED_DUMP_FILE
     for name, value in SAVED_SETTINGS.items():
         setattr(settings, name, value)
     SCRATCH_DIR.cleanup()
@@ -657,7 +657,7 @@ class TestInstanceFiles(unittest.TestCase):
 
     def setUp(self):
         # Имена файлов и порт — общие на весь процесс: после проверки возвращаем
-        for name in ("PORT", "SETTINGS_FILE", "THINKING_FILE", "VRAM_MEASUREMENTS_FILE"):
+        for name in ("PORT", "SETTINGS_FILE", "DUMP_FILE", "VRAM_MEASUREMENTS_FILE"):
             self.addCleanup(setattr, settings, name, getattr(settings, name))
 
     def test_the_port_comes_from_the_command_line(self):
@@ -674,9 +674,9 @@ class TestInstanceFiles(unittest.TestCase):
 
     def test_each_port_gets_its_own_folder(self):
         settings.use_instance(5000)
-        one = (settings.SETTINGS_FILE, settings.THINKING_FILE, settings.VRAM_MEASUREMENTS_FILE)
+        one = (settings.SETTINGS_FILE, settings.DUMP_FILE, settings.VRAM_MEASUREMENTS_FILE)
         settings.use_instance(5077)
-        two = (settings.SETTINGS_FILE, settings.THINKING_FILE, settings.VRAM_MEASUREMENTS_FILE)
+        two = (settings.SETTINGS_FILE, settings.DUMP_FILE, settings.VRAM_MEASUREMENTS_FILE)
 
         for before, after in zip(one, two):
             self.assertNotEqual(before, after, "у двух экземпляров не может быть одного файла")
@@ -697,19 +697,19 @@ class TestInstanceFiles(unittest.TestCase):
         root = Path(tempfile.mkdtemp())
         (root / ".theatre_settings.json").write_text(
             json.dumps({"judge_rules": ["правило"]}), encoding="utf-8")
-        (root / ".theatre_thinking.md").write_text("мысли прежнего спектакля",
+        (root / ".theatre_thinking.md").write_text("хронология прежнего спектакля",
                                                     encoding="utf-8")
 
         with mock.patch.object(settings, "PROJECT_ROOT", root), \
                 mock.patch.object(settings, "INSTANCE_ROOT", root / ".theatre"):
             folder, moved = settings.prepare_instance(5001)
             saved = json.loads((folder / "settings.json").read_text(encoding="utf-8"))
-            transcript = (folder / "thinking.md").read_text(encoding="utf-8")
+            transcript = (folder / "damp.md").read_text(encoding="utf-8")
 
         self.assertIn(".theatre_settings.json", moved)
         self.assertIn(".theatre_thinking.md", moved)
         self.assertEqual(saved["judge_rules"], ["правило"])
-        self.assertEqual(transcript, "мысли прежнего спектакля")
+        self.assertEqual(transcript, "хронология прежнего спектакля")
         self.assertEqual(settings.SETTINGS_FILE, folder / "settings.json",
                          "сцена читается из папки экземпляра, а не из корня")
         self.assertTrue((root / ".theatre_settings.json").exists(),
@@ -855,30 +855,33 @@ class TestStreamingReply(unittest.TestCase):
         self.assertEqual(self.session.posts[0]["thinking"],
                          "Думаю о теме... и вот что решил.")
 
-    def test_the_thoughts_are_written_into_the_transcript(self):
-        """Мысли ложатся в стенограмму: после занавеса ленты уже не будет.
+    def test_the_dump_keeps_the_whole_turn(self):
+        """ДАМП хранит весь ход: тему, кто говорил, размышления и саму реплику.
 
-        Токены на размышления тратятся настоящие, и единственный их след —
-        этот файл (обычный markdown рядом с проектом, в .gitignore).
+        Раньше это было в двух местах и в двух видах: мысли моделей —
+        в стенограмме (без реплик), а «что уехало в модель» — только в памяти
+        и только у последних ходов. Разобраться по отрывкам было нельзя.
         """
         folder = Path(tempfile.mkdtemp())
-        transcript = folder / ".theatre_thinking.md"
+        dump = folder / "damp.md"
 
         def answer(model, messages, participant_name, **kwargs):
             kwargs["on_thought"]("Сначала взвешу доводы.", True)
             kwargs["on_delta"]("Вот ответ.", True)
             return "Вот ответ.", 0, []
 
-        with mock.patch.object(settings, "THINKING_FILE", transcript):
-            show.start_thinking_log("Проверочная тема")
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Проверочная тема")
             with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
                 self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
-            written = transcript.read_text(encoding="utf-8")
+            written = dump.read_text(encoding="utf-8")
 
-        self.assertIn("Проверочная тема", written, "в стенограмме должна быть тема")
+        self.assertIn("Проверочная тема", written, "в ДАМПе должна быть тема")
         self.assertIn("Сначала взвешу доводы.", written)
         self.assertIn(self._participant()["display_name"], written)
-        self.assertNotIn("Вот ответ.", written, "в стенограмме только мысли, не реплики")
+        self.assertIn("Вот ответ.", written, "в ДАМПе ход заканчивается репликой")
+        self.assertIn("### Что уехало в модель", written, "виден и вход, а не только выход")
+        self.assertIn("### Реплика", written)
 
     def test_the_rewritten_reply_is_kept_as_a_sketch(self):
         """Вторая версия реплики — главная, первая остаётся наброском.
@@ -966,24 +969,27 @@ class TestStreamingReply(unittest.TestCase):
         self.assertTrue(kept, "сметённая реплика пропала")
         self.assertNotIn("web_search", kept[0]["sketch"])
 
-    def test_the_transcript_is_trimmed_to_the_last_shows(self):
-        """Стенограмма не растёт вечно: её читают руками и всегда с конца."""
-        transcript = Path(tempfile.mkdtemp()) / "thinking.md"
-        transcript.write_text(
-            "".join(f"\n\n# 0{i}.09.2026 12:00 — тема {i}\n\nмысль {i}\n"
-                    for i in range(1, 6)), encoding="utf-8")
+    def test_the_dump_is_written_anew_for_each_show(self):
+        """В ДАМПе — только последний спектакль: его и разбирают, а не прошлые.
 
-        # Именно через начало спектакля: обрезка должна быть встроена в него,
+        Стенограмма когда-то росла вечно и чистилась «последними двадцатью
+        спектаклями», которых никто и не открывал. Теперь файл переписывается,
+        и в нём всегда ровно один спектакль.
+        """
+        dump = Path(tempfile.mkdtemp()) / "damp.md"
+        dump.write_text("# ДАМП · 01.09.2026 12:00 · прежняя тема\n\nход прежнего спектакля\n",
+                        encoding="utf-8")
+
+        # Именно через начало спектакля: перезапись должна быть встроена в него,
         # а не жить отдельной функцией, которую никто не зовёт
-        with mock.patch.object(settings, "THINKING_FILE", transcript), \
-                mock.patch.object(settings, "THINKING_KEEP_SHOWS", 2):
-            show.start_thinking_log("новая тема")
-            written = transcript.read_text(encoding="utf-8")
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("новая тема")
+            written = dump.read_text(encoding="utf-8")
 
-        self.assertNotIn("тема 3", written)
-        self.assertIn("тема 4", written)
-        self.assertIn("тема 5", written)
+        self.assertNotIn("прежняя тема", written, "прежний спектакль должен быть забыт")
+        self.assertNotIn("ход прежнего спектакля", written)
         self.assertIn("новая тема", written)
+        self.assertIn("ДАМП", written)
 
     def test_the_sketch_lays_down_in_the_transcript(self):
         """Прежнюю версию реплики можно прочитать и после занавеса.
@@ -992,7 +998,7 @@ class TestStreamingReply(unittest.TestCase):
         он должен оказаться и без них.
         """
         folder = Path(tempfile.mkdtemp())
-        transcript = folder / ".theatre_thinking.md"
+        dump = folder / "damp.md"
 
         def answer(model, messages, participant_name, **kwargs):
             feed = kwargs["on_delta"]
@@ -1000,21 +1006,37 @@ class TestStreamingReply(unittest.TestCase):
             feed("Второй ответ.", True)
             return "Второй ответ.", 1, ["проверочный запрос"]
 
-        with mock.patch.object(settings, "THINKING_FILE", transcript):
-            show.start_thinking_log("Проверочная тема")
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Проверочная тема")
             with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
                 self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
-            written = transcript.read_text(encoding="utf-8")
+            written = dump.read_text(encoding="utf-8")
 
         self.assertIn("Первый ответ.", written)
         self.assertIn("Сказано раньше", written)
 
-    def test_a_turn_without_thoughts_leaves_the_transcript_alone(self):
-        """Местные модели не размышляют — файла без мыслей быть не должно."""
-        transcript = Path(tempfile.mkdtemp()) / ".theatre_thinking.md"
-        with mock.patch.object(settings, "THINKING_FILE", transcript):
-            self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
-        self.assertFalse(transcript.exists(), "пустые заголовки в стенограмме не нужны")
+    def test_a_turn_without_thoughts_still_gets_into_the_dump(self):
+        """Местные модели не размышляют — но их ход всё равно должен быть виден.
+
+        Раньше без мыслей в стенограмму не писалось ничего: разбирать потом
+        было нечего, хотя ход был и токены за него платились.
+        """
+        dump = Path(tempfile.mkdtemp()) / "damp.md"
+
+        def answer(model, messages, participant_name, **kwargs):
+            feed = kwargs["on_delta"]
+            feed("Вот ответ.", True)
+            return "Вот ответ.", 0, []
+
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Проверочная тема")
+            with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+                self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+            written = dump.read_text(encoding="utf-8")
+
+        self.assertIn("Вот ответ.", written)
+        self.assertNotIn("### Размышления", written,
+                         "размышлений не было — и раздела быть не должно")
 
     def test_only_the_tail_of_the_thoughts_is_shown(self):
         """Тысяча знаков размышлений в ленте не нужна — только хвост."""
@@ -1407,6 +1429,43 @@ class TestSystemPrompt(unittest.TestCase):
         self.session.moderator_guidelines = ["Обсуждаем только математику"]
         prompt = self.session.get_system_prompt(non_judge_ai(self.session))
         self.assertIn("Обсуждаем только математику", prompt)
+
+    def test_the_search_block_names_both_numbers(self):
+        """Модель должна знать и минимум поисков, и потолок.
+
+        Раньше о потолке знал только код: модель просила поиск снова и снова,
+        ей молча отказывали, и со стороны это выглядело как задумавшаяся модель.
+        """
+        cloud_setting(self, "MIN_SEARCHES", 2)
+        cloud_setting(self, "MAX_SEARCHES", 3)
+        prompt = self.session.get_system_prompt(non_judge_ai(self.session))
+
+        self.assertIn("минимум 2 поиск", prompt)
+        self.assertIn("не больше 3 поиск", prompt)
+
+    def test_the_last_reply_does_not_travel_to_the_model_twice(self):
+        """Реплика собеседника уезжает в модель ровно один раз.
+
+        Тот самый баг из жизни: последняя реплика лежала и в истории диалога,
+        и ещё раз целиком — в задании «X только что сказал: "..."». Модель
+        читала один и тот же текст дважды, а платили за это как за две реплики.
+        """
+        listener = non_judge_ai(self.session)
+        speaker = next(p for p in self.session.runtime_participants
+                       if p.get("model") != "human"
+                       and p.get("display_name") != listener.get("display_name"))
+        self.session.conversation_history.append({
+            "display_name": speaker["display_name"],
+            "content": "ЕДИНСТВЕННАЯ РЕПЛИКА СЦЕНЫ",
+            "is_moderator": False, "is_judge": False, "round": 1})
+
+        messages = self.session.build_messages_for_ai(listener, 2)
+        joined = " ".join(str(m.get("content") or "") for m in messages)
+
+        self.assertEqual(joined.count("ЕДИНСТВЕННАЯ РЕПЛИКА СЦЕНЫ"), 1,
+                         "реплика сцены уехала в модель больше одного раза")
+        self.assertIn(speaker["display_name"], joined,
+                      "но сказать, кто её сказал, всё равно надо")
 
     def test_judge_uses_its_own_rules(self):
         self.session.judge_rules = ["ПРАВИЛО СУДЬИ ДЛЯ ПРОВЕРКИ"]
@@ -1962,14 +2021,14 @@ class TestCloudContextWindow(unittest.TestCase):
                       "по строке в логе должно быть видно, чьё это окно")
 
 
-class TestPromptSnapshot(unittest.TestCase):
-    """Снимок запроса: что именно уехало в модель на этом ходу.
+class TestTurnReport(unittest.TestCase):
+    """Отчёт о ходе: что именно уехало в модель — и что происходило по порядку.
 
-    В ленте виден только ответ, а вопрос «почему модель не помнит начало сцены»
-    до сих пор требовал лезть в консоль — и там оставалась одна строка «доступно:
-    6935», по которой ничего не понять. Теперь у реплики есть снимок её запроса:
-    история целиком, чьим окном она мерена, что выброшено и какой системный
-    промпт уехал.
+    В ленте виден только ответ, а вопросы «почему модель не помнит начало сцены»
+    и «откуда взялось это число токенов» требовали лезть в консоль. Теперь
+    у каждой реплики есть её ход целиком: откуда он взялся (окно, история,
+    обрезка), что делал по порядку (запросы с их входом и выводом, поиски
+    с формулировкой и находками) и чем кончился.
     """
 
     def setUp(self):
@@ -1983,7 +2042,7 @@ class TestPromptSnapshot(unittest.TestCase):
                 "instruction": "ГОВОРИ КОРОТКО"}
 
     def _turn(self, participant: dict = None, reply: str = "Вот ответ.",
-              extra: list = None, search_count: int = 0):
+              extra: list = None, search_count: int = 0, steps: list = None):
         """Один ход с подделанным шлюзом. extra — то, что ход дописывает в запрос."""
         participant = participant or self._participant()
 
@@ -1991,6 +2050,12 @@ class TestPromptSnapshot(unittest.TestCase):
             # Настоящий ask_model дописывает в этот же список результаты поиска
             if extra:
                 messages.extend(copy.deepcopy(extra))
+            # И так же наполняет журнал хода: у настоящего это делают сам запрос
+            # (числа) и цикл поиска (формулировка и находки)
+            if steps:
+                kwargs["report"]["steps"] = copy.deepcopy(steps)
+                kwargs["report"]["tokens_in"] = 3431
+                kwargs["report"]["tokens_out"] = 1246
             return reply, search_count, ["проверочный запрос"] * search_count
 
         with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
@@ -2030,13 +2095,13 @@ class TestPromptSnapshot(unittest.TestCase):
         self.assertEqual(report["messages_after"], len(trimmed))
 
     def test_the_post_carries_the_request_that_was_sent(self):
-        """У реплики модели есть снимок — и в нём ровно то, что читала модель."""
+        """У реплики модели есть отчёт — и в нём ровно то, что читала модель."""
         post = self._turn()
 
-        self.assertIsNotNone(post["prompt"], "у реплики нет снимка запроса")
-        payload = self.session.prompt_payload(post["id"])
+        self.assertIsNotNone(post["turn"], "у реплики нет отчёта о ходе")
+        payload = self.session.turn_report(post["id"])
         self.assertIsNotNone(payload)
-        self.assertEqual(post["prompt"]["messages"], len(payload["messages"]))
+        self.assertEqual(post["turn"]["messages"], len(payload["messages"]))
         self.assertEqual(payload["summary"]["tokens"],
                          sum(m["tokens"] for m in payload["messages"]))
 
@@ -2059,9 +2124,9 @@ class TestPromptSnapshot(unittest.TestCase):
         post = self._turn(extra=[{"role": "tool", "name": "search",
                                   "content": "НАЙДЕННОЕ-ПОЗЖЕ"}], search_count=1)
 
-        payload = self.session.prompt_payload(post["id"])
+        payload = self.session.turn_report(post["id"])
         sent = " ".join(m["content"] for m in payload["messages"])
-        self.assertNotIn("НАЙДЕННОЕ-ПОЗЖЕ", sent, "снимок снят уже после поиска")
+        self.assertNotIn("НАЙДЕННОЕ-ПОЗЖЕ", sent, "отчёт снят уже после поиска")
         self.assertIn("НАЙДЕННОЕ-ПОЗЖЕ",
                       " ".join(m["content"] for m in payload["added"]),
                       "дописанное ходом должно быть видно отдельно")
@@ -2069,76 +2134,208 @@ class TestPromptSnapshot(unittest.TestCase):
         self.assertGreater(payload["summary"]["extra_tokens"], 0)
         self.assertEqual(payload["summary"]["search_rounds"], 1)
 
-    def test_an_old_snapshot_is_forgotten_and_the_post_says_so(self):
-        """Снимки живут в памяти только у последних ходов — и не молчат об этом.
+    def test_every_turn_of_the_show_is_kept(self):
+        """Отчёты держатся за весь спектакль, а не за последние несколько ходов.
 
-        Если бы блок у старой реплики просто переставал раскрываться, это
-        выглядело бы поломкой. Пост говорит сам, что снимок забыт.
+        Смотреть в них хочется как раз тогда, когда что-то пошло не так, — и это
+        может быть первая реплика («что мы вообще отправили модели?»). Новый
+        спектакль начинает список заново: отчёты прежних ходов к нему не годятся.
         """
-        with mock.patch.object(settings, "PROMPT_KEEP_TURNS", 2):
-            for _ in range(3):
-                self._turn()
+        for _ in range(5):
+            self._turn()
 
-        first, last = self.session.posts[0], self.session.posts[-1]
-        self.assertFalse(first["prompt"]["stored"],
-                         "старый пост молчит о том, что снимок забыт")
-        self.assertIsNone(self.session.prompt_payload(first["id"]))
-        self.assertIsNotNone(self.session.prompt_payload(last["id"]))
-        self.assertTrue(last["prompt"]["stored"])
-        self.assertEqual(len(self.session.prompt_log), 2,
-                         "держим ровно столько снимков, сколько велено")
+        self.assertEqual(len(self.session.turn_log), 5)
+        for post in self.session.posts:
+            self.assertIsNotNone(self.session.turn_report(post["id"]),
+                                 "отчёт о ходе пропал — а разбирать по нему")
+
+        self.session.start_show("Тема")
+        self.assertEqual(self.session.turn_log, {},
+                         "новый спектакль — новые отчёты: прежние забыты")
+
+    def test_the_turn_names_the_numbers_and_the_search_queries(self):
+        """В отчёте видно и что уехало, и что ход делал по порядку.
+
+        Именно этого не хватало: «запросов было три» и «нашли вот это» лежало
+        в разных местах, а связь — только в голове. И числа запроса не надо
+        угадывать: вход отличается от вывода, размышления названы отдельно.
+        """
+        steps = [
+            {"kind": "ask", "n": 1, "tokens_in": 3431, "tokens_out": 1246,
+             "reasoning_tokens": 1160, "finish_reason": "length", "tools": True},
+            {"kind": "search", "n": 1, "query": "Сыктывкар население 2025",
+             "limit": 3, "results": "1. Республика Коми — 737 000 человек"},
+            {"kind": "refused", "text": "просит ещё поиск «раз», но лимит 3 исчерпан"},
+        ]
+        post = self._turn(steps=steps)
+        payload = self.session.turn_report(post["id"])
+
+        self.assertEqual(post["turn"]["asks"], 1, "в сводке — сколько было запросов")
+        self.assertEqual(post["turn"]["problems"], 1, "и сколько было заминок")
+        self.assertEqual([step["kind"] for step in payload["steps"]],
+                         ["ask", "search", "refused"], "шаги должны идти по порядку")
+        search = payload["steps"][1]
+        self.assertIn("население", search["query"], "без формулировки запроса поиск бесполезен")
+        self.assertIn("737 000", search["results"], "и без найденного тоже")
+
+    def test_a_search_round_lands_in_the_turn_step_by_step(self):
+        """Ход собирается по шагам из настоящих ответов шлюза, а не из догадок.
+
+        Здесь настоящий HTTP-ответ в формате OpenAI: сначала модель просит поиск,
+        потом говорит по найденному. В отчёте должно быть видно ровно это и по
+        порядку — запрос с числами входа и вывода, поиск с формулировкой
+        и со всем принесённым, и второй запрос.
+        """
+        gateway = FakeGateway(texts=[
+            json.dumps({"choices": [{"message": {"content": "", "tool_calls": [
+                {"id": "call-1", "type": "function",
+                 "function": {"name": "search_web",
+                              "arguments": json.dumps(
+                                  {"query": "Сыктывкар население"})}}]}}]}),
+            json.dumps({"choices": [{"message": {"content": "Столица Коми."},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 3431, "completion_tokens": 1246}}),
+        ])
+        self.addCleanup(gateway.stop)
+        saved = (settings.CLOUD_BASE_URL, settings.CLOUD_API_KEY)
+        self.addCleanup(setattr, settings, "CLOUD_BASE_URL", saved[0])
+        self.addCleanup(setattr, settings, "CLOUD_API_KEY", saved[1])
+        settings.CLOUD_BASE_URL = gateway.base_url
+        settings.CLOUD_API_KEY = "test-key-1234567890"
+        self.addCleanup(cloud._MODELS_WITHOUT_TOOLS.clear)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+
+        participant = {"display_name": "Проверка", "model": "cloud:openai/gpt-5-nano",
+                       "gender": "male"}
+        with mock.patch.object(ollama_api, "search_web",
+                               mock.Mock(return_value="НАЙДЕНО ПОИСКОМ")):
+            self.session.handle_ai_turn(participant, 1)
+
+        payload = self.session.turn_report(self.session.posts[-1]["id"])
+        kinds = [step["kind"] for step in payload["steps"]]
+        self.assertEqual(kinds[:3], ["ask", "search", "ask"],
+                         f"шаги хода разъехались: {kinds}")
+        first, search, second = payload["steps"][:3]
+        self.assertTrue(first["tools"], "надо видеть, ушёл ли инструмент поиска")
+        self.assertNotIn("tokens_in", first,
+                         "шлюз не прислал чисел — выдумывать их нельзя")
+        self.assertEqual(search["query"], "Сыктывкар население")
+        self.assertIn("НАЙДЕНО ПОИСКОМ", search["results"])
+        self.assertEqual(second["tokens_in"], 3431, "вход второго запроса должен быть виден")
+        self.assertEqual(second["tokens_out"], 1246)
+        self.assertEqual(payload["summary"]["asks"], 2, "в сводке — сколько было запросов")
+
+    def test_the_search_numbers_come_from_the_settings(self):
+        """Все числа поиска — из настроек, а не из чисел, спрятанных в коде.
+
+        Раньше минимум был настройкой, а максимум — тройкой в ask_model, и узнать
+        о нём можно было только прочитав код, который про лимит молчал.
+        """
+        for name, value in (("MIN_SEARCHES", 2), ("MAX_SEARCHES", 4),
+                            ("SEARCH_MAX_RESULTS", 3), ("MAX_SEARCH_ATTEMPTS", 1)):
+            cloud_setting(self, name, value)
+
+        self.assertEqual(ollama_api.search_limits(), (2, 4, 3, 1))
+
+    def test_a_model_cannot_order_more_results_than_allowed(self):
+        """Сколько результатов приносить — решает режиссёр, а не модель.
+
+        В вызове инструмента модель просит своё число (обычно «побольше»),
+        и раньше оно уезжало в поиск как есть. Сверх настроек не ходим: лишние
+        находки — это лишние входные токены в каждом следующем запросе.
+        """
+        asked = {}
+        cloud_setting(self, "SEARCH_MAX_RESULTS", 2)
+
+        def fake_ddgs(kind, method, query, max_results):
+            asked["max"] = max_results
+            return [], None
+
+        with mock.patch.object(search, "ddgs_search", side_effect=fake_ddgs):
+            ollama_api.search_web("Сыктывкар")
+            self.assertEqual(asked["max"], 2, "без просьбы модели — своё число из настроек")
+            ollama_api.search_web("Сыктывкар", 9)
+            self.assertEqual(asked["max"], 2, "модель не может заказать больше, чем разрешено")
 
     def test_a_human_reply_has_nothing_to_show(self):
         post = show.create_post("Живой", "human", "сказано руками", 1)
-        self.assertIsNone(post["prompt"], "человек ничего никуда не отправлял")
+        self.assertIsNone(post["turn"], "человек ничего никуда не отправлял")
 
-    def test_the_page_asks_for_the_snapshot_by_the_same_route(self):
+    def test_the_page_asks_for_the_turn_by_the_same_route(self):
         routes = {rule.rule for rule in web_app.app.url_map.iter_rules()}
-        self.assertIn("/api/post/<int:post_id>/prompt", routes)
-        self.assertIn("/api/post/${box.dataset.postId}/prompt", page.HTML_TEMPLATE,
-                      "страница спрашивает снимок не по тому адресу, что есть у сервера")
+        self.assertIn("/api/post/<int:post_id>/turn", routes)
+        self.assertIn("/api/post/${box.dataset.postId}/turn", page.HTML_TEMPLATE,
+                      "страница спрашивает отчёт не по тому адресу, что есть у сервера")
 
 
-class TestPromptPanel(unittest.TestCase):
-    """Блок «что уехало в модель» на странице: свёрнут, тёмен и по требованию."""
+class TestTurnPanel(unittest.TestCase):
+    """Блок о ходе на странице: один вместо трёх, свёрнут, тёмен и по требованию."""
 
     def setUp(self):
         self.page = page.HTML_TEMPLATE
 
     def block(self) -> str:
-        start = self.page.index("function postPromptHtml(")
+        start = self.page.index("function postTurnHtml(")
         return self.page[start:self.page.index("function addPost(", start)]
 
-    def test_the_block_appears_only_where_there_is_a_snapshot(self):
+    def test_the_block_appears_only_where_there_is_a_turn(self):
         body = self.block()
-        self.assertIn("post.prompt", body)
-        self.assertIn("return ''", body, "без снимка блока быть не должно")
+        self.assertIn("post.turn", body)
+        self.assertIn("return ''", body, "без отчёта блока быть не должно")
+
+    def test_the_turn_is_one_block_instead_of_three(self):
+        """Размышления, «сказано раньше» и «что уехало» — теперь один блок.
+
+        Раньше это были три свёрнутые простыни рядом с каждой репликой, и связь
+        между ними приходилось держать в голове: тут числа, там поиски.
+        """
+        self.assertNotIn("function postThinkingHtml", self.page)
+        self.assertNotIn("function postSketchHtml", self.page)
+        add = self.page[self.page.index("const postDiv = document.createElement"):]
+        add = add[:add.index("insertBefore")]
+        self.assertIn("${postTurnHtml(post)}", add, "блок не попал в саму реплику")
+        for gone in ("postThinkingHtml(post)", "postSketchHtml(post)"):
+            self.assertNotIn(gone, add, "у реплики остался прежний отдельный блок")
 
     def test_the_block_is_collapsed_and_the_text_is_fetched_on_demand(self):
         body = self.block()
         self.assertIn('<details class="post-thinking post-prompt"', body)
-        self.assertNotIn('<details open', body, "снимок хода весит как сцена — пусть ждёт клика")
+        self.assertNotIn('<details open', body, "отчёт хода весит как сцена — пусть ждёт клика")
         self.assertIn("data-post-id", body)
-        self.assertIn("${postPromptHtml(post)}", self.page, "блок не попал в саму реплику")
         start = self.page.index("function addPost(")
         add_body = self.page[start:self.page.index("function upsertStreamPost(", start)]
-        self.assertIn("loadPromptBox(promptBox)", add_body,
-                      "снимок нечем подгрузить — блок останется пустым")
+        self.assertIn("loadTurnBox(turnBox)", add_body,
+                      "отчёт нечем подгрузить — блок останется пустым")
 
-    def test_the_snapshot_has_its_own_colour_in_both_themes(self):
+    def test_the_turn_has_its_own_colour_in_both_themes(self):
         self.assertIn(".post-prompt {", self.page)
         self.assertIn("body.dark .post-prompt", self.page)
         self.assertIn("body.dark .prompt-text", self.page,
                       "белое поле на тёмной сцене уже случалось — у текста должна быть своя темнота")
+        self.assertIn("body.dark .prompt-step", self.page,
+                      "шаги хода — тоже текст, и им тоже нужна тёмная тема")
 
-    def test_the_body_names_the_window_and_the_dropped_messages(self):
-        start = self.page.index("function promptBodyHtml(")
-        body = self.page[start:self.page.index("function loadPromptBox(", start)]
+    def test_the_body_goes_through_the_turn_step_by_step(self):
+        """Внутри блока — хронология: шаги, числа, найденное и всё, что уехало."""
+        start = self.page.index("function turnBodyHtml(")
+        body = self.page[start:self.page.index("function loadTurnBox(", start)]
         self.assertIn("WINDOW_WORDS", body, "должно быть видно, чьим окном мерили")
         self.assertIn("removed_messages", body)
         self.assertIn("promptRemovedHtml(data.removed)", body)
         self.assertIn("promptMessagesHtml(data.messages)", body,
                       "надо показать и системный промпт, и историю")
+        self.assertIn("data.steps", body, "шаги хода — главное в этом блоке")
+        self.assertIn("turnAskText(step)", body, "запрос без чисел не объясняет, откуда они")
+        self.assertIn("step.query", body, "у поиска должна быть формулировка запроса")
+        self.assertIn("step.results", body, "и то, что по нему нашлось")
+
+    def test_the_ask_line_explains_what_the_numbers_mean(self):
+        """«3431 + 1246» — это вход и вывод, и в ленте это должно быть сказано."""
+        start = self.page.index("function turnAskText(")
+        body = self.page[start:self.page.index("function ", start + 10)]
+        self.assertIn("вход", body)
+        self.assertIn("вывод", body)
+        self.assertIn("reasoning_tokens", body, "размышления считаются в вывод — их надо назвать")
 
 
 # ---------------------------------------------------------------- посты
@@ -2226,15 +2423,15 @@ class TestRoleMarks(unittest.TestCase):
                       self.page)
 
     def test_the_thoughts_stay_in_the_finished_reply(self):
-        """Готовый пост хранит мысли свёрнутым блоком: читать можно и после занавеса."""
-        self.assertIn("function postThinkingHtml(post)", self.page)
-        self.assertIn("${postThinkingHtml(post)}", self.page)
-        # Свёрнут по умолчанию: лента про сказанное вслух, а мысли открывают сами.
-        # У черновика, наоборот, открыт — там он показывает, что модель ещё думает
-        self.assertIn('<details class="post-thinking"><summary>💭 размышления', self.page)
-        self.assertIn('<details class="post-thinking" open>', self.page)
-        self.assertIn("escapeHtml(thoughts)", self.page,
+        """Готовый пост хранит мысли — внутри блока о ходе: читать можно и после занавеса."""
+        start = self.page.index("function turnBodyHtml(")
+        body = self.page[start:self.page.index("function loadTurnBox(", start)]
+        self.assertIn("data.thinking", body, "мысли пропали из готовой реплики")
+        self.assertIn("thinkingBlockHtml", body,
                       "мысли показываем текстом, а не разметкой")
+        self.assertIn("escapeHtml(body)", self.page, "текст блока экранируется")
+        # У черновика свой — открытый — блок: там видно, что модель ещё думает
+        self.assertIn('<details class="post-thinking" open>', self.page)
 
     def test_the_thoughts_have_their_own_dim_block(self):
         """Мысли — не реплика: у них свой бледный блок над ответом."""
@@ -2254,14 +2451,17 @@ class TestRoleMarks(unittest.TestCase):
         первой версии уже мелькнул в ленте (и оплачен) — значит, у него должно
         быть место и в черновике, и в готовом посте.
         """
-        self.assertIn("function postSketchHtml(post)", self.page)
-        self.assertIn("${postSketchHtml(post)}", self.page)
         self.assertIn('post-thinking post-sketch', self.page)
         self.assertIn('🌱 сказано раньше ·', self.page)
-        self.assertIn("escapeHtml(sketch)", self.page, "набросок показываем текстом")
         # В черновике этот блок есть сразу: он заполняется по мере хода
         self.assertIn("const sketch = element.querySelector('.post-sketch');", self.page)
         self.assertIn("sketch.querySelector('.thinking-text').textContent = said;", self.page)
+        # А в готовой реплике набросок — раздел того же блока о ходе, а не
+        # отдельная простыня рядом с репликой (см. TestTurnPanel)
+        start = self.page.index("function turnBodyHtml(")
+        body = self.page[start:self.page.index("function loadTurnBox(", start)]
+        self.assertIn("data.sketch", body, "набросок пропал из готового поста")
+        self.assertIn("SKETCH_HINT", body, "и пояснение к нему тоже должно остаться")
         # У мыслей свой блок, и селектор их не должен хватать набросок вместо них
         self.assertIn("element.querySelector('.post-thinking:not(.post-sketch)')", self.page)
 

@@ -128,6 +128,8 @@ HTML_TEMPLATE = """
         .post-prompt summary { color: #7d92a4; }
         .post-prompt .prompt-body { white-space: normal; }
         .prompt-line { font-size: 13px; line-height: 1.6; margin-bottom: 6px; color: #777777; }
+        /* Шаг хода — запрос к модели или поиск: своя строка, чтобы хронология читалась сверху вниз */
+        .prompt-step { font-size: 13px; line-height: 1.6; margin: 8px 0 0 0; color: #555555; }
         .prompt-hint { font-size: 12px; color: #9a9a9a; }
         .prompt-msg { margin: 12px 0 0 0; }
         .prompt-msg-head { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #999999; }
@@ -141,6 +143,7 @@ HTML_TEMPLATE = """
         body.dark .post-prompt { border-left-color: #35485c; }
         body.dark .post-prompt summary { color: #8399ad; }
         body.dark .prompt-line { color: #8a8a8a; }
+        body.dark .prompt-step { color: #b0b0b0; }
         body.dark .prompt-hint { color: #7a7a7a; }
         body.dark .prompt-msg-head { color: #8c8c8c; }
         body.dark .prompt-role { background: #2a2a2a; color: #b0b0b0; }
@@ -1613,28 +1616,40 @@ HTML_TEMPLATE = """
             return `<div class="post-header"><div><div class="post-author"><span class="role-badge role-${role}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div>`;
         }
 
-        // Мысли модели в готовой реплике: сворачиваемый блок. Свёрнут по умолчанию
-        // — лента про сказанное вслух, а мысли открывают, когда захочется. Число
-        // знаков здесь не для красоты: это те самые оплаченные токены
-        function postThinkingHtml(post) {
-            const thoughts = (post.thinking || '').trim();
-            if (!thoughts) return '';
-            const size = thoughts.length.toLocaleString('ru-RU');
-            return `<details class="post-thinking"><summary>💭 размышления · ${size} знаков</summary>`
-                + `<div class="thinking-text">${escapeHtml(thoughts)}</div></details>`;
+        // Один блок о ходе: как эта реплика получилась — по порядку и с числами.
+        //
+        // Раньше это было разбросано по трём блокам («размышления», «сказано
+        // раньше» и «что уехало в модель»), а сами данные лежали в двух разных
+        // местах. Сложить из этого картину было нельзя: числа в одном блоке,
+        // поиски в другом, а связь между ними — только в голове. Теперь это
+        // одна хронология: откуда ход взялся, что происходило по порядку
+        // (запросы с их входом и выводом, поиски с формулировкой и находками),
+        // и только потом — что модель сказала.
+        const SKETCH_HINT = 'Так бывает, когда модель сначала отвечает, а потом её просят поискать.';
+        const TURN_HINT = 'Весь путь к этой реплике по порядку: что уехало в модель, что она попросила, что ей принесли и сколько токенов за это заплачено. Вход — это то, что ушло в одном запросе, вывод — то, что вернул вендор (включая оплаченные размышления).';
+
+        function thinkingBlockHtml(hint, text) {
+            const body = (text || '').trim();
+            if (!body) return '';
+            return `<div class="prompt-line">${escapeHtml(hint)}</div>`
+                + `<pre class="prompt-text">${escapeHtml(body)}</pre>`;
         }
 
-        // «Сказано раньше»: прежняя версия этой же реплики. Модель отвечает,
-        // потом её просят поискать, и она отвечает заново — а то, что мелькнуло
-        // в ленте первым, раньше просто исчезало. Оно уже оплачено: читать
-        const SKETCH_HINT = 'Так бывает, когда модель сначала отвечает, а потом её просят поискать.';
-        function postSketchHtml(post) {
-            const sketch = (post.sketch || '').trim();
-            if (!sketch) return '';
-            const size = sketch.length.toLocaleString('ru-RU');
-            return `<details class="post-thinking post-sketch"><summary>🌱 сказано раньше · ${size} знаков</summary>`
-                + `<div class="thinking-hint">${SKETCH_HINT}</div>`
-                + `<div class="thinking-text">${escapeHtml(sketch)}</div></details>`;
+        // Один запрос хода одной строкой: здесь и объясняется, что значит
+        // «1 431 + 1 246». Вход — то, что уехало (промпт, история, найденное),
+        // вывод — то, что вернул вендор, вместе с оплаченными размышлениями
+        function turnAskText(step) {
+            if (step.error) return `отказ — ${escapeHtml(step.error)}`;
+            const parts = [];
+            if (step.tokens_in === undefined && step.tokens_out === undefined) {
+                parts.push('числа токенов вендор не сообщил');
+            } else {
+                parts.push(`вход ${tokensText(step.tokens_in)} → вывод ${tokensText(step.tokens_out)} токенов`);
+            }
+            if (step.reasoning_tokens) parts.push(`из них размышлений ${tokensText(step.reasoning_tokens)}`);
+            if (step.finish_reason) parts.push(`конец: ${escapeHtml(step.finish_reason)}`);
+            parts.push(step.tools ? 'с инструментом поиска' : 'без инструмента поиска');
+            return parts.join(' · ');
         }
 
         // «Что уехало в модель»: снимок запроса этого хода. В посте лежит только
@@ -1670,49 +1685,72 @@ HTML_TEMPLATE = """
                 + ` · ${tokensText(r.tokens)} токенов · ${escapeHtml(r.preview || '')}</div>`).join('');
         }
 
-        function promptBodyHtml(data) {
+        function turnBodyHtml(data) {
             const s = data.summary || {};
             const b = data.budget || {};
             const who = data.who || {};
             const parts = [];
             parts.push(`<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> · `
                 + `${escapeHtml(who.model || '')} · Акт ${who.round} · ${escapeHtml(who.time || '')}</div>`);
-            parts.push(`<div class="prompt-line"><b>${WINDOW_WORDS[b.kind] || 'окно модели'} ${tokensText(b.window)}</b>`
+            parts.push(`<div class="prompt-line"><b>Откуда ход:</b> ${WINDOW_WORDS[b.kind] || 'окно модели'} ${tokensText(b.window)}`
                 + ` · запас на ответ ${tokensText(b.reserve)} · служебный запас ${tokensText(b.safety)}`
                 + ` · на историю оставалось ${b.available === null ? 'без предела' : tokensText(b.available)}</div>`);
-            parts.push(`<div class="prompt-line">Всего уехало <b>${tokensText(s.tokens)}</b> токенов `
-                + `в ${s.messages} сообщ.; системный промпт — ${tokensText(b.system_tokens)}</div>`);
-            parts.push(`<div class="prompt-line">История сцены: <b>${tokensText(b.kept_tokens)}</b> токенов `
-                + `в ${b.messages_after} сообщ. (до обрезки — ${tokensText(b.history_tokens)} `
-                + `в ${b.messages_before})</div>`);
+            parts.push(`<div class="prompt-line"><b>История:</b> стало ${s.messages} сообщ. `
+                + `(${tokensText(s.tokens)} токенов) из ${b.messages_before} — `
+                + (s.removed_messages
+                    ? `выброшено ${s.removed_messages} сообщ. (${tokensText(s.removed_tokens)} токенов)`
+                    : 'обрезать не пришлось')
+                + `; системный промпт — ${tokensText(b.system_tokens)} токенов</div>`);
+            const steps = data.steps || [];
+            parts.push('<div class="prompt-line"><b>Ход по порядку:</b></div>');
+            if (!steps.length) {
+                parts.push('<div class="prompt-step">шагов не записано: ход не оставил следов</div>');
+            }
+            steps.forEach(step => {
+                if (step.kind === 'ask') {
+                    parts.push(`<div class="prompt-step"><b>запрос ${step.n}</b> — ${turnAskText(step)}</div>`);
+                } else if (step.kind === 'search') {
+                    parts.push(`<div class="prompt-step"><b>поиск ${step.n}</b> (лимит ${step.limit}): `
+                        + `«${escapeHtml(step.query || '')}» — принесено:</div>`
+                        + `<pre class="prompt-text">${escapeHtml(step.results || '')}</pre>`);
+                } else {
+                    const mark = step.kind === 'refused' ? '⛔' : step.kind === 'silence' ? '⚠️' : '🔍';
+                    parts.push(`<div class="prompt-step">${mark} ${escapeHtml(step.text || '')}</div>`);
+                }
+            });
+            parts.push(thinkingBlockHtml('💭 Размышления модели — оплачены как вывод, в реплику не попали:', data.thinking));
+            parts.push(thinkingBlockHtml('🌱 ' + SKETCH_HINT, data.sketch));
             if (s.removed_messages) {
-                parts.push(`<div class="prompt-line">✂️ выброшено <b>${s.removed_messages}</b> сообщ. `
-                    + `(${tokensText(s.removed_tokens)} токенов) — самые ранние:</div>` + promptRemovedHtml(data.removed));
-            } else {
-                parts.push('<div class="prompt-line">✂️ обрезать не пришлось: история влезла целиком</div>');
+                parts.push('<div class="prompt-line">✂️ что выбросила обрезка — самое раннее:</div>'
+                    + promptRemovedHtml(data.removed));
             }
             if (s.extra_messages) {
                 parts.push(`<div class="prompt-line">🔍 ход дописал в запрос ещё <b>${s.extra_messages}</b> `
-                    + `сообщ. (${tokensText(s.extra_tokens)} токенов): результаты поиска уезжают к модели сверх истории</div>`);
+                    + `сообщ. (${tokensText(s.extra_tokens)} токенов): найденное едет к модели сверх истории — и платится тоже`
+                    + `</div>`);
             }
-            const extra = (data.added || []).length
-                ? '<div class="prompt-line">🔍 а это дописано сверх истории — уже по ходу дела:</div>'
-                  + promptMessagesHtml(data.added)
-                : '';
-            return parts.join('') + promptMessagesHtml(data.messages) + extra;
+            parts.push('<div class="prompt-line"><b>Что уехало в модель целиком</b> — в том порядке, как читала модель:</div>');
+            parts.push(promptMessagesHtml(data.messages));
+            if ((data.added || []).length) {
+                parts.push('<div class="prompt-line">🔍 а это дописано сверх истории — уже по ходу дела:</div>'
+                    + promptMessagesHtml(data.added));
+            }
+            parts.push('<div class="prompt-line"><b>Реплика, которой ход кончился:</b></div>'
+                + `<pre class="prompt-text">${escapeHtml(data.answer || '')}</pre>`);
+            return parts.join('');
         }
 
-        function loadPromptBox(box) {
+        function loadTurnBox(box) {
             if (box.dataset.loaded === '1') return;
             box.dataset.loaded = '1';
             const body = box.querySelector('.prompt-body');
-            body.innerHTML = '<div class="prompt-hint">⏳ читаю снимок…</div>';
-            fetch(`/api/post/${box.dataset.postId}/prompt`, {cache: 'no-store'})
+            body.innerHTML = '<div class="prompt-hint">⏳ читаю ход…</div>';
+            fetch(`/api/post/${box.dataset.postId}/turn`, {cache: 'no-store'})
                 .then(r => r.json().then(data => {
                     if (!r.ok) throw data;
                     return data;
                 }))
-                .then(data => { body.innerHTML = promptBodyHtml(data); })
+                .then(data => { body.innerHTML = turnBodyHtml(data); })
                 .catch(err => {
                     // Неудача — не повод оставить блок пустым: его можно
                     // раскрыть ещё раз и снова спросить сервер
@@ -1721,17 +1759,20 @@ HTML_TEMPLATE = """
                 });
         }
 
-        function postPromptHtml(post) {
-            const info = post.prompt;
+        // Сводка в свёрнутой строке: сколько было запросов к модели, сколько
+        // поисков и сколько токенов уехало — чтобы решить, раскрывать ли
+        function postTurnHtml(post) {
+            const info = post.turn;
             if (!info) return '';
-            const parts = [`${info.messages} сообщ.`, `${tokensText(info.tokens)} токенов`];
-            if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
+            const parts = [`запросов ${info.asks || 0}`];
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
-            const hint = info.stored ? ''
-                : `<div class="prompt-hint">Снимок этого хода уже забыт: держатся последние несколько ходов.</div>`;
+            parts.push(`${tokensText(info.tokens)} токенов на вход`);
+            if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
+            if (info.problems) parts.push(`заминок ${info.problems}`);
             return `<details class="post-thinking post-prompt" data-post-id="${post.id}">`
-                + `<summary>📤 что уехало в модель · ${parts.join(' · ')}</summary>`
-                + hint + `<div class="prompt-body"></div></details>`;
+                + `<summary>🧾 ход реплики · ${parts.join(' · ')}</summary>`
+                + `<div class="prompt-hint">${TURN_HINT}</div>`
+                + `<div class="prompt-body"></div></details>`;
         }
 
         function addPost(post) {
@@ -1745,15 +1786,15 @@ HTML_TEMPLATE = """
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postThinkingHtml(post)}${postSketchHtml(post)}${postPromptHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
-            // Снимок запроса спрашиваем только когда его открыли: событие toggle
+            // Отчёт о ходе спрашиваем только когда его открыли: событие toggle
             // не всплывает, поэтому слушаем именно свой блок, а не ленту
-            const promptBox = postDiv.querySelector('.post-prompt');
-            if (promptBox) {
-                promptBox.addEventListener('toggle', () => {
-                    if (promptBox.open) loadPromptBox(promptBox);
+            const turnBox = postDiv.querySelector('.post-prompt');
+            if (turnBox) {
+                turnBox.addEventListener('toggle', () => {
+                    if (turnBox.open) loadTurnBox(turnBox);
                 });
             }
             // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать

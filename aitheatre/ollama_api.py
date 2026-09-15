@@ -842,13 +842,15 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
                 "type": "function",
                 "function": {
                     "name": "search_web",
-                    "description": "Ищет информацию в интернете",
+                    "description": (f"Ищет информацию в интернете — до "
+                                    f"{max(1, _as_int(settings.SEARCH_MAX_RESULTS))} "
+                                    f"результатов на запрос"),
                     "parameters": {
                         "type": "object",
                         "required": ["query"],
                         "properties": {
                             "query": {"type": "string", "description": "Поисковый запрос"},
-                            "max_results": {"type": "integer", "default": 5}
+                            "max_results": {"type": "integer"}
                         }
                     }
                 }
@@ -866,6 +868,14 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         
         with urllib.request.urlopen(req, timeout=120) as response:
             result = json.loads(response.read().decode('utf-8'))
+            # Ollama считает токены сама (prompt_eval_count / eval_count): без этого
+            # у местных моделей в журнале хода не было бы ни одного числа, а у облачных
+            # они есть — и эта разница выгладела бы необъяснимой
+            cloud.journal_ask(report, {
+                "tokens_in": _as_int(result.get("prompt_eval_count")),
+                "tokens_out": _as_int(result.get("eval_count")),
+                "finish_reason": str(result.get("done_reason") or ""),
+            })
             if "message" in result:
                 msg = result["message"]
                 return msg.get("content", "") or "", msg.get("tool_calls") or []
@@ -879,13 +889,22 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         print(f"  ⚠️  Ошибка запроса к модели: {e}")
         return f"[ОШИБКА: {e}]", []
 
-def search_web(query: str, max_results: int = 5) -> str:
+def search_web(query: str, max_results: int = None) -> str:
+    """Поиск в интернете — столько результатов, сколько разрешено настройкой.
+
+    Модель может попросить в вызове больше, чем стоит в SEARCH_MAX_RESULTS: сверх
+    настроек не ходим. Больше находок — не больше пользы, а больше входных
+    токенов, и за них платит режиссёр (найденные страницы едут к модели сверх
+    истории — см. снимок хода в show.build_turn_report).
+    """
     if not deps.SEARCH_AVAILABLE:
         return "Поиск недоступен"
+
+    limit = max(1, _as_int(settings.SEARCH_MAX_RESULTS))
+    asked = min(_as_int(max_results) or limit, limit)
+    print(f"  🔍 Поиск: '{query}' (до {asked} результатов)")
     
-    print(f"  🔍 Поиск: '{query}'")
-    
-    results, last_error = search.ddgs_search("Поиск", "text", query, max_results)
+    results, last_error = search.ddgs_search("Поиск", "text", query, asked)
     
     if not results:
         if last_error:
@@ -901,6 +920,38 @@ def search_web(query: str, max_results: int = 5) -> str:
         output += f"{i}. {title}\n   {body}\n   {href}\n\n"
     
     return output.strip()
+
+def _as_int(value) -> int:
+    """Число из ответа вендора — или 0, если его там нет: пустое место не 0."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def journal_search(report: dict, index: int, query: str, results: str,
+                   limit: int) -> None:
+    """Дописать в журнал хода строку о поиске — с запросом и всем принесённым.
+
+    В ленте результаты поиска и раньше виднелись за «Источники», а вот самого
+    запроса там не было — как и связи между «нашлось вот это» и «модель сказала
+    вот так». Теперь это одна хронология: строки хода идут по порядку, и у каждой
+    видно и вопрос, и ответ на него (см. show.build_turn_report).
+    """
+    if report is None:
+        return
+    report.setdefault("steps", []).append({
+        "kind": "search", "n": int(index), "query": query,
+        "limit": int(limit), "results": results or "",
+    })
+
+
+def journal_note(report: dict, text: str, kind: str = "note") -> None:
+    """Дописать в журнал хода строку-объяснение: что сделал код и почему."""
+    if report is None or not str(text or "").strip():
+        return
+    report.setdefault("steps", []).append({"kind": kind, "text": str(text)})
+
 
 def silence_reason(report: dict = None, asked_for_search: bool = False) -> str:
     """Почему ход кончился молчанием — словами, для лога и для ленты.
@@ -919,7 +970,7 @@ def silence_reason(report: dict = None, asked_for_search: bool = False) -> str:
     report = report or {}
     finish = str(report.get("finish_reason") or "")
     thoughts = int(report.get("reasoning_tokens") or 0)
-    written = int(report.get("completion_tokens") or 0)
+    written = int(report.get("tokens_out") or 0)
 
     if finish == "length" and thoughts:
         return f"весь предел вывода ушёл в размышления ({thoughts} токенов)"
@@ -934,8 +985,23 @@ def silence_reason(report: dict = None, asked_for_search: bool = False) -> str:
     return "шлюз не прислал текста"
 
 
+def search_limits() -> tuple:
+    """Числа поиска из настроек: (минимум, максимум, результатов на запрос, попытки).
+
+    Живут в одном месте и читаются здесь: остальной код о поиске ничего не решает,
+    а берёт готовое. Максимум — всегда хотя бы один: поиск, который разрешён
+    «ноль раз», — это выключенный поиск, а для этого есть ENABLE_SEARCH (см.
+    settings.SEARCH_MAX_RESULTS).
+    """
+    return (max(0, _as_int(settings.MIN_SEARCHES)),
+            max(1, _as_int(settings.MAX_SEARCHES)),
+            max(1, _as_int(settings.SEARCH_MAX_RESULTS)),
+            max(0, _as_int(settings.MAX_SEARCH_ATTEMPTS)))
+
+
 def ask_model(model: str, messages: list, participant_name: str, options: dict = None,
-              think=None, show_session=None, on_delta=None, on_thought=None) -> tuple:
+              think=None, show_session=None, on_delta=None, on_thought=None,
+              report: dict = None) -> tuple:
     """
     Один ход модели: запрос к Ollama плюс поиск в интернете, если модель умеет
     вызывать инструменты.
@@ -949,16 +1015,26 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
     только когда включён CLOUD_STREAM): лента показывает реплику, пока она
     пишется, и размышления модели — пока они думаются. На готовый ответ это
     не влияет — возвращается всё равно целый текст.
+
+    report — журнал хода: сюда ляжет всё, что происходило по порядку (запросы
+    с их входом и выводом, поиски с формулировкой и найденным, отказы). Свой
+    словарь приходит от вызывающего (см. show.handle_ai_turn): по нему потом
+    собирается отчёт и у реплики в ленте, и в ДАМПе спектакля.
     """
     search_queries = []
     search_count = 0
-    max_searches = 3
+    # Сколько поисков требуем, сколько разрешаем и сколько результатов приносим —
+    # из настроек, а не из чисел в коде: это те ручки, которые режиссёр крутит
+    # сам (см. settings, группа «ПОИСК В ИНТЕРНЕТЕ»)
+    min_searches, max_searches, max_results_setting, max_forced_attempts = search_limits()
     max_iterations = 8
     force_tool_use = False  # Флаг для принудительного использования инструмента через tool_choice
     forced_attempts = 0     # Счётчик попыток принудительного поиска
-    max_forced_attempts = 2 # Максимум попыток принудительного поиска
     content = ""
-    report = {}             # чем кончились запросы: finish_reason, токены вывод
+    # Журнал хода — тот же, в который пишет и облачный путь (см. cloud.journal_ask):
+    # у хода должен быть один рассказ, а не два, иначе «откуда это число» опять
+    # придётся собирать по кускам
+    report = report if report is not None else {}
     refused_search = False  # модель просила ещё поиск, а мы уже отказали
     
     # Вычисляем нормализованное имя один раз
@@ -976,7 +1052,7 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         # а в ленте она мелькала и исчезала; см. SEARCH_BEFORE_REPLY)
         require_search = force_tool_use or (
             iteration == 0 and settings.SEARCH_BEFORE_REPLY
-            and search_count < settings.MIN_SEARCHES and takes_tools_now(model))
+            and search_count < min_searches and takes_tools_now(model))
         current_tool_choice = "any" if require_search else None
         
         content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice,
@@ -1010,9 +1086,12 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             # поиск — значит гонять её впустую (в логе это выглядело так: шлюз
             # сказал «не принимаю инструмент», а приложение тут же попросило поиск,
             # и «думающая» модель ушла в новый оборванный ход ожидания)
-            if (search_count < settings.MIN_SEARCHES and forced_attempts < max_forced_attempts
+            if (search_count < min_searches and forced_attempts < max_forced_attempts
                     and takes_tools_now(model)):
                 print(f"  🔍 Принудительный поиск (попытка {forced_attempts + 1}/{max_forced_attempts})...")
+                journal_note(report, f"модель ответила без поиска — прошу поиск "
+                                     f"(попытка {forced_attempts + 1} из {max_forced_attempts})",
+                             kind="force")
                 messages.append({"role": "assistant", "content": content, "name": participant_name_normalized})
                 messages.append({
                     "role": "user",
@@ -1062,9 +1141,9 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             if func_name == "search_web" and search_count < max_searches:
                 query = str(func_args.get("query", "") or "")
                 try:
-                    max_results = int(func_args.get("max_results", 5))
+                    max_results = int(func_args.get("max_results", max_results_setting))
                 except (TypeError, ValueError):
-                    max_results = 5
+                    max_results = max_results_setting
                 
                 if show_session is not None:
                     # Сайдбар показывает «Ищет: ...» именно из этих полей
@@ -1074,6 +1153,10 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                 search_count += 1
                 
                 result = search_web(query, max_results)
+                # В журнал — вместе с формулировкой запроса: в ленте «Источники»
+                # показывают её отдельно, а в ДАМПе нужно, чтобы вопрос и то, что
+                # по нему нашлось, лежали рядом
+                journal_search(report, search_count, query, result, max_searches)
                 
                 if tc.get("textual"):
                     # Найденное — обычным сообщением: с этой моделью мы говорим
@@ -1101,8 +1184,13 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                     # которая «думает» и ничего не говорит, — а на самом деле она
                     # в четвёртый раз просит поиск, и ей тихо отказали
                     refused_search = True
-                    print(f"  🔍 {participant_name}: просит ещё поиск, но лимит "
-                          f"({max_searches}) исчерпан — досказать придётся словами")
+                    asked = str(func_args.get("query", "") or "")
+                    print(f"  🔍 {participant_name}: просит ещё поиск "
+                          f"(«{asked}»), но лимит ({max_searches}) исчерпан — "
+                          f"досказать придётся словами")
+                    journal_note(report, f"просит ещё поиск «{asked}», но лимит "
+                                         f"{max_searches} исчерпан — досказать придётся словами",
+                                 kind="refused")
                 messages.append({
                     "role": "tool",
                     "tool_name": func_name,
@@ -1122,6 +1210,8 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         # (см. silence_reason)
         print(f"  ⚠️  {participant_name}: пустой ответ — {reason}. "
               f"Прошу финальный ответ ещё раз, теперь без поиска")
+        journal_note(report, f"пустой ответ: {reason} — прошу финальный ответ без поиска",
+                     kind="silence")
         messages.append({
             "role": "user",
             # Модель, застрявшая на просьбах поискать, должна узнать, что искать
@@ -1146,11 +1236,14 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             # нельзя, а выполнять уже нечего — ход кончается (см. tooltext)
             content = tooltext.take_calls(content)[0]
             if content and content.strip():
+                journal_note(report, "финальная попытка удалась: поиск не понадобился",
+                             kind="silence")
                 return content, search_count, search_queries
         except Exception as e:
             print(f"  ⚠️  Ошибка финального запроса: {e}")
+            journal_note(report, f"финальный запрос не прошёл: {e}", kind="silence")
     
-    # Молчание без объяснения — потерянная улика: в ленте и в стенограмме должно
+    # Молчание без объяснения — потерянная улика: в ленте и в ДАМПе должно
     # остаться, ПОЧЕМУ модель не сказала ни слова
     return content or f"[Модель не дала ответ] — {reason}", search_count, search_queries
 
