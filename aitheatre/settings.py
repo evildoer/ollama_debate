@@ -263,16 +263,87 @@ CONTEXT_SAFETY_MARGIN = 500  # токенов
 THINK_MODES = ("auto", "off", "on")
 LOADED_MODELS_CACHE_TTL = 1.5  # секунд
 GPU_MEMORY_CACHE_TTL = 10  # секунд
-VRAM_MEASUREMENTS_FILE = PROJECT_ROOT / ".vram_cache.json"
+# ── ВРЕМЕННЫЕ ФАЙЛЫ ЭКЗЕМПЛЯРА ──────────────────────────────────────────────
+#
+# Порт, на котором играет этот театр. Его можно задать при запуске —
+# `py . 5001` или `py . --port 5001` (см. web.port_from_argv). Порт нужен
+# не только серверу: по нему различаются экземпляры, а значит и их файлы.
+PORT = 5000
+
+# Папка временных файлов: не россыпью в корне проекта, а одной подпапкой,
+# и внутри — своя папка на каждый порт (.theatre/port-5000/). Раньше эти файлы
+# лежали прямо в корне, и два запущенных экземпляра (режиссёрский на 5000
+# и проверочный на 5077) читали и писали один и тот же файл: один затирал
+# другому сцену и стенограмму, а понять это было трудно
+INSTANCE_ROOT = PROJECT_ROOT / ".theatre"
+
+
+def instance_dir(port: int = None) -> Path:
+    """Папка временных файлов экземпляра — по порту, на котором он играет."""
+    return INSTANCE_ROOT / f"port-{int(PORT if port is None else port)}"
+
+
+# Измеренные размеры моделей (нужны, чтобы обещать про VRAM не наугад)
+VRAM_MEASUREMENTS_FILE = instance_dir() / "vram.json"
 
 # Настройки, которые не должны теряться при перезапуске. Имена персонажей каждый
 # спектакль новые, поэтому здесь только то, что привязано к роли: правила судьи.
-SETTINGS_FILE = PROJECT_ROOT / ".theatre_settings.json"
+SETTINGS_FILE = instance_dir() / "settings.json"
 
 # Стенограмма размышлений: что модель говорила сама с собой, пока думала. В ленте
 # они живут только пока идёт ход, а здесь остаются и после занавеса — обычный
-# markdown, чтобы можно было прочитать глазами (файл в .gitignore)
-THINKING_FILE = PROJECT_ROOT / ".theatre_thinking.md"
+# markdown, чтобы можно было прочитать глазами (папка в .gitignore)
+THINKING_FILE = instance_dir() / "thinking.md"
+
+
+def use_instance(port: int) -> Path:
+    """Переключить этот процесс на экземпляр с портом port.
+
+    Имена у файлов остаются те же — их читают и другие модули, и тесты;
+    меняется только папка, в которой они лежат. Вызывается при запуске
+    сервера (см. web.main), до того, как хоть один файл прочитан.
+    """
+    global PORT, VRAM_MEASUREMENTS_FILE, SETTINGS_FILE, THINKING_FILE
+    PORT = int(port)
+    folder = instance_dir(PORT)
+    VRAM_MEASUREMENTS_FILE = folder / "vram.json"
+    SETTINGS_FILE = folder / "settings.json"
+    THINKING_FILE = folder / "thinking.md"
+    return folder
+
+
+# Имена файлов прежних запусков: они лежали в корне проекта, пока файлы
+# экземпляра не переехали в папку. Нужны для переноса — иначе правила судьи
+# и стенограмма выглядели бы потерянными
+LEGACY_FILES = ((".theatre_settings.json", "settings.json"),
+                (".theatre_thinking.md", "thinking.md"),
+                (".vram_cache.json", "vram.json"))
+
+
+def prepare_instance(port: int) -> tuple:
+    """Завести папку экземпляра и сберечь в ней файлы прежних запусков.
+
+    Копированием, а не перемещением: если режиссёр вернётся на старый запуск
+    или на другой порт, там всё останется на месте. Возвращает (папка, список
+    перенесённого) — чтобы запуск сказал об этом вслух, а не молчал.
+    """
+    folder = use_instance(port)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        print(f"  ⚠️  Не создаётся папка {folder.name}: {e}")
+        return folder, []
+    moved = []
+    for old_name, new_name in LEGACY_FILES:
+        old, new = PROJECT_ROOT / old_name, folder / new_name
+        if not old.is_file() or new.exists():
+            continue
+        try:
+            new.write_bytes(old.read_bytes())
+            moved.append(old_name)
+        except OSError as e:
+            print(f"  ⚠️  Не переносится {old_name}: {e}")
+    return folder, moved
 
 # Дефолтные правила общения с плейсхолдерами
 # Плейсхолдеры: {ИМЯ}, {СОБЕСЕДНИКИ}, {ТЕМА}

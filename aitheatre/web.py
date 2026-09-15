@@ -7,6 +7,7 @@
 
 import logging
 import os
+import sys
 import threading
 import time
 import webbrowser
@@ -543,7 +544,35 @@ def shutdown():
 # MAIN
 # ============================================================
 
+def port_from_argv(argv: list) -> int:
+    """Порт из командной строки: `py . 5001` или `py . --port 5001`.
+
+    Без аргумента берётся settings.PORT (5000), поэтому привычный запуск `py .`
+    открывает браузер на том же адресе, что и раньше. Второй экземпляр так
+    получает свой порт, а вместе с ним — и свои временные файлы (см.
+    settings.prepare_instance): два театра на одной машине не мешают друг другу.
+    """
+    args = [str(arg).strip() for arg in (argv or [])]
+    for index, text in enumerate(args):
+        if text.startswith("--port="):
+            text = text[len("--port="):]
+        elif text in ("--port", "-p"):
+            text = args[index + 1] if index + 1 < len(args) else ""
+        if text.isdigit() and 0 < int(text) < 65536:
+            return int(text)
+    return int(settings.PORT)
+
+
 def main():
+    port = port_from_argv(sys.argv[1:])
+    # Папка экземпляра заводится до первого чтения настроек: сцена, правила
+    # судьи и стенограмма читаются уже из неё, а не из корня проекта
+    instance_dir, moved = settings.prepare_instance(port)
+    # И только теперь читаем сцену и правила судьи прошлых запусков: раньше
+    # этого места неизвестно, где они лежат, и чтение смотрело бы в корень
+    # проекта, хотя файлы экземпляра лежат в его папке
+    show.load_theatre_settings()
+
     print("=" * 50)
     print("🎭 AI Театр - Спектакль нейросетей")
     print("=" * 50)
@@ -566,14 +595,17 @@ def main():
     print(f"Грим и костюмы: {'ВКЛ' if settings.ENABLE_AVATAR_GENERATION else 'ВЫКЛ'}")
     print("=" * 50)
     print()
+    print(f"Файлы спектакля: {instance_dir}")
+    if moved:
+        print(f"  📦 Из корня проекта переехало: {', '.join(moved)}")
     print("🌐 Открываю браузер...")
-    print("📍 Адрес: http://localhost:5000")
+    print(f"📍 Адрес: http://localhost:{port}")
     print()
     print("Нажмите Ctrl+C для остановки сервера")
     print("=" * 50)
     
-    threading.Timer(1.5, lambda: webbrowser.open('http://localhost:5000')).start()
+    threading.Timer(1.5, lambda: webbrowser.open(f'http://localhost:{port}')).start()
     # allow_unsafe_werkzeug: без него flask-socketio падает с RuntimeError
     # "The Werkzeug web server is not designed to run in production", если stdin
     # не подключён к терминалу (перенаправленный вывод, запуск из IDE/службы).
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)

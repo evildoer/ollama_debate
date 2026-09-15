@@ -598,6 +598,117 @@ class TestCastEditor(unittest.TestCase):
 
 # ---------------------------------------------------------------- живая реплика
 
+class TestInstanceFiles(unittest.TestCase):
+    """Экземпляр спектакля: свой порт — своя папка с временными файлами.
+
+    Раньше эти файлы лежали россыпью в корне проекта, и два запущенных театра
+    (режиссёрский на 5000 и проверочный на другом порту) читали и писали один
+    и тот же файл: один затирал другому сцену и стенограмму, а выглядело это
+    как «настройки сами сбросились».
+    """
+
+    def setUp(self):
+        # Имена файлов и порт — общие на весь процесс: после проверки возвращаем
+        for name in ("PORT", "SETTINGS_FILE", "THINKING_FILE", "VRAM_MEASUREMENTS_FILE"):
+            self.addCleanup(setattr, settings, name, getattr(settings, name))
+
+    def test_the_port_comes_from_the_command_line(self):
+        self.assertEqual(web_app.port_from_argv(["5001"]), 5001)
+        self.assertEqual(web_app.port_from_argv(["--port", "5002"]), 5002)
+        self.assertEqual(web_app.port_from_argv(["--port=5003"]), 5003)
+        self.assertEqual(web_app.port_from_argv(["-p", "5004"]), 5004)
+        # Без аргумента — прежний адрес: привычный `py .` ведёт туда же, куда вёл
+        self.assertEqual(web_app.port_from_argv([]), settings.PORT)
+        self.assertEqual(web_app.port_from_argv(["tests", "test_theatre.py"]),
+                         settings.PORT, "в обычных запусках цифр нет — порт остаётся прежним")
+        self.assertEqual(web_app.port_from_argv(["99999"]), settings.PORT,
+                         "такого порта не бывает — брать его молча нельзя")
+
+    def test_each_port_gets_its_own_folder(self):
+        settings.use_instance(5000)
+        one = (settings.SETTINGS_FILE, settings.THINKING_FILE, settings.VRAM_MEASUREMENTS_FILE)
+        settings.use_instance(5077)
+        two = (settings.SETTINGS_FILE, settings.THINKING_FILE, settings.VRAM_MEASUREMENTS_FILE)
+
+        for before, after in zip(one, two):
+            self.assertNotEqual(before, after, "у двух экземпляров не может быть одного файла")
+        self.assertEqual(one[0].parent.name, "port-5000")
+        self.assertEqual(two[0].parent.name, "port-5077")
+        self.assertEqual(two[0].parent.parent, settings.INSTANCE_ROOT,
+                         "все папки экземпляров живут под одним корнем, а не в корне проекта")
+        self.assertEqual(settings.INSTANCE_ROOT, settings.PROJECT_ROOT / ".theatre",
+                         "временные файлы живут в подпапке, а не россыпью в корне проекта")
+        self.assertNotEqual(one[0].parent, settings.PROJECT_ROOT)
+
+    def test_the_old_files_move_into_the_instance_folder(self):
+        """Файлы прежних запусков переносятся в папку экземпляра.
+
+        Иначе после этого нововведения правила судьи и стенограмма выглядели бы
+        потерянными — а они никуда не делись, просто лежат теперь рядом.
+        """
+        root = Path(tempfile.mkdtemp())
+        (root / ".theatre_settings.json").write_text(
+            json.dumps({"judge_rules": ["правило"]}), encoding="utf-8")
+        (root / ".theatre_thinking.md").write_text("мысли прежнего спектакля",
+                                                    encoding="utf-8")
+
+        with mock.patch.object(settings, "PROJECT_ROOT", root), \
+                mock.patch.object(settings, "INSTANCE_ROOT", root / ".theatre"):
+            folder, moved = settings.prepare_instance(5001)
+            saved = json.loads((folder / "settings.json").read_text(encoding="utf-8"))
+            transcript = (folder / "thinking.md").read_text(encoding="utf-8")
+
+        self.assertIn(".theatre_settings.json", moved)
+        self.assertIn(".theatre_thinking.md", moved)
+        self.assertEqual(saved["judge_rules"], ["правило"])
+        self.assertEqual(transcript, "мысли прежнего спектакля")
+        self.assertEqual(settings.SETTINGS_FILE, folder / "settings.json",
+                         "сцена читается из папки экземпляра, а не из корня")
+        self.assertTrue((root / ".theatre_settings.json").exists(),
+                        "переносим копированием: старый файл остаётся на месте")
+
+    def test_a_run_does_not_overwrite_what_the_instance_already_has(self):
+        """Своё важнее старого: уже перенесённое второй раз не переписывается."""
+        root = Path(tempfile.mkdtemp())
+        (root / ".theatre_settings.json").write_text(
+            json.dumps({"judge_rules": ["старое"]}), encoding="utf-8")
+
+        with mock.patch.object(settings, "PROJECT_ROOT", root), \
+                mock.patch.object(settings, "INSTANCE_ROOT", root / ".theatre"):
+            folder, _ = settings.prepare_instance(5000)
+            (folder / "settings.json").write_text(
+                json.dumps({"judge_rules": ["своё"]}), encoding="utf-8")
+            settings.prepare_instance(5000)
+            kept = json.loads((folder / "settings.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(kept["judge_rules"], ["своё"])
+
+    def test_the_scene_is_read_after_the_instance_folder_is_ready(self):
+        """Сцена и правила судьи читаются уже из папки экземпляра.
+
+        Раньше они читались при импорте, то есть до того, как станет известно,
+        на каком порту играет этот театр. С переносом файлов в папку это обернулось
+        бы потерей настройки: файл лежит в новом месте, а чтение смотрит в корень.
+        """
+        show_source = Path(show.__file__).read_text(encoding="utf-8")
+        self.assertIsNone(re.search(r"^load_theatre_settings\(\)", show_source, re.M),
+                          "чтение при импорте вернулось — оно смотрит не туда")
+        web_source = Path(web_app.__file__).read_text(encoding="utf-8")
+        self.assertLess(web_source.index("settings.prepare_instance(port)"),
+                        web_source.index("show.load_theatre_settings()"),
+                        "папка экземпляра должна заводиться раньше чтения сцены")
+
+    def test_the_server_plays_on_the_port_it_was_given(self):
+        """Порт из аргумента доходит и до сервера, и до браузера, и до файлов."""
+        source = Path(web_app.__file__).read_text(encoding="utf-8")
+        self.assertIn("port = port_from_argv(sys.argv[1:])", source)
+        self.assertIn("settings.prepare_instance(port)", source,
+                      "папка экземпляра должна заводиться до чтения настроек")
+        self.assertIn("socketio.run(app, host='0.0.0.0', port=port", source)
+        self.assertIn("webbrowser.open(f'http://localhost:{port}')", source,
+                      "браузер должен открывать тот же порт, что и сервер")
+
+
 class TestStreamingReply(unittest.TestCase):
     """Черновик реплики: то, что модель говорит прямо сейчас.
 

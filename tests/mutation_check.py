@@ -196,6 +196,26 @@ BUGS = {
          "    for field in dropped_params(model):\n        payload.pop(field, None)",
          "    for field in ():\n        payload.pop(field, None)"),
     ],
+    "порт из командной строки снова не читается": [
+        ("aitheatre/web.py",
+         "    port = port_from_argv(sys.argv[1:])",
+         "    port = int(settings.PORT)"),
+    ],
+    "у экземпляров снова одна общая папка": [
+        ("aitheatre/settings.py",
+         "    return INSTANCE_ROOT / f\"port-{int(PORT if port is None else port)}\"",
+         "    return INSTANCE_ROOT"),
+    ],
+    "временные файлы снова лежат в корне проекта": [
+        ("aitheatre/settings.py",
+         'INSTANCE_ROOT = PROJECT_ROOT / ".theatre"',
+         "INSTANCE_ROOT = PROJECT_ROOT"),
+    ],
+    "сцена снова читается до выбора папки экземпляра": [
+        ("aitheatre/show.py",
+         "# Глобальный экземпляр сессии\nsession = DebateSession()",
+         "load_theatre_settings()\n\n# Глобальный экземпляр сессии\nsession = DebateSession()"),
+    ],
     "поиск снова требуют после ответа, а не до него": [
         ("aitheatre/ollama_api.py",
          "        require_search = force_tool_use or (\n"
