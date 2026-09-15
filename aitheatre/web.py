@@ -52,6 +52,92 @@ def publish_draft(draft: dict):
     """
     socketio.emit('stream_post', draft)
 
+
+# Как часто сервер сам говорит браузеру, что происходит. Сокет — основной
+# канал: опрос раз в три секунды заменён этим, и он свежее (видно «Ищет: …»
+# почти сразу). Страница продолжает спрашивать статус сама, но редко — это
+# подстраховка на случай, когда сокет отвалился, а не рабочий ход
+STATUS_PUSH_INTERVAL = 1.0
+
+
+def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
+    """Состояние спектакля — одно и то же для опроса и для сокета.
+
+    Раньше этот словарь собирался в двух местах (в маршруте и в событиях),
+    и они уже успели разойтись: поле, добавленное в одно, не появлялось
+    в другом. Теперь источник один.
+
+    with_posts=False — для рассылки по сокету: реплики там ходят событиями
+    new_post, и повторять их в состоянии раз в секунду незачем.
+    """
+    # Что сейчас лежит в памяти - для сайдбара (данные кэшируются на 1.5 с)
+    loaded_models, loaded_models_error = ollama_api.fetch_loaded_models()
+    payload = {
+        "running": show.session.running,
+        "finished": show.session.finished,
+        "session_id": show.session.session_id,
+        "topic": show.session.topic,
+        "new_posts": show.session.posts[max(0, last_post_count):] if with_posts else [],
+        "total_posts": len(show.session.posts),
+        # Пришли ли вместе с состоянием сами реплики. Нужно странице: в рассылке
+        # по сокету их нет, и по счётчику она не должна решить, что уже всё
+        # видела — иначе пост, пришедший событием, был бы потерян
+        "posts_included": with_posts,
+        "current_round": show.session.current_round,
+        "current_participant": show.session.current_participant,
+        "current_action": show.session.current_action,
+        "search_query": show.session.search_query,
+        "waiting_for_human": show.session.waiting_for_human,
+        "current_participant_is_moderator": show.session.current_participant_is_moderator(),
+        # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
+        "current_participant_role": show.session.current_participant_role(),
+        "loaded_models": loaded_models if not loaded_models_error else [],
+        "loaded_models_error": loaded_models_error or "",
+        "gpu_memory": ollama_api.fetch_gpu_memory(),
+    }
+    # Для внешних клиентов (и для события подключения) — те же поля, но реплики целиком
+    if with_posts:
+        payload["posts"] = show.session.posts
+    return payload
+
+
+def publish_status():
+    """Состояние спектакля в браузер — по сокету, без реплик (они ходят событиями)."""
+    socketio.emit('status_update', status_payload(with_posts=False))
+
+
+# Идёт ли уже рассылка состояния: её просят и старт спектакля, и подключение
+# страницы, а ткач должен быть один
+_status_pusher = {"alive": False}
+
+
+def start_status_pusher():
+    """Гонит состояние в браузер, пока идёт спектакль.
+
+    Живёт ровно столько, сколько длится спектакль: без запущенного спектакля
+    говорить нечего, а лишний поток будил бы процессор впустую. Второй ткач
+    не заводится (их может позвать и старт, и новое подключение).
+    """
+    if _status_pusher["alive"]:
+        return
+    _status_pusher["alive"] = True
+
+    def pump():
+        try:
+            while show.session.running:
+                time.sleep(STATUS_PUSH_INTERVAL)
+                publish_status()
+            # Последнее состояние после занавеса: панель должна узнать, что всё,
+            # не дожидаясь редкой подстраховки
+            publish_status()
+        except Exception as e:      # поток не должен рушить сервер молча
+            print(f"  ⚠️  Рассылка состояния остановлена: {e}")
+        finally:
+            _status_pusher["alive"] = False
+
+    threading.Thread(target=pump, daemon=True).start()
+
+
 # Отключаем логирование GET запросов к /api/status чтобы не засорять консоль
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.WARNING)
@@ -297,6 +383,8 @@ def start():
                               kwargs={"on_post": publish_post, "on_draft": publish_draft})
     thread.daemon = True
     thread.start()
+    # Спектакль пошёл — состояние начинает идти в браузер само, раз в секунду
+    start_status_pusher()
     # Тему возвращаем: интерфейс показывает в шапке именно то, с чем играем
     return jsonify({"success": True, "session_id": show.session.session_id, "topic": show.session.topic})
 
@@ -310,28 +398,7 @@ def reset():
 @app.route('/api/status')
 def status():
     last_post_count = max(0, request.args.get("lastPostCount", 0, type=int))
-    # Что сейчас лежит в памяти - для сайдбара (данные кэшируются на 1.5 с)
-    loaded_models, loaded_models_error = ollama_api.fetch_loaded_models()
-    
-    response = jsonify({
-        "running": show.session.running,
-        "finished": show.session.finished,
-        "session_id": show.session.session_id,
-        "topic": show.session.topic,
-        "new_posts": show.session.posts[last_post_count:],
-        "total_posts": len(show.session.posts),
-        "current_round": show.session.current_round,
-        "current_participant": show.session.current_participant,
-        "current_action": show.session.current_action,
-        "search_query": show.session.search_query,
-        "waiting_for_human": show.session.waiting_for_human,
-        "current_participant_is_moderator": show.session.current_participant_is_moderator(),
-        # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
-        "current_participant_role": show.session.current_participant_role(),
-        "loaded_models": loaded_models if not loaded_models_error else [],
-        "loaded_models_error": loaded_models_error or "",
-        "gpu_memory": ollama_api.fetch_gpu_memory(),
-    })
+    response = jsonify(status_payload(last_post_count))
     # Без этого браузер отдаёт статус из своего кэша, и панель с памятью GPU
     # «зависает» с устаревшими цифрами, пока не изменится счётчик постов
     response.headers["Cache-Control"] = "no-store"
@@ -341,26 +408,17 @@ def status():
 # WEBSOCKET СОБЫТИЯ
 # ============================================================
 
-# WebSocket-слой оставлен для внешних клиентов: сама страница обновляется
-# через polling (/api/status?lastPostCount=...), а не через эти события.
+# Socket.IO — основной канал: лента приходит событием new_post, состояние —
+# status_update, а опрос (/api/status) остался редкой подстраховкой.
 @socketio.on('connect')
 def handle_connect():
     print("🔌 Клиент подключился через WebSocket")
-    emit('state_update', {
-        "running": show.session.running,
-        "finished": show.session.finished,
-        "topic": show.session.topic,
-        "posts": show.session.posts,
-        "total_posts": len(show.session.posts),
-        "current_round": show.session.current_round,
-        "current_participant": show.session.current_participant,
-        "current_action": show.session.current_action,
-        "search_query": show.session.search_query,
-        "waiting_for_human": show.session.waiting_for_human,
-        "current_participant_is_moderator": show.session.current_participant_is_moderator(),
-        # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
-        "current_participant_role": show.session.current_participant_role(),
-    })
+    emit('state_update', status_payload(0))
+    # Подключились к идущему спектаклю — состояние нужно сразу, а дальше его
+    # будут приносить рассылки (иначе страница ждала бы своей подстраховки)
+    emit('status_update', status_payload(with_posts=False))
+    if show.session.running:
+        start_status_pusher()
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -368,18 +426,7 @@ def handle_disconnect():
 
 @socketio.on('request_status')
 def handle_request_status():
-    emit('status_update', {
-        "running": show.session.running,
-        "finished": show.session.finished,
-        "current_round": show.session.current_round,
-        "current_participant": show.session.current_participant,
-        "current_action": show.session.current_action,
-        "search_query": show.session.search_query,
-        "waiting_for_human": show.session.waiting_for_human,
-        "current_participant_is_moderator": show.session.current_participant_is_moderator(),
-        # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
-        "current_participant_role": show.session.current_participant_role(),
-    })
+    emit('status_update', status_payload(with_posts=False))
 
 @app.route('/api/moderator/message', methods=['POST'])
 def moderator_message():

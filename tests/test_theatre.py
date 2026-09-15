@@ -2432,7 +2432,7 @@ class TestStatusPolling(unittest.TestCase):
         self.assertIn("if (statusFailures < STATUS_FAILURES_BEFORE_CLOSED) return;", self.catch)
         # Порог обязан стоять до остановки опроса — иначе он бесполезен
         self.assertLess(self.catch.index("statusFailures < STATUS_FAILURES_BEFORE_CLOSED"),
-                        self.catch.index("clearInterval(pollInterval)"),
+                        self.catch.index("stopPolling()"),
                         "опрос останавливается раньше, чем мы убедились, что сервера нет")
 
     def test_a_successful_poll_resets_the_failures(self):
@@ -2704,6 +2704,162 @@ class TestProblemMessages(unittest.TestCase):
     def test_no_problem_means_no_message(self):
         self.assertEqual(ollama_api.models_problem_message(
             {"ok": True, "missing": [], "error": None}), "")
+
+
+# ---------------------------------------------------------------- канал и пульт
+
+class TestLiveChannelAndPanel(unittest.TestCase):
+    """Лента, состояние и пульт во время спектакля.
+
+    Сокет — основной канал: реплика приходит готовым постом, состояние сервер
+    шлёт сам, а трёхсекундный опрос остался редкой подстраховкой. И пульт на ходу
+    свёрнут до заголовков: режиссёр смотрит спектакль, а раздел открывается
+    только тогда, когда в нём есть дело — предупреждение готовности или ваш ход.
+    """
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+
+    def test_the_status_comes_by_itself_and_the_poll_is_a_fallback(self):
+        """Состояние приносит сокет, а опрос — редкая сверка на случай обрыва."""
+        self.assertIn("const POLL_FALLBACK_MS = 20000;", self.page)
+        self.assertIn("socket && socket.connected ? POLL_FALLBACK_MS : POLL_MS", self.page)
+        self.assertIn("socket.on('status_update'", self.page)
+        # Опрос и сокет рисуют одно и то же место страницы, а не каждый своё
+        self.assertIn("function applyStatus(data)", self.page)
+        self.assertIn(".then(data => applyStatus(data))", self.page)
+        # Пустое состояние до спектакля не должно «оживить» пустой театр
+        self.assertIn("if (!data.running && !data.finished && !data.total_posts) return;",
+                      self.page)
+        # Счётчик показанных реплик двигается только вместе с репликами: в рассылке
+        # по сокету их нет, и иначе счётчик перескочил бы мимо ещё не показанного
+        # поста — реплика из события просто пропала бы
+        self.assertIn("if (data.posts_included && typeof data.total_posts === 'number') {",
+                      self.page)
+
+    def test_the_reply_comes_as_a_post_and_is_not_asked_for_again(self):
+        """Реплика по сокету — готовый пост: перепрашивать её незачем."""
+        self.assertIn("socket.on('new_post', post => {", self.page)
+        self.assertIn("addNewPosts([post])", self.page)
+        self.assertNotIn("'state_update'", self.page,
+                         "сокет больше не дёргает опрос за каждой репликой")
+        # Совпали сокет и опрос — реплика всё равно одна
+        self.assertIn("if (post.id && post.id <= lastPostCount) return;", self.page)
+
+    def test_the_whole_pult_is_collapsed_when_the_show_starts(self):
+        """Спектакль пошёл — пульт свёрнут до заголовков: смотрят спектакль."""
+        self.assertIn("setAllSectionsCollapsed(phase !== 'setup');", self.page)
+        self.assertIn('id="sectionsToggle"', self.page)
+        self.assertIn('onclick="toggleAllSections()"', self.page)
+        self.assertIn("function everySectionCollapsed()", self.page)
+        # Кнопка есть только на ходу: в настройке сворачивать нечего
+        self.assertIn("btn.style.display = sectionsPhase === 'setup' ? 'none' : 'inline-block';",
+                      self.page)
+
+    def test_the_reply_panel_opens_on_your_turn_only(self):
+        """«Ваша реплика» в спектакле раскрыта ровно на вашем ходу."""
+        self.assertIn("setSectionCollapsed('turnSection', state !== 'your');", self.page)
+        self.assertIn("if (!debateRunning || showFinished) return;", self.page)
+        # Фаза сменилась — ход пересчитываем заново, иначе раздел не раскроется
+        self.assertIn("turnSectionState = null;", self.page)
+
+
+# ---------------------------------------------------------------- канал состояния
+
+class TestStatusChannel(unittest.TestCase):
+    """Состояние спектакля: один источник на опрос и на сокет.
+
+    Раньше словарь состояния собирался в двух местах — в маршруте и в событиях —
+    и они уже расходились: поле, добавленное в одно, не появлялось в другом.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        for name, value in (
+            ("fetch_loaded_models", mock.Mock(return_value=([], None))),
+            ("fetch_gpu_memory", mock.Mock(return_value={})),
+        ):
+            patcher = mock.patch.object(ollama_api, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.client = web_app.app.test_client()
+        # Ткач состояния — процессный: без сброса флага следующая проверка решила
+        # бы, что рассылка уже идёт, и не завела бы свою
+        self.addCleanup(web_app._status_pusher.update, alive=False)
+
+    @staticmethod
+    def _wait_for(condition, seconds: float = 3.0) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not condition():
+            time.sleep(0.005)
+        return condition()
+
+    def test_the_poll_and_the_socket_tell_the_same_state(self):
+        """Один источник на два канала: иначе поле, добавленное в один, теряется."""
+        self.session.topic = "Тема"
+        self.session.running = True
+        self.session.current_round = 2
+        asked = self.client.get("/api/status?lastPostCount=0").get_json()
+
+        sent = []
+        with mock.patch.object(web_app.socketio, "emit",
+                               lambda evt, data=None: sent.append((evt, data))):
+            web_app.publish_status()
+
+        event, pushed = sent[0]
+        self.assertEqual(event, "status_update")
+        self.assertEqual(sorted(set(asked) - {"posts"}), sorted(pushed),
+                         "по сокету уезжают те же поля, что у опроса")
+        # Различие ровно одно: у опроса вместе с состоянием едут реплики, а у рассылки
+        # нет — об этом и говорит поле posts_included
+        for key, value in pushed.items():
+            if key in ("new_posts", "posts_included"):
+                continue
+            self.assertEqual(value, asked[key], f"поле {key} разошлось между каналами")
+        self.assertEqual(pushed["new_posts"], [],
+                         "реплики ходят событиями new_post, а не в состоянии")
+        self.assertFalse(pushed["posts_included"])
+        self.assertTrue(asked["posts_included"], "опрос обязан привезти реплики")
+
+    def test_the_poll_still_carries_the_posts_it_was_asked_for(self):
+        """Подстраховка осталась рабочей: опрос отдаёт реплики после указанной."""
+        self.session.posts = [{"id": 1}, {"id": 2}, {"id": 3}]
+        payload = self.client.get("/api/status?lastPostCount=2").get_json()
+        self.assertEqual(payload["new_posts"], [{"id": 3}])
+        self.assertEqual(payload["total_posts"], 3)
+
+    def test_the_state_is_pushed_by_itself_while_the_show_runs(self):
+        """Основной канал — сокет: состояние идёт само, пока идёт спектакль.
+
+        Ждать опроса по три секунды, чтобы увидеть «Ищет: …», больше не нужно.
+        Занавес — рассылка прекращается: лишний поток не будит процессор зря.
+        """
+        sent = []
+        self.session.running = True
+        with mock.patch.object(web_app.socketio, "emit",
+                               lambda evt, data=None: sent.append((evt, data))), \
+                mock.patch.object(web_app, "STATUS_PUSH_INTERVAL", 0.01):
+            web_app.start_status_pusher()
+            self.assertTrue(self._wait_for(lambda: len(sent) >= 2),
+                            "состояние не рассылается")
+            self.session.running = False
+            self.assertTrue(self._wait_for(lambda: len(sent) >= 3),
+                            "после занавеса должно прийти последнее состояние")
+            quiet = len(sent)
+            time.sleep(0.1)
+            self.assertEqual(len(sent), quiet, "рассылка не остановилась")
+
+        self.assertTrue(all(event == "status_update" for event, _ in sent))
+        self.assertFalse(sent[-1][1]["running"],
+                         "последнее состояние говорит, что спектакль кончился")
+
+    def test_a_second_pusher_is_not_started(self):
+        """Рассылка просится и стартом, и подключением — поток должен быть один."""
+        web_app._status_pusher["alive"] = True
+        with mock.patch.object(web_app.threading, "Thread") as thread:
+            web_app.start_status_pusher()
+        thread.assert_not_called()
 
 
 if __name__ == "__main__":

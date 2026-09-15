@@ -266,6 +266,12 @@ HTML_TEMPLATE = """
                      на ходу. Разделы пронумерованы в порядке работы режиссёра. -->
                 <div class="card" id="controlPanel">
                     <h2 id="controlPanelTitle">Режиссёрский пульт</h2>
+                    <!-- Развернуть или свернуть весь пульт разом. Нужна именно на ходу:
+                         спектакль начался — все разделы свёрнуты до заголовков, и этой
+                         кнопкой видно всё сразу, не разбирая по одному -->
+                    <div style="text-align:center;margin:-18px 0 6px 0;">
+                        <button class="btn btn-secondary" id="sectionsToggle" onclick="toggleAllSections()" style="display:none;margin:0;padding:6px 15px;font-size:13px;">▾ Развернуть пульт</button>
+                    </div>
 
                     <!-- Нулевой раздел: готовность к спектаклю. Раскрывается сам, когда
                          есть о чём предупредить, и сворачивается, когда всё в порядке -->
@@ -430,6 +436,8 @@ HTML_TEMPLATE = """
         let thinkingModels = [];       // из них те, что умеют размышлять (capabilities Ollama)
         let debateRunning = false;
         let pollInterval = null;
+        let sectionsPhase = null;      // фаза пульта: настройка / спектакль идёт / занавес
+        let turnSectionState = null;   // раскрыт ли раздел «Ваша реплика» на этом ходу
         let lastPostCount = 0;
         let instructionsTick = 0;
         let defaultJudgePrompt = '';  // им заполняется пустое поле промпта судьи
@@ -487,18 +495,46 @@ HTML_TEMPLATE = """
         
         refreshMemory();  // сразу видно, что уже загружено в Ollama (могут быть чужие модели)
         
-        // Socket.IO - ускоритель: по событию new_post сразу тянем статус, поэтому
-        // реплика появляется без задержки в 3 секунды. Если клиент не загрузился,
-        // страница молча живёт на polling'е.
+        // ── Каналы связи ─────────────────────────────────────────────────
+        // Основной канал — Socket.IO: лента приходит событием new_post, черновик —
+        // stream_post, а состояние спектакля сервер сам шлёт раз в секунду
+        // (status_update). Опрос /api/status остался подстраховкой: с сокетом он
+        // редкий, без сокета — снова частый, как раньше. Раньше опрос был основным
+        // и реплика появлялась с задержкой до трёх секунд.
+        const POLL_MS = 3000;            // без сокета: опрос — единственный канал
+        const POLL_FALLBACK_MS = 20000;  // с сокетом: редкая сверка на случай обрыва
+
+        function stopPolling() {
+            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+        }
+
+        function startPolling() {
+            stopPolling();
+            pollInterval = setInterval(updatePosts,
+                                       socket && socket.connected ? POLL_FALLBACK_MS : POLL_MS);
+        }
+
         let socket = null;
         if (typeof io === 'function') {
             try {
                 socket = io();
-                ['new_post', 'state_update'].forEach(evt =>
-                    socket.on(evt, () => { if (debateRunning) updatePosts(); }));
+                // Состояние пульта. Свежее опроса: «Ищет: …» видно почти сразу,
+                // а не через три секунды. Пустое состояние не принимаем — иначе
+                // до первого спектакля оно «оживило» бы пустой театр
+                socket.on('status_update', data => {
+                    if (!data.running && !data.finished && !data.total_posts) return;
+                    applyStatus(data);
+                });
+                // Реплика приходит готовым постом: перепрашивать её незачем
+                socket.on('new_post', post => {
+                    if (debateRunning) addNewPosts([post]);
+                });
                 // Черновик приходит готовым и целиком: перепрашивать его незачем,
                 // поэтому он не дёргает updatePosts, а рисуется сам
                 socket.on('stream_post', draft => { if (debateRunning) upsertStreamPost(draft); });
+                // Сокет отвалился — опрос становится частым, вернулся — снова редким
+                socket.on('disconnect', () => { if (pollInterval) startPolling(); });
+                socket.on('connect', () => { if (pollInterval) startPolling(); });
             } catch (e) {
                 console.warn('Socket.IO недоступен, обновляемся опросом:', e);
                 socket = null;
@@ -523,12 +559,10 @@ HTML_TEMPLATE = """
                     if (data.topic) document.getElementById('topicInput').value = data.topic;
                     document.getElementById('posts').innerHTML = '';
 
-                    (data.new_posts || []).forEach(post => addPost(post));
-                    lastPostCount = data.total_posts || 0;
+                    addNewPosts(data.new_posts);
+                    lastPostCount = data.total_posts || lastPostCount;
 
-                    if (data.running) {
-                        pollInterval = setInterval(updatePosts, 3000);
-                    }
+                    if (data.running) startPolling();
                     updatePosts();
                 })
                 .catch(() => {});
@@ -1206,7 +1240,7 @@ HTML_TEMPLATE = """
                 // Спектакль пошёл: убираем баннер с прошлой неудачной попытки
                 const box = document.getElementById('modelsWarning');
                 if (box) { box.style.display = 'none'; box.innerHTML = ''; }
-                pollInterval = setInterval(updatePosts, 3000);
+                startPolling();
                 renderCastEditor();
                 updateSidebarParticipants();
                 updatePanel();
@@ -1225,7 +1259,7 @@ HTML_TEMPLATE = """
         
         // «Новый спектакль»: сервер собирает новый состав, настройки роли остаются
         function newShow() {
-            if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+            stopPolling();
             debateRunning = false;
             showFinished = false;
             finishRequested = false;
@@ -1308,6 +1342,8 @@ HTML_TEMPLATE = """
             if (!body) return;
             body.classList.toggle('collapsed', !!collapsed);
             if (caret) caret.textContent = collapsed ? '▸' : '▾';
+            // Надпись на кнопке всего пульта зависит от того, что открыто сейчас
+            syncSectionsToggle();
         }
 
         // Свернуть или развернуть все разделы пульта разом
@@ -1317,18 +1353,57 @@ HTML_TEMPLATE = """
             });
         }
 
-        // Фазы пульта: в настройке раскрыто всё; спектакль идёт — состав убран
-        // (он огромный, а на ходу нужен редко); после занавеса — свернуто всё,
-        // спектакль отыгран и пульт остаётся одними заголовками. Ручное
-        // сворачивание не трогаем: панель реагирует только на смену фазы
-        let sectionsPhase = null;
+        // Фазы пульта. В настройке раскрыто всё — там всё и нужно. С началом
+        // спектакля пульт сворачивается целиком: режиссёр смотрит спектакль, а не
+        // настройки, и раздел открывается только тогда, когда в нём что-то важное
+        // (предупреждение готовности, ваш ход) или сам режиссёр его открыл.
+        // После занавеса — тоже заголовки. Ручное сворачивание не трогаем:
+        // панель реагирует только на смену фазы
         function syncSectionsToPhase() {
             const phase = showFinished ? 'finished' : (debateRunning ? 'running' : 'setup');
             if (phase === sectionsPhase) return;
             sectionsPhase = phase;
-            if (phase === 'finished') setAllSectionsCollapsed(true);
-            else if (phase === 'running') setSectionCollapsed('sec-cast', true);
-            else setAllSectionsCollapsed(false);
+            setAllSectionsCollapsed(phase !== 'setup');
+            // Ход в новой фазе пересчитываем заново: иначе после сворачивания
+            // раздел «Ваша реплика» не раскрылся бы на своём ходу
+            turnSectionState = null;
+            syncSectionsToggle();
+        }
+
+        // Разделы, которые раскрываются сами, когда в них есть дело:
+        // «Ваша реплика» — когда ход ваш (в спектакле она была бы большим полем
+        // ввода посреди чужого разговора), и «Готовность» — когда есть о чём
+        // предупредить (см. syncReadinessSection)
+        function syncTurnSection(state) {
+            if (!debateRunning || showFinished) return;
+            if (state === turnSectionState) return;
+            turnSectionState = state;
+            setSectionCollapsed('turnSection', state !== 'your');
+        }
+
+        function sectionBodies() {
+            return Array.from(document.querySelectorAll('#controlPanel .panel-section .panel-body'));
+        }
+
+        function everySectionCollapsed() {
+            const bodies = sectionBodies();
+            return bodies.length > 0 && bodies.every(body => body.classList.contains('collapsed'));
+        }
+
+        // Кнопка «развернуть/свернуть пульт»: без неё до кнопки «Завершить
+        // спектакль» в свёрнутом разделе 05 пришлось бы добираться заголовками
+        function syncSectionsToggle() {
+            const btn = document.getElementById('sectionsToggle');
+            if (!btn) return;
+            btn.style.display = sectionsPhase === 'setup' ? 'none' : 'inline-block';
+            btn.textContent = everySectionCollapsed() ? '▾ Развернуть пульт' : '▴ Свернуть пульт';
+        }
+
+        function toggleAllSections() {
+            // Развёрнутых нет — раскрываем всё, и наоборот: одна кнопка на оба хода
+            const collapse = !everySectionCollapsed();
+            setAllSectionsCollapsed(collapse);
+            syncSectionsToggle();
         }
 
         // Как назвать роль в интерфейсе: у обычного участника никакой особой роли нет
@@ -1347,8 +1422,10 @@ HTML_TEMPLATE = """
                 composer.style.display = 'block';
                 note.style.display = 'none';
                 title.textContent = 'Ход: ' + (who || 'вы') + (roleName ? ' · ' + roleName : '');
+                syncTurnSection(state);
                 return;
             }
+            syncTurnSection(state);
             composer.style.display = 'none';
             note.style.display = 'block';
             title.textContent = 'Ваша реплика';
@@ -1357,6 +1434,18 @@ HTML_TEMPLATE = """
                 : state === 'finished' ? 'Занавес: реплики закончились.'
                 : state === 'sent' ? 'Реплика отправлена — ждём ответа других участников.'
                 : 'Спектакль ещё не начат — поле появится, когда очередь дойдёт до вас.';
+        }
+
+        // Реплики из любого канала — сокет или редкий опрос — рисуются одинаково.
+        // Пост с уже показанным номером пропускаем: сокет и опрос могут сработать
+        // почти одновременно, и без этого одна реплика появилась бы дважды
+        function addNewPosts(posts) {
+            (posts || []).forEach(post => {
+                if (!post) return;
+                if (post.id && post.id <= lastPostCount) return;
+                addPost(post);
+                if (post.id) lastPostCount = post.id;
+            });
         }
 
         // Раздел 00: содержимое рисуют renderModelsWarning / renderVramWarning,
@@ -1652,71 +1741,8 @@ HTML_TEMPLATE = """
             // ошибка выглядела бы как «не удалось прочитать ответ» — и снова
             // выдавала себя за закрытый театр
             .then(r => { if (!r.ok) throw new Error(`сервер ответил ${r.status}`); return r.json(); })
-            .then(data => {
-                statusFailures = 0;
-                // Сессия сменилась на сервере — сбросить локальный UI.
-                if (data.session_id) {
-                    if (mySessionId === null) {
-                        mySessionId = data.session_id;
-                    } else if (mySessionId !== data.session_id) {
-                        // Спектакль начался в другой вкладке: переходим к просмотру
-                        mySessionId = data.session_id;
-                        debateRunning = true;
-                        lastPostCount = 0;
-                        document.getElementById('posts').innerHTML = '';
-                        setTurnState('hidden');
-                        loadCast().then(() => { updateSidebarParticipants(); updatePanel(); });
-                        return;
-                    }
-                }
-                const statusDiv = document.getElementById('statusBar');
-                const statusPlaceholder = document.getElementById('statusPlaceholder');
-                statusDiv.style.display = 'block'; statusPlaceholder.style.display = 'none';
-                // Флаги ставим до отрисовки пульта: после перезагрузки страницы
-                // он должен сразу знать, что спектакль идёт, а не ждать нового старта
-                debateRunning = true;
-                showFinished = !!data.finished;
-                if (data.topic) setTopicDisplay(data.topic);
-                updatePanel();
-                if (data.waiting_for_human) {
-                    // Ход человека: имя всегда, роль — только если она особенная
-                    const roleName = roleLabelOf(data.current_participant_role);
-                    const wasOpen = document.getElementById('turnComposer').style.display === 'block';
-                    setTurnState('your', data.current_participant, roleName);
-                    if (!wasOpen) {
-                        const mi = document.getElementById('moderatorInput');
-                        if (mi && !mi.value.trim()) mi.focus();
-                    }
-                    statusDiv.classList.add('active');
-                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
-                } else {
-                    // Не ваша очередь: блок остаётся на месте с пояснением, чтобы
-                    // нумерация разделов пульта не прыгала
-                    setTurnState(data.finished ? 'finished' : 'waiting', data.current_participant);
-                }
-                if (data.running && !data.waiting_for_human) {
-                    statusDiv.classList.add('active');
-                    let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
-                    statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>`;
-                } else if (data.finished) {
-                    statusDiv.classList.remove('active');
-                    statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>';
-                    setTurnState('finished');
-                    document.getElementById('finishBtn').style.display = 'none';
-                    // «Покинуть театр» оставляем: занавес больше не закрывает сервер,
-                    // и это единственная кнопка остановки приложения
-                    clearInterval(pollInterval);
-                    pollInterval = null;
-                    settleMemoryPanel();
-                }
-                if (data.new_posts && data.new_posts.length > 0) data.new_posts.forEach(post => addPost(post));
-                if (typeof data.total_posts === 'number') lastPostCount = data.total_posts;
-                // Показываем, какая модель сейчас в памяти и сколько занимает
-                renderLoadedModels(data.loaded_models, data.gpu_memory, data.loaded_models_error);
-                // Инструкции в сайдбаре меняются только вручную, поэтому обновляем
-                // их раз в 30 секунд, а не на каждом опросе
-                if (instructionsTick++ % 10 === 0) updateSidebarParticipants();
-            }).catch(err => {
+            .then(data => applyStatus(data))
+            .catch(err => {
                 statusFailures++;
                 console.error(`Ошибка обновления статуса (${statusFailures} подряд):`, err);
                 // Ниже — поведение для случая, когда связь пропала надолго: без этой
@@ -1733,9 +1759,82 @@ HTML_TEMPLATE = """
                 
                 // Опрос останавливаем только убедившись, что сервера нет, а не после
                 // первой же пустой попытки: иначе лента замолкала на весь спектакль
-                if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+                stopPolling();
             })
             .finally(() => { statusRequestInFlight = false; });
+        }
+
+        // Состояние спектакля: и опрос, и сокет приводят сюда. Раньше эта же
+        // роспись жила внутри опроса, и состояние пульта зависело от того, кто
+        // его принёс — теперь путь один
+        function applyStatus(data) {
+            statusFailures = 0;
+            // Сессия сменилась на сервере — сбросить локальный UI.
+            if (data.session_id) {
+                if (mySessionId === null) {
+                    mySessionId = data.session_id;
+                } else if (mySessionId !== data.session_id) {
+                    // Спектакль начался в другой вкладке: переходим к просмотру
+                    mySessionId = data.session_id;
+                    debateRunning = true;
+                    lastPostCount = 0;
+                    document.getElementById('posts').innerHTML = '';
+                    setTurnState('hidden');
+                    loadCast().then(() => { updateSidebarParticipants(); updatePanel(); });
+                    return;
+                }
+            }
+            const statusDiv = document.getElementById('statusBar');
+            const statusPlaceholder = document.getElementById('statusPlaceholder');
+            statusDiv.style.display = 'block'; statusPlaceholder.style.display = 'none';
+            // Флаги ставим до отрисовки пульта: после перезагрузки страницы
+            // он должен сразу знать, что спектакль идёт, а не ждать нового старта
+            debateRunning = true;
+            showFinished = !!data.finished;
+            if (data.topic) setTopicDisplay(data.topic);
+            updatePanel();
+            if (data.waiting_for_human) {
+                // Ход человека: имя всегда, роль — только если она особенная
+                const roleName = roleLabelOf(data.current_participant_role);
+                const wasOpen = document.getElementById('turnComposer').style.display === 'block';
+                setTurnState('your', data.current_participant, roleName);
+                if (!wasOpen) {
+                    const mi = document.getElementById('moderatorInput');
+                    if (mi && !mi.value.trim()) mi.focus();
+                }
+                statusDiv.classList.add('active');
+                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
+            } else {
+                // Не ваша очередь: блок остаётся на месте с пояснением, чтобы
+                // нумерация разделов пульта не прыгала
+                setTurnState(data.finished ? 'finished' : 'waiting', data.current_participant);
+            }
+            if (data.running && !data.waiting_for_human) {
+                statusDiv.classList.add('active');
+                let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
+                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>`;
+            } else if (data.finished) {
+                statusDiv.classList.remove('active');
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>';
+                setTurnState('finished');
+                document.getElementById('finishBtn').style.display = 'none';
+                // «Покинуть театр» оставляем: занавес больше не закрывает сервер,
+                // и это единственная кнопка остановки приложения
+                stopPolling();
+                settleMemoryPanel();
+            }
+            addNewPosts(data.new_posts);
+            // Счётчик показанных реплик двигаем только тогда, когда состояние
+            // пришло вместе с репликами: у рассылки по сокету их нет, и счётчик
+            // не должен перескочить мимо ещё не показанного поста
+            if (data.posts_included && typeof data.total_posts === 'number') {
+                lastPostCount = data.total_posts;
+            }
+            // Показываем, какая модель сейчас в памяти и сколько занимает
+            renderLoadedModels(data.loaded_models, data.gpu_memory, data.loaded_models_error);
+            // Инструкции в сайдбаре меняются только вручную, поэтому обновляем
+            // их раз в 30 секунд, а не на каждом опросе
+            if (instructionsTick++ % 10 === 0) updateSidebarParticipants();
         }
         
         function sendModeratorMessage() {
@@ -1901,7 +2000,7 @@ HTML_TEMPLATE = """
         function shutdownServer() {
             if (confirm('Завершить работу сервера?')) {
                 // СРАЗУ останавливаем polling
-                if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+                stopPolling();
                 
                 // СРАЗУ скрываем кнопку выхода — чтобы нельзя было нажать повторно
                 const exitBtn = document.querySelector('.footer .btn');

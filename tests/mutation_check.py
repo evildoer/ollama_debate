@@ -186,6 +186,43 @@ BUGS = {
          "        save_thinking_entry(post)",
          "        pass"),
     ],
+    "состояние снова не рассылается по сокету": [
+        ("aitheatre/web.py",
+         "    socketio.emit('status_update', status_payload(with_posts=False))",
+         "    return"),
+    ],
+    "состояние по сокету и опросу снова расходятся": [
+        ("aitheatre/web.py",
+         "    response = jsonify(status_payload(last_post_count))",
+         "    _only_by_poll = status_payload(last_post_count)\n"
+         "    _only_by_poll['только_в_опросе'] = True\n"
+         "    response = jsonify(_only_by_poll)"),
+    ],
+    "счётчик реплик снова перескакивает мимо несказанного поста": [
+        ("aitheatre/page.py",
+         "            if (data.posts_included && typeof data.total_posts === 'number') {",
+         "            if (typeof data.total_posts === 'number') {"),
+    ],
+    "опрос снова частый, когда сокет жив": [
+        ("aitheatre/page.py",
+         "                                       socket && socket.connected ? POLL_FALLBACK_MS : POLL_MS);",
+         "                                       POLL_MS);"),
+    ],
+    "пульт снова раскрыт во время спектакля": [
+        ("aitheatre/page.py",
+         "            setAllSectionsCollapsed(phase !== 'setup');",
+         "            setAllSectionsCollapsed(false);"),
+    ],
+    "раздел «Ваша реплика» снова захлопнут на своём ходу": [
+        ("aitheatre/page.py",
+         "            setSectionCollapsed('turnSection', state !== 'your');",
+         "            setSectionCollapsed('turnSection', true);"),
+    ],
+    "реплика из сокета снова приходит дважды": [
+        ("aitheatre/page.py",
+         "                if (post.id && post.id <= lastPostCount) return;",
+         "                if (false) return;"),
+    ],
     "части вызова инструмента снова читаются как готовый вызов": [
         ("aitheatre/cloud.py",
          '        if function.get("name"):\n            call["name"] += str(function["name"])',
