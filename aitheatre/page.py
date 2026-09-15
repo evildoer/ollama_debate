@@ -353,7 +353,6 @@ HTML_TEMPLATE = """
                             <button class="btn btn-secondary" onclick="saveCast()" style="margin:0;">💾 Применить состав</button>
                             <button class="btn btn-secondary" onclick="addCast()" style="margin:0;" title="Добавить место в конец сцены: имя, эмодзи и профессия придумаются сами, а модель будет как у соседа. Потом место можно настроить как любое другое">➕ Добавить участника</button>
                             <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику — и судье тоже (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
-                            <button class="btn btn-secondary" onclick="resetCast()" style="margin:0;" title="Забыть собранную сцену и взять места из PARTICIPANTS — имена, роли и порядок как в файле настроек">↺ Состав из PARTICIPANTS</button>
                             <button class="btn btn-secondary" onclick="resetEverything()" style="margin:0;" title="Чистый старт: тема, состав, общие правила, руководства модератора и правила судьи — из settings.py, а сохранённый пульт забывается">🧹 Полный сброс</button>
                             <span id="randomizeHint" style="font-size:12px;color:#666;"></span>
                         </div>
@@ -866,29 +865,13 @@ HTML_TEMPLATE = """
             .catch(err => alert('❌ ' + err.message));
         }
 
-        function resetCast() {
-            if (!confirm('Взять состав из PARTICIPANTS? Собранная сцена и её порядок будут забыты.')) return;
-            fetch('/api/participants/reset', {
-                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (!data.success) { alert('❌ ' + (data.error || 'не удалось сбросить состав')); return; }
-                cast = data.participants || [];
-                renderCastEditor();
-                updateSidebarParticipants();
-                loadCast();
-            })
-            .catch(err => alert('❌ ' + err.message));
-        }
-
-        // «Полный сброс»: как первый запуск с пустой папкой экземпляра — тема,
-        // состав, общие правила, руководства модератора и правила судьи берутся из
+        // Полный сброс: как первый запуск с пустой папкой экземпляра — состав,
+        // общие правила, руководства модератора и правила судьи берутся из
         // settings.py, а сохранённый пульт забывается (иначе сброс пережил бы
-        // только до перезапуска). Не путать с «Состав из PARTICIPANTS»: та кнопка
-        // берёт из файла только места, а инструкции и тему не трогает.
+        // только до перезапуска). Тема не трогается: она про сюжет, а не про
+        // труппу, и придумывать её каждый сброс — работа, а не часть спектакля.
         function resetEverything() {
-            if (!confirm('Полный сброс: тема, состав, правила общения, руководства модератора и правила судьи вернутся к значениям из settings.py, а сохранённый пульт будет забыт.\n\nПродолжить?')) return;
+            if (!confirm('Полный сброс: состав, правила общения, руководства модератора и правила судьи вернутся к значениям из settings.py, а сохранённый пульт будет забыт.\n\nТема останется — её сброс не трогает.\n\nПродолжить?')) return;
             fetch('/api/settings/reset', {
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
             })
@@ -899,10 +882,9 @@ HTML_TEMPLATE = """
                 renderCastEditor();
                 updateSidebarParticipants();
                 loadCast();
-                // Тема сбрасывается только здесь: показываем это сразу, а не
-                // оставляем в поле текст, которого на сервере уже нет
-                document.getElementById('topicInput').value = data.topic || '';
-                setTopicDisplay(data.topic || '');
+                // Поле темы не трогаем вовсе: на сервере она та же (сброс её
+                // не касается), а в поле может лежать набранное, но ещё не
+                // применённое — стирать чужой черновик незачем
                 // Открытый редактор показывает то, что сейчас на сервере: после
                 // сброса в его полях должен быть заводской текст, а не старый
                 const editor = document.getElementById('instructionsEditor');

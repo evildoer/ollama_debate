@@ -2323,7 +2323,7 @@ class TestScenePanel(unittest.TestCase):
 
     def test_every_scene_action_has_a_control(self):
         for control in ("addCast()", "removeCast(", "moveCast(", "setCastRole(",
-                        "resetCast()", "resetEverything()"):
+                        "resetEverything()"):
             with self.subTest(control=control):
                 self.assertIn(control, self.page, f"в пульте нет управления {control}")
 
@@ -2438,7 +2438,7 @@ class TestScenePanel(unittest.TestCase):
                       "в сайдбаре не видно, слышат ли судью остальные")
 
     def test_the_new_controls_use_the_routes_that_exist(self):
-        for route in ("/api/participants/draft", "/api/participants/reset"):
+        for route in ("/api/participants/draft", "/api/settings/reset"):
             with self.subTest(route=route):
                 self.assertIn(route, self.page)
                 self.assertIn(route, {rule.rule for rule in web_app.app.url_map.iter_rules()})
@@ -3672,23 +3672,8 @@ class TestRoutes(unittest.TestCase):
         self.assertTrue(data["participant"]["model"])
         self.assertEqual([p["display_name"] for p in self.session.runtime_participants], before)
 
-    def test_reset_route_takes_the_cast_from_participants(self):
-        payload = cast_payload(self.session)[1:]
-        self.client.post("/api/participants", json={"participants": payload})
-        self.assertEqual(len(self.session.runtime_participants), len(payload))
-
-        data = self.client.post("/api/participants/reset", json={}).get_json()
-
-        self.assertTrue(data["success"])
-        self.assertIsNone(self.session.scene)
-        self.assertEqual(len(data["participants"]), len(settings.PARTICIPANTS))
-
     def test_the_full_reset_returns_the_console_to_settings(self):
-        """«Полный сброс» — не то же, что «Состав из PARTICIPANTS»: он и инструкции.
-
-        Именно поэтому он отдельной кнопкой: прежняя трогала только места,
-        а правила общения, руководства и правила судьи оставались в редакторе.
-        """
+        """Сброс один и он полный: и места, и правила общения, и руководства, и судья."""
         self.session.static_instructions = ["Своё правило"]
         self.session.moderator_guidelines = ["Своё руководство"]
         self.session.judge_rules = ["Своё правило судьи"]
@@ -3721,23 +3706,41 @@ class TestRoutes(unittest.TestCase):
         self.assertEqual(data["topic"], "Тема")
         self.assertEqual(self.session.topic, "Тема")
 
-    def test_the_full_reset_clears_the_topic(self):
-        """Тема сбрасывается только здесь: её нет ни в settings.py, ни в PARTICIPANTS."""
-        self.client.post("/api/moderator/topic", json={"topic": "Тема"})
+    def test_the_full_reset_keeps_the_topic(self):
+        """Тема — про сюжет, а не про труппу: её не сбрасывает даже полный сброс."""
+        self.client.post("/api/moderator/topic", json={"topic": "Тема прошлого спектакля"})
 
         data = self.client.post("/api/settings/reset", json={}).get_json()
 
-        self.assertEqual(self.session.topic, "")
-        self.assertEqual(data["topic"], "")
+        self.assertEqual(self.session.topic, "Тема прошлого спектакля")
+        self.assertEqual(data["topic"], "Тема прошлого спектакля")
 
-    def test_the_full_reset_forgets_the_saved_console(self):
-        """Иначе следующий запуск вернул бы то, от чего только что отказались."""
-        show.save_theatre_settings()
-        self.assertTrue(settings.SETTINGS_FILE.exists(), "файл пульта не записался")
+    def test_the_full_reset_survives_a_restart_but_forgets_the_console(self):
+        """Сброс переживает перезапуск, а тема переживает и сброс.
+
+        Если бы файл остался как был, следующий запуск вернул бы то, от чего
+        только что отказались; если бы файл удалили целиком, вместе с ним ушла бы
+        и тема, которую придумывают руками.
+        """
+        self.client.post("/api/moderator/instructions",
+                         json={"static_instructions": ["Своё правило"]})
+        self.client.post("/api/moderator/topic", json={"topic": "Тема прошлого спектакля"})
 
         self.client.post("/api/settings/reset", json={})
 
-        self.assertFalse(settings.SETTINGS_FILE.exists())
+        # В файле осталась одна тема: состав и правила сброс не возвращает
+        data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+        self.assertNotIn("cast", data)
+        self.assertNotIn("static_instructions", data)
+        self.assertNotIn("judge_rules", data)
+        self.assertEqual(data["topic"], "Тема прошлого спектакля")
+
+        # Перезапуск: состав — из PARTICIPANTS, правила — из settings.py,
+        # тема — из файла
+        self.session.runtime_participants = []
+        self.session.topic = ""
+        show.load_theatre_settings()
+        self.assertEqual(self.session.topic, "Тема прошлого спектакля")
 
     def test_editing_instructions_saves_the_console(self):
         """Редактор — часть пульта: без сохранения его правки жили бы до перезапуска."""

@@ -283,14 +283,6 @@ def draft_participant():
     role = str(data.get("role", "participant") or "participant")
     return jsonify({"success": True, "participant": show.draft_cast_entry(role)})
 
-@app.route('/api/participants/reset', methods=['POST'])
-def reset_cast():
-    """«Состав из PARTICIPANTS»: забыть сцену и собрать труппу заново по файлу."""
-    show.session.reset_scene()
-    show.save_theatre_settings()
-    print(f"↺ Сцена сброшена, места берутся из PARTICIPANTS")
-    return jsonify({"success": True, "participants": cast_payload()})
-
 @app.route('/api/avatar/<keywords>')
 def get_avatar(keywords):
     base_name = avatars.sanitize_avatar_name(keywords)
@@ -411,14 +403,16 @@ def reset():
 def reset_settings():
     """«Полный сброс»: пульт заново из settings.py, сохранённое — забыть.
 
-    Не то же, что «Состав из PARTICIPANTS»: та кнопка берёт из файла только места,
-    а эта возвращает к исходному всё, что есть в редакторе, — состав с ролями,
-    общие правила общения, руководства модератора и правила судьи — и стирает
-    сохранённый пульт, чтобы сброс пережил и перезапуск.
+    Возвращает к исходному всё, что есть в редакторе: состав с ролями, общие
+    правила общения, руководства модератора и правила судьи. Сохранённый пульт
+    при этом забывается, чтобы сброс пережил перезапуск, — но забывается не весь:
+    тема остаётся (см. forget_theatre_settings), потому что её не сбрасывает
+    даже полный сброс: она про сюжет, а не про труппу.
     """
     show.session.reset_to_defaults()
     show.forget_theatre_settings()
-    print("🧹 Полный сброс: тема, состав и правила взяты из settings.py, сохранённое забыто")
+    print("🧹 Полный сброс: состав и правила взяты из settings.py, "
+          f"сохранённое забыто (тема осталась: {show.session.topic[:40] or '—'})")
     return jsonify({"success": True, "participants": cast_payload(),
                     "topic": show.session.topic})
 

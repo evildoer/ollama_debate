@@ -625,10 +625,16 @@ BUGS = {
          '        instruction = str(participant.get("instruction", "") or "").strip()\n'
          '        if False:'),
     ],
-    "полный сброс снова оставляет сохранённый пульт": [
+    "полный сброс снова оставляет в файле весь сохранённый пульт": [
         ("aitheatre/show.py",
-         "        settings.SETTINGS_FILE.unlink(missing_ok=True)",
-         "        return"),
+         '            json.dumps({"version": 2, "topic": session.topic or ""},',
+         '            json.dumps({"version": 2, "topic": session.topic or "",\n'
+         '                        "cast": [dict(place) for place in session.runtime_participants]},'),
+    ],
+    "полный сброс снова забывает тему": [
+        ("aitheatre/show.py",
+         '            json.dumps({"version": 2, "topic": session.topic or ""},',
+         '            json.dumps({"version": 2, "topic": ""},'),
     ],
     "правка инструкций в редакторе снова не сохраняется": [
         ("aitheatre/web.py",
@@ -648,10 +654,10 @@ BUGS = {
          "        self.scene = scene\n        self.topic = topic",
          '        self.scene = scene\n        self.topic = ""'),
     ],
-    "полный сброс снова оставляет тему прошлого спектакля": [
+    "полный сброс снова сбрасывает тему": [
         ("aitheatre/show.py",
-         '        self.topic = ""\n        self.static_instructions = []',
-         "        self.static_instructions = []"),
+         "        self.scene = None\n        self.load_new_cast()",
+         '        self.topic = ""\n        self.scene = None\n        self.load_new_cast()'),
     ],
     "кнопка полного сброса снова ведёт в никуда": [
         ("aitheatre/page.py",
