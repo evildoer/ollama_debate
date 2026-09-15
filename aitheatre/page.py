@@ -70,6 +70,14 @@ HTML_TEMPLATE = """
         .panel-heading:hover .name { text-decoration: underline; }
         .panel-heading .caret { margin-left: auto; font-size: 12px; color: #888888; }
         .panel-body.collapsed { display: none; }
+        /* Карточка личной инструкции участника: фон — из класса, а не из инлайна.
+           Инлайн перебивал тёмную сцену, и имя участника было белым на белом */
+        .instr-card { margin-bottom: 15px; padding: 10px; border-radius: 4px; background: #ffffff; }
+        .instr-card.judge { background: #fafafa; }
+        .instr-hint { font-size: 11px; color: #666666; margin-bottom: 5px; font-style: italic; }
+        /* Карточка места в «Тонкой настройке» — тоже из класса: инлайн-фон
+           проделал бы с её подписями то же самое (светлое на белом) */
+        .index-card { margin-bottom: 18px; padding: 14px; background: #ffffff; }
         /* Ключевые слова аватара и кнопка поиска — одной строкой, рядом с аватаром */
         .keyword-row { display: flex; gap: 10px; align-items: stretch; }
         .keyword-row input { flex: 1; min-width: 0; }
@@ -212,6 +220,10 @@ HTML_TEMPLATE = """
         body.dark .param-input:not(.filled) { color: #a0a0a0; }
         body.dark .param-input.filled { border-color: #cfcfcf; color: #e8e8e8; }
         body.dark .turn-note { color: #a0a0a0; }
+        body.dark .index-card { background: #141414; }
+        body.dark .instr-card { background: #141414; }
+        body.dark .instr-card.judge { background: #1c1c1c; }
+        body.dark .instr-hint { color: #a3a3a3; }
         body.dark .ready-badge { color: #ff6b6b; }
         body.dark .panel-note { color: #a3a3a3; }
         body.dark .btn { border-color: #6f6f6f; }
@@ -995,7 +1007,7 @@ HTML_TEMPLATE = """
                     + '</div>';
 
                 return ''
-                + '<div data-participant-index="' + idx + '" style="margin-bottom:18px;padding:14px;border:1px solid ' + borderColor + ';background:#ffffff;">'
+                + '<div class="index-card" data-participant-index="' + idx + '" style="border:1px solid ' + borderColor + ';">'
                 +   '<div style="display:flex;gap:15px;align-items:flex-start;">'
                 +     '<div style="flex-shrink:0;">'
                 +       '<div class="avatar-preview" id="avatar-preview-' + idx + '" style="width:96px;height:96px;font-size:46px;" onclick="openAvatarModal(' + idx + ')" title="Показать аватар целиком">' + avatar + '</div>'
@@ -2117,9 +2129,9 @@ HTML_TEMPLATE = """
                     : (p.is_judge ? defaultJudgePrompt : '');
                 
                 return `
-                <div data-participant="${escapeHtml(p.name)}" style="margin-bottom:15px;padding:10px;border:2px solid ${borderColor};border-radius:4px;background:${p.is_judge ? '#fafafa' : 'white'};">
+                <div class="instr-card${p.is_judge ? ' judge' : ''}" data-participant="${escapeHtml(p.name)}" style="border:2px solid ${borderColor};">
                     <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${roleBadge} ${escapeHtml(p.name)}:</label>
-                    ${p.is_judge ? '<div style="font-size:11px;color:#666;margin-bottom:5px;font-style:italic;">Системный промпт судьи (можно редактировать):</div>' : ''}
+                    ${p.is_judge ? '<div class="instr-hint">Системный промпт судьи (можно редактировать):</div>' : ''}
                     <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${escapeHtml(p.name)}...">${escapeHtml(value)}</textarea>
                 </div>
             `}).join('');

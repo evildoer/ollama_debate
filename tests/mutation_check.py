@@ -159,6 +159,16 @@ BUGS = {
          '    if not error and uses_tools and "tools" not in body:',
          '    if not error and uses_tools and "tools" not in body and False:'),
     ],
+    "тёмная сцена снова не красит карточку инструкции": [
+        ("aitheatre/page.py",
+         "        body.dark .instr-card { background: #141414; }\n",
+         ""),
+    ],
+    "карточка места в тонкой настройке снова белая на тёмной сцене": [
+        ("aitheatre/page.py",
+         "                + '<div class=\"index-card\" data-participant-index=\"' + idx + '\" style=\"border:1px solid '",
+         "                + '<div data-participant-index=\"' + idx + '\" style=\"border:1px solid '"),
+    ],
     "поток шлюза снова читается как обычный ответ": [
         ("aitheatre/cloud.py",
          "            if streaming:\n"

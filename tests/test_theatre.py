@@ -2764,6 +2764,43 @@ class TestLiveChannelAndPanel(unittest.TestCase):
         self.assertIn("turnSectionState = null;", self.page)
 
 
+# ---------------------------------------------------------------- редакторы на тёмной сцене
+
+class TestEditorCardsOnDarkStage(unittest.TestCase):
+    """Карточки редактора на тёмной сцене красятся классом, а не инлайном.
+
+    Так уже было: фон карточки личной инструкции прописан инлайном
+    (`background:white`), а инлайн перебивает тёмную тему — имя участника
+    оставалось белым на белом, и его просто не было видно.
+    """
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+
+    def test_the_instruction_card_takes_its_background_from_the_theme(self):
+        self.assertIn('<div class="instr-card${p.is_judge', self.page)
+        self.assertIn("body.dark .instr-card { background: #141414; }", self.page)
+        self.assertIn("body.dark .instr-card.judge { background: #1c1c1c; }", self.page)
+        # Подсказка судьи — тоже из класса: серая на белой карточке терпимо,
+        # а на тёмной уже не читается
+        self.assertIn('<div class="instr-hint">', self.page)
+        self.assertIn("body.dark .instr-hint {", self.page)
+
+    def test_the_tuning_card_takes_its_background_from_the_theme(self):
+        """Карточка места в «Тонкой настройке» — та же беда была бы с её подписями."""
+        self.assertIn('<div class="index-card" data-participant-index=', self.page)
+        self.assertIn("body.dark .index-card { background: #141414; }", self.page)
+
+    def test_no_card_paints_itself_white_from_the_markup(self):
+        """Инлайновый белый фон — та же ошибка, где бы он ни появился.
+
+        Тема красит фон только своими правилами, поэтому белый цвет в разметке
+        (в отличие от стилей) сразу значит, что тёмная сцена его не перебьёт.
+        """
+        self.assertNotIn("background:#ffffff", self.page)
+        self.assertNotIn("background:white", self.page)
+
+
 # ---------------------------------------------------------------- канал состояния
 
 class TestStatusChannel(unittest.TestCase):
