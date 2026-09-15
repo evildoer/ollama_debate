@@ -350,6 +350,7 @@ def start():
         return jsonify({"success": False,
                         "error": "Тема не указана — напишите её в блоке «01 · Сюжет»"})
     show.session.topic = topic
+    show.save_theatre_settings()
 
     cast = show.session.runtime_participants
     if not cast:
@@ -400,7 +401,10 @@ def reset():
     # именно к этому составу, а не к тому, что был до «Нового спектакля»
     show.save_theatre_settings()
     print(f"🎭 Новый состав: {[p.get('display_name') for p in show.session.runtime_participants]}")
-    return jsonify({"success": True, "participants": cast_payload()})
+    # Тему возвращаем вместе с составом: «Новый спектакль» имена меняет,
+    # а тему оставляет — поле в пульте должно остаться заполненным
+    return jsonify({"success": True, "participants": cast_payload(),
+                    "topic": show.session.topic})
 
 
 @app.route('/api/settings/reset', methods=['POST'])
@@ -414,8 +418,9 @@ def reset_settings():
     """
     show.session.reset_to_defaults()
     show.forget_theatre_settings()
-    print("🧹 Полный сброс: состав и правила взяты из settings.py, сохранённое забыто")
-    return jsonify({"success": True, "participants": cast_payload()})
+    print("🧹 Полный сброс: тема, состав и правила взяты из settings.py, сохранённое забыто")
+    return jsonify({"success": True, "participants": cast_payload(),
+                    "topic": show.session.topic})
 
 @app.route('/api/post/<int:post_id>/prompt')
 def post_prompt(post_id):
@@ -483,6 +488,9 @@ def moderator_topic():
         return jsonify({"success": False, "error": "Тема не указана"})
     
     show.session.topic = new_topic
+    # Тема — часть пульта: придуманное однажды не должно спрашиваться заново
+    # в каждом запуске
+    show.save_theatre_settings()
     print(f"🎬 Режиссёр сменил тему: {new_topic}")
     return jsonify({"success": True, "topic": new_topic})
 

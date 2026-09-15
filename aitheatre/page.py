@@ -333,7 +333,7 @@ HTML_TEMPLATE = """
 
                     <div class="panel-section">
                         <div class="panel-heading"><span class="num">01</span><span class="name">Сюжет</span></div>
-                        <div class="panel-note">Тема попадает в системные промпты следующих реплик. Менять можно и до спектакля, и на ходу.</div>
+                        <div class="panel-note">Тема попадает в системные промпты следующих реплик. Менять можно и до спектакля, и на ходу. Она сохраняется вместе с составом — после перезапуска театра придумывать её заново не придётся, «Новый спектакль» её тоже не трогает, а убирает только «🧹 Полный сброс».</div>
                         <textarea id="topicInput" class="topic-input" rows="7" placeholder="Тема одной строкой или с пунктами — переносы строк сохраняются. Ctrl+Enter — применить." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); applyTopic(); }"></textarea>
                         <div style="margin-top:10px;">
                             <button class="btn btn-secondary" onclick="applyTopic()">🎯 Применить тему</button>
@@ -354,7 +354,7 @@ HTML_TEMPLATE = """
                             <button class="btn btn-secondary" onclick="addCast()" style="margin:0;" title="Добавить место в конец сцены: имя, эмодзи и профессия придумаются сами, а модель будет как у соседа. Потом место можно настроить как любое другое">➕ Добавить участника</button>
                             <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику — и судье тоже (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
                             <button class="btn btn-secondary" onclick="resetCast()" style="margin:0;" title="Забыть собранную сцену и взять места из PARTICIPANTS — имена, роли и порядок как в файле настроек">↺ Состав из PARTICIPANTS</button>
-                            <button class="btn btn-secondary" onclick="resetEverything()" style="margin:0;" title="Чистый старт: состав, общие правила, руководства модератора и правила судьи — из settings.py, а сохранённый пульт забывается">🧹 Полный сброс</button>
+                            <button class="btn btn-secondary" onclick="resetEverything()" style="margin:0;" title="Чистый старт: тема, состав, общие правила, руководства модератора и правила судьи — из settings.py, а сохранённый пульт забывается">🧹 Полный сброс</button>
                             <span id="randomizeHint" style="font-size:12px;color:#666;"></span>
                         </div>
                     </div>
@@ -882,13 +882,13 @@ HTML_TEMPLATE = """
             .catch(err => alert('❌ ' + err.message));
         }
 
-        // «Полный сброс»: как первый запуск с пустой папкой экземпляра — состав,
-        // общие правила, руководства модератора и правила судьи берутся из
+        // «Полный сброс»: как первый запуск с пустой папкой экземпляра — тема,
+        // состав, общие правила, руководства модератора и правила судьи берутся из
         // settings.py, а сохранённый пульт забывается (иначе сброс пережил бы
         // только до перезапуска). Не путать с «Состав из PARTICIPANTS»: та кнопка
-        // берёт из файла только места, а инструкции не трогает.
+        // берёт из файла только места, а инструкции и тему не трогает.
         function resetEverything() {
-            if (!confirm('Полный сброс: состав, правила общения, руководства модератора и правила судьи вернутся к значениям из settings.py, а сохранённый пульт будет забыт.\n\nПродолжить?')) return;
+            if (!confirm('Полный сброс: тема, состав, правила общения, руководства модератора и правила судьи вернутся к значениям из settings.py, а сохранённый пульт будет забыт.\n\nПродолжить?')) return;
             fetch('/api/settings/reset', {
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
             })
@@ -899,6 +899,10 @@ HTML_TEMPLATE = """
                 renderCastEditor();
                 updateSidebarParticipants();
                 loadCast();
+                // Тема сбрасывается только здесь: показываем это сразу, а не
+                // оставляем в поле текст, которого на сервере уже нет
+                document.getElementById('topicInput').value = data.topic || '';
+                setTopicDisplay(data.topic || '');
                 // Открытый редактор показывает то, что сейчас на сервере: после
                 // сброса в его полях должен быть заводской текст, а не старый
                 const editor = document.getElementById('instructionsEditor');
@@ -1328,7 +1332,8 @@ HTML_TEMPLATE = """
             alert('Не удалось начать спектакль: ' + message);
         }
         
-        // «Новый спектакль»: сервер собирает новый состав, настройки роли остаются
+        // «Новый спектакль»: сервер собирает новый состав, настройки роли
+        // и тема остаются — сброс темы это полный сброс, а не новый состав
         function newShow() {
             stopPolling();
             debateRunning = false;
@@ -1339,12 +1344,19 @@ HTML_TEMPLATE = """
             document.getElementById('posts').innerHTML = '';
             document.getElementById('statusBar').style.display = 'none';
             document.getElementById('statusPlaceholder').style.display = 'block';
-            document.getElementById('topicInput').value = '';
-            setTopicDisplay('');
             setTurnState('hidden');
             fetch('/api/reset', {method: 'POST'})
                 .then(r => r.json())
-                .then(data => { if (data.participants) cast = data.participants; return loadCast(); })
+                .then(data => {
+                    if (data.participants) cast = data.participants;
+                    // Тему ставим ту, что осталась на сервере: её могли набрать
+                    // в поле, но ещё не применить — тогда в поле останется своё
+                    if (typeof data.topic === 'string' && data.topic.trim()) {
+                        document.getElementById('topicInput').value = data.topic;
+                        setTopicDisplay(data.topic);
+                    }
+                    return loadCast();
+                })
                 .then(() => { updateSidebarParticipants(); updatePanel(); })
                 .catch(err => console.error('Ошибка сброса:', err));
         }

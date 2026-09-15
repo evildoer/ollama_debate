@@ -638,6 +638,21 @@ BUGS = {
          "    show.save_theatre_settings()\n",
          ""),
     ],
+    "тема снова не сохраняется вместе с пультом": [
+        ("aitheatre/show.py",
+         '                "topic": session.topic or "",',
+         '                "topic": "",'),
+    ],
+    "«Новый спектакль» снова забывает тему": [
+        ("aitheatre/show.py",
+         "        self.scene = scene\n        self.topic = topic",
+         '        self.scene = scene\n        self.topic = ""'),
+    ],
+    "полный сброс снова оставляет тему прошлого спектакля": [
+        ("aitheatre/show.py",
+         '        self.topic = ""\n        self.static_instructions = []',
+         "        self.static_instructions = []"),
+    ],
     "кнопка полного сброса снова ведёт в никуда": [
         ("aitheatre/page.py",
          "            fetch('/api/settings/reset', {",

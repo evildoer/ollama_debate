@@ -27,8 +27,8 @@ from . import tooltext
 def load_theatre_settings():
     """
     Возвращает режиссёрский пульт, сохранённый в прошлых запусках: состав
-    целиком (имена, аватары, модели, роли, числа и личные инструкции) и правила —
-    общие правила общения, руководства модератора и правила судьи.
+    целиком (имена, аватары, модели, роли, числа и личные инструкции)    тему, а из правил — общие правила общения, руководства модератора и правила
+    судьи.
 
     Так перезапуск приложения возвращает режиссёра к прежнему спектаклю, только
     с чистой историей: настроенное не приходится собирать заново. Файл может быть
@@ -40,6 +40,10 @@ def load_theatre_settings():
             data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 return
+            topic = data.get("topic")
+            if isinstance(topic, str) and topic.strip():
+                session.topic = topic
+                print(f"🎯 Загружена сохранённая тема: {topic.splitlines()[0][:60]}")
             _load_saved_instructions(data)
             cast = sanitize_cast(data.get("cast"))
             if cast:
@@ -89,6 +93,9 @@ def save_theatre_settings():
         settings.SETTINGS_FILE.write_text(
             json.dumps({
                 "version": 2,
+                # Тема тоже режиссёрская настройка: придумывать её заново каждый
+                # запуск — работа, а не часть спектакля
+                "topic": session.topic or "",
                 "judge_rules": list(session.judge_rules or []),
                 "static_instructions": list(session.static_instructions or []),
                 "moderator_guidelines": list(session.moderator_guidelines or []),
@@ -555,15 +562,14 @@ class DebateSession:
     def reset_to_defaults(self):
         """«Полный сброс»: весь пульт заново из настроек проекта.
 
-        Состав, общие правила общения, руководства модератора и правила судьи
-        возвращаются к значениям из settings.py — ровно так, как это выглядит
-        при первом запуске с пустой папкой экземпляра. Сохранённый пульт при этом
-        забывается (см. forget_theatre_settings): иначе следующий запуск вернул
-        бы то, от чего режиссёр только что отказался.
-
-        Тема не трогается: она набирается в пульте, а не лежит в настройках,
-        и отменять набранное заодно со сбросом состава — сюрприз.
+        Тема, состав, общие правила общения, руководства модератора и правила
+        судьи возвращаются к значениям из settings.py (у темы это пустота —
+        в файле настроек её нет) — ровно так, как это выглядит при первом запуске
+        с пустой папкой экземпляра. Сохранённый пульт при этом забывается (см.
+        forget_theatre_settings): иначе следующий запуск вернул бы то, от чего
+        режиссёр только что отказался.
         """
+        self.topic = ""
         self.static_instructions = []
         self.judge_rules = list(settings.DEFAULT_JUDGE_RULES)
         self.moderator_guidelines = []
@@ -622,10 +628,13 @@ class DebateSession:
         self.sync_cast_media()
 
     def new_show(self):
-        """«Новый спектакль»: новые имена и характеры, настройки и сцена — те же."""
+        """«Новый спектакль»: новые имена и характеры, настройки, сцена и тема — те же."""
         guidelines = list(self.moderator_guidelines)
         judge_rules = list(self.judge_rules)
         static_instructions = list(self.static_instructions)
+        # Тема переживает и «Новый спектакль»: сброс темы — это полный сброс,
+        # а не новый состав той же труппы
+        topic = self.topic
         # Сцена — то, что режиссёр настроил руками, поэтому её и переживает:
         # иначе «Новый спектакль» возвращал бы состав из файла, а не тот,
         # который только что собрали в пульте
@@ -635,6 +644,7 @@ class DebateSession:
         self.judge_rules = judge_rules
         self.static_instructions = static_instructions
         self.scene = scene
+        self.topic = topic
         self.load_new_cast()
 
     # ------------------------------------------------------------

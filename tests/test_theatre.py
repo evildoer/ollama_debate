@@ -1193,6 +1193,14 @@ class TestSceneEditing(unittest.TestCase):
                      if p["display_name"] == captain)
         self.assertEqual(scene[where]["instruction"], "Держись образа капитана")
 
+    def test_a_new_show_keeps_the_topic(self):
+        """Тема — режиссёрская настройка: её сбрасывает полный сброс, а не новый состав."""
+        self.session.topic = "Кто виноват в пробках"
+
+        self.session.new_show()
+
+        self.assertEqual(self.session.topic, "Кто виноват в пробках")
+
     def test_a_new_show_keeps_personal_instructions(self):
         """Инструкция — часть места, а не имени: переименование её не теряет."""
         self.session.runtime_participants[0]["instruction"] = "Держись образа капитана"
@@ -1536,6 +1544,16 @@ class TestScenePersistence(unittest.TestCase):
         self.assertEqual(data["moderator_guidelines"], ["Руководство"])
         self.assertEqual([p["display_name"] for p in data["cast"]],
                          [p["display_name"] for p in self.session.runtime_participants])
+
+    def test_the_topic_comes_back_after_a_restart(self):
+        """Придумывать тему заново каждый запуск — работа, а не часть спектакля."""
+        self.session.topic = "Почему небо синее"
+        show.save_theatre_settings()
+
+        self.session.topic = ""
+        show.load_theatre_settings()
+
+        self.assertEqual(self.session.topic, "Почему небо синее")
 
     def test_the_editor_comes_back_after_a_restart(self):
         """Раньше переживали перезапуск только правила судьи — теперь всё."""
@@ -3687,6 +3705,30 @@ class TestRoutes(unittest.TestCase):
         self.assertEqual(shown["static_instructions"], settings.DEFAULT_STATIC_INSTRUCTIONS)
         self.assertEqual(shown["moderator_messages"], [])
         self.assertEqual(shown["judge_rules"], settings.DEFAULT_JUDGE_RULES)
+
+    def test_the_topic_is_saved_from_the_console(self):
+        """Тему можно набрать в поле и не начинать спектакль — сохранится она всё равно."""
+        self.client.post("/api/moderator/topic", json={"topic": "Тема из пульта"})
+
+        data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(data["topic"], "Тема из пульта")
+
+    def test_a_new_show_returns_the_topic_it_kept(self):
+        self.client.post("/api/moderator/topic", json={"topic": "Тема"})
+
+        data = self.client.post("/api/reset", json={}).get_json()
+
+        self.assertEqual(data["topic"], "Тема")
+        self.assertEqual(self.session.topic, "Тема")
+
+    def test_the_full_reset_clears_the_topic(self):
+        """Тема сбрасывается только здесь: её нет ни в settings.py, ни в PARTICIPANTS."""
+        self.client.post("/api/moderator/topic", json={"topic": "Тема"})
+
+        data = self.client.post("/api/settings/reset", json={}).get_json()
+
+        self.assertEqual(self.session.topic, "")
+        self.assertEqual(data["topic"], "")
 
     def test_the_full_reset_forgets_the_saved_console(self):
         """Иначе следующий запуск вернул бы то, от чего только что отказались."""
