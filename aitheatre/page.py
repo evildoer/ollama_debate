@@ -121,6 +121,32 @@ HTML_TEMPLATE = """
         body.dark .post-thinking summary { color: #8c8c8c; }
         body.dark .post-sketch { border-left-color: #4a4030; }
         body.dark .post-sketch .thinking-hint { color: #7a7a7a; }
+        /* «Что уехало в модель»: снимок отправленного запроса — история, системный
+           промпт, круги поиска и что из истории выброшено. Рядом с мыслями
+           и наброском, но не про смысл реплики, а про счёт */
+        .post-prompt { border-left-color: #b8cfe0; font-style: normal; }
+        .post-prompt summary { color: #7d92a4; }
+        .post-prompt .prompt-body { white-space: normal; }
+        .prompt-line { font-size: 13px; line-height: 1.6; margin-bottom: 6px; color: #777777; }
+        .prompt-hint { font-size: 12px; color: #9a9a9a; }
+        .prompt-msg { margin: 12px 0 0 0; }
+        .prompt-msg-head { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #999999; }
+        .prompt-role { display: inline-block; padding: 1px 6px; margin-right: 6px; border-radius: 3px; background: #e8e8e8; color: #555555; }
+        .prompt-role-system { background: #ded3f0; }
+        .prompt-role-assistant { background: #dbead4; }
+        .prompt-tokens, .prompt-num { margin-left: 10px; }
+        .prompt-text { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; font-size: 13px; line-height: 1.55; margin: 6px 0 0 0; padding: 8px 10px; background: #ffffff; border: 1px solid #eeeeee; color: #333333; max-height: 340px; overflow: auto; }
+        .prompt-removed { font-size: 13px; line-height: 1.5; color: #999999; }
+        .prompt-removed b { color: #777777; }
+        body.dark .post-prompt { border-left-color: #35485c; }
+        body.dark .post-prompt summary { color: #8399ad; }
+        body.dark .prompt-line { color: #8a8a8a; }
+        body.dark .prompt-hint { color: #7a7a7a; }
+        body.dark .prompt-msg-head { color: #8c8c8c; }
+        body.dark .prompt-role { background: #2a2a2a; color: #b0b0b0; }
+        body.dark .prompt-text { background: #101010; border-color: #262626; color: #cccccc; }
+        body.dark .prompt-removed { color: #7a7a7a; }
+        body.dark .prompt-removed b { color: #9a9a9a; }
         /* Формулы: LaTeX от сервера, MathML от браузера */
         .post-text .math { font-size: 1.05em; }
         .post-text .math-block { display: block; margin: 14px 0; text-align: center; }
@@ -1591,6 +1617,103 @@ HTML_TEMPLATE = """
                 + `<div class="thinking-text">${escapeHtml(sketch)}</div></details>`;
         }
 
+        // «Что уехало в модель»: снимок запроса этого хода. В посте лежит только
+        // сводка (сколько сообщений и токенов, что обрезано), а сам текст
+        // подтягивается при раскрытии: снимок хода весит как сцена, и таскать
+        // его в ленте незачем. В раскрытом виде видно ровно то, что прочитала
+        // модель: системный промпт, история (чьим окном мерена) и что выброшено
+        function tokensText(n) {
+            return Number(n || 0).toLocaleString('ru-RU');
+        }
+
+        const WINDOW_WORDS = {cloud: 'окно облака', local: 'окно модели',
+                              unbounded: 'окно не ограничено (CLOUD_NUM_CTX = 0)'};
+        const ROLE_WORDS = {system: 'системный промпт', user: 'уехало как реплика',
+                            assistant: 'сказано самой моделью', tool: 'ответ поиска'};
+
+        function promptMessagesHtml(messages) {
+            return (messages || []).map((m, i) =>
+                `<div class="prompt-msg"><div class="prompt-msg-head">`
+                + `<span class="prompt-role prompt-role-${escapeHtml(m.role || 'user')}">${escapeHtml(m.role || 'user')}</span>`
+                // Имя системного сообщения — то же слово «system»: второй раз
+                // оно не нужно, а у остальных оно говорит, кто именно говорил
+                + `${(m.name && m.name !== m.role) ? escapeHtml(m.name) + ' · ' : ''}${ROLE_WORDS[m.role] || ''}`
+                + `<span class="prompt-tokens">${tokensText(m.tokens)} токенов</span>`
+                + `<span class="prompt-num">${i + 1}/${messages.length}</span></div>`
+                + `<pre class="prompt-text">${escapeHtml(m.content || '')}</pre></div>`).join('');
+        }
+
+        function promptRemovedHtml(removed) {
+            if (!removed || !removed.length) return '';
+            return removed.map(r =>
+                `<div class="prompt-removed">${escapeHtml(r.speaker || 'без имени')}`
+                + ` · ${tokensText(r.tokens)} токенов · ${escapeHtml(r.preview || '')}</div>`).join('');
+        }
+
+        function promptBodyHtml(data) {
+            const s = data.summary || {};
+            const b = data.budget || {};
+            const who = data.who || {};
+            const parts = [];
+            parts.push(`<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> · `
+                + `${escapeHtml(who.model || '')} · Акт ${who.round} · ${escapeHtml(who.time || '')}</div>`);
+            parts.push(`<div class="prompt-line"><b>${WINDOW_WORDS[b.kind] || 'окно модели'} ${tokensText(b.window)}</b>`
+                + ` · запас на ответ ${tokensText(b.reserve)} · служебный запас ${tokensText(b.safety)}`
+                + ` · на историю оставалось ${b.available === null ? 'без предела' : tokensText(b.available)}</div>`);
+            parts.push(`<div class="prompt-line">Всего уехало <b>${tokensText(s.tokens)}</b> токенов `
+                + `в ${s.messages} сообщ.; системный промпт — ${tokensText(b.system_tokens)}</div>`);
+            parts.push(`<div class="prompt-line">История сцены: <b>${tokensText(b.kept_tokens)}</b> токенов `
+                + `в ${b.messages_after} сообщ. (до обрезки — ${tokensText(b.history_tokens)} `
+                + `в ${b.messages_before})</div>`);
+            if (s.removed_messages) {
+                parts.push(`<div class="prompt-line">✂️ выброшено <b>${s.removed_messages}</b> сообщ. `
+                    + `(${tokensText(s.removed_tokens)} токенов) — самые ранние:</div>` + promptRemovedHtml(data.removed));
+            } else {
+                parts.push('<div class="prompt-line">✂️ обрезать не пришлось: история влезла целиком</div>');
+            }
+            if (s.extra_messages) {
+                parts.push(`<div class="prompt-line">🔍 ход дописал в запрос ещё <b>${s.extra_messages}</b> `
+                    + `сообщ. (${tokensText(s.extra_tokens)} токенов): результаты поиска уезжают к модели сверх истории</div>`);
+            }
+            const extra = (data.added || []).length
+                ? '<div class="prompt-line">🔍 а это дописано сверх истории — уже по ходу дела:</div>'
+                  + promptMessagesHtml(data.added)
+                : '';
+            return parts.join('') + promptMessagesHtml(data.messages) + extra;
+        }
+
+        function loadPromptBox(box) {
+            if (box.dataset.loaded === '1') return;
+            box.dataset.loaded = '1';
+            const body = box.querySelector('.prompt-body');
+            body.innerHTML = '<div class="prompt-hint">⏳ читаю снимок…</div>';
+            fetch(`/api/post/${box.dataset.postId}/prompt`, {cache: 'no-store'})
+                .then(r => r.json().then(data => {
+                    if (!r.ok) throw data;
+                    return data;
+                }))
+                .then(data => { body.innerHTML = promptBodyHtml(data); })
+                .catch(err => {
+                    // Неудача — не повод оставить блок пустым: его можно
+                    // раскрыть ещё раз и снова спросить сервер
+                    box.dataset.loaded = '';
+                    body.innerHTML = `<div class="prompt-hint">⚠️ ${escapeHtml((err && err.error) || 'снимок не читается')}</div>`;
+                });
+        }
+
+        function postPromptHtml(post) {
+            const info = post.prompt;
+            if (!info) return '';
+            const parts = [`${info.messages} сообщ.`, `${tokensText(info.tokens)} токенов`];
+            if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
+            if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
+            const hint = info.stored ? ''
+                : `<div class="prompt-hint">Снимок этого хода уже забыт: держатся последние несколько ходов.</div>`;
+            return `<details class="post-thinking post-prompt" data-post-id="${post.id}">`
+                + `<summary>📤 что уехало в модель · ${parts.join(' · ')}</summary>`
+                + hint + `<div class="prompt-body"></div></details>`;
+        }
+
         function addPost(post) {
             const postsDiv = document.getElementById('posts');
             // Черновик, чей ход уже закончился, уступает место настоящему посту:
@@ -1602,9 +1725,17 @@ HTML_TEMPLATE = """
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postThinkingHtml(post)}${postSketchHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postThinkingHtml(post)}${postSketchHtml(post)}${postPromptHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
+            // Снимок запроса спрашиваем только когда его открыли: событие toggle
+            // не всплывает, поэтому слушаем именно свой блок, а не ленту
+            const promptBox = postDiv.querySelector('.post-prompt');
+            if (promptBox) {
+                promptBox.addEventListener('toggle', () => {
+                    if (promptBox.open) loadPromptBox(promptBox);
+                });
+            }
             // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать
             // спектакль снизу вверх не приходится
             postsDiv.insertBefore(postDiv, postsDiv.firstChild);

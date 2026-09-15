@@ -396,6 +396,24 @@ def reset():
     print(f"🎭 Новый состав: {[p.get('display_name') for p in show.session.runtime_participants]}")
     return jsonify({"success": True, "participants": cast_payload()})
 
+@app.route('/api/post/<int:post_id>/prompt')
+def post_prompt(post_id):
+    """Что именно уехало в модель на ходу, которым сказана эта реплика.
+
+    Отдельным запросом, а не полем в самом посте: снимок хода весит как сцена,
+    и держать его в ленте — значит гонять мегабайты на каждой перерисовке ради
+    того, что открывают редко. Снимок и сам отдаётся не всегда: он живёт
+    в памяти и только у последних ходов (см. PROMPT_KEEP_TURNS).
+    """
+    payload = show.session.prompt_payload(post_id)
+    if payload is None:
+        return jsonify({"error": "снимок этого хода не сохранён: он живёт только "
+                                 "у последних ходов текущего запуска"}), 404
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route('/api/status')
 def status():
     last_post_count = max(0, request.args.get("lastPostCount", 0, type=int))

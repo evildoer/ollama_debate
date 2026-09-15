@@ -124,10 +124,35 @@ def _warn_about_paying_for_the_whole_scene(total_tokens: int) -> None:
           f"Для платного ключа лучше вернуть конечное окно в settings.py")
 
 
+def _message_speaker(msg: dict) -> str:
+    """Кто говорит в этом сообщении: поле name, а без него — роль."""
+    return str(msg.get("name") or msg.get("role") or "")
+
+
+def _message_preview(content: str, limit: int = 120) -> str:
+    """Начало сообщения одной строкой — для отчёта «что уехало в модель».
+
+    Обрезанный кусок истории нигде больше не показывается: в ленте его нет,
+    в памяти спектакля тоже. Если и здесь не оставить хотя бы начала, то
+    на вопрос «что именно выкинул обрезчик» ответить будет нечем.
+    """
+    flat = " ".join(str(content or "").split())
+    return flat if len(flat) <= limit else flat[:limit].rstrip() + "…"
+
+
 def trim_history_by_tokens(messages: list, system_prompt_tokens: int, model: str = "") -> list:
+    """Обрезает историю под окно говорящей модели (см. trim_history_with_report)."""
+    return trim_history_with_report(messages, system_prompt_tokens, model)[0]
+
+
+def trim_history_with_report(messages: list, system_prompt_tokens: int, model: str = "") -> tuple:
     """
     Обрезает историю сообщений на основе подсчёта токенов.
-    Возвращает обрезанный список сообщений.
+    Возвращает пару: (обрезанные сообщения, отчёт о том, что уехало).
+
+    Отчёт нужен потому, что на вопрос «почему модель не помнит начало сцены»
+    до сих пор отвечала только консоль, а смотреть на это хочется у самой
+    реплики: сколько истории было, чьим окном её мерили и что именно выброшено.
 
     Окно берётся у той модели, которая будет говорить (см.
     settings.context_budget): у облачного участника оно своё, у местного —
@@ -151,22 +176,39 @@ def trim_history_by_tokens(messages: list, system_prompt_tokens: int, model: str
     # Подсчитываем общие токены
     total_tokens = sum(tokens for _, tokens in messages_with_tokens)
 
+    report = {
+        "model": str(model or ""),
+        "window": num_ctx,
+        "reserve": num_predict,
+        "safety": settings.CONTEXT_SAFETY_MARGIN,
+        "system_tokens": system_prompt_tokens,
+        "cloud": str(model or "").startswith(settings.CLOUD_MODEL_PREFIX),
+        "unbounded": num_ctx <= 0,
+        "available": None,
+        "history_tokens": total_tokens,
+        "kept_tokens": total_tokens,
+        "messages_before": len(messages),
+        "messages_after": len(messages),
+        "removed": [],
+    }
+
     # Окно не ограничено (CLOUD_NUM_CTX = 0): история остаётся целой
     if num_ctx <= 0:
         print(f"  📊 История: {total_tokens} токенов (окно облака не ограничено) ✅")
         _warn_about_paying_for_the_whole_scene(total_tokens)
-        return messages
+        return messages, report
 
     # Вычисляем доступное пространство для истории
     available_tokens = max(
         0,
         num_ctx - num_predict - settings.CONTEXT_SAFETY_MARGIN - system_prompt_tokens
     )
+    report["available"] = available_tokens
 
     # Если вписываемся - возвращаем всё
     if total_tokens <= available_tokens:
         print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}{window_note}) ✅")
-        return messages
+        return messages, report
 
     # Обрезаем старые сообщения, пока не влезем
     print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}{window_note}) ⚠️ Обрезка...")
@@ -185,4 +227,11 @@ def trim_history_by_tokens(messages: list, system_prompt_tokens: int, model: str
     removed_count = len(messages) - len(trimmed_messages)
     print(f"  ✂️  Удалено {removed_count} сообщений, осталось {len(trimmed_messages)} ({current_tokens} токенов)")
     
-    return trimmed_messages
+    report["kept_tokens"] = current_tokens
+    report["messages_after"] = len(trimmed_messages)
+    report["removed"] = [
+        {"speaker": _message_speaker(msg), "role": msg.get("role", ""),
+         "tokens": tokens, "preview": _message_preview(msg.get("content", ""))}
+        for msg, tokens in messages_with_tokens[:removed_count]
+    ]
+    return trimmed_messages, report

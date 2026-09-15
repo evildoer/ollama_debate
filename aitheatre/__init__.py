@@ -68,6 +68,7 @@ from .text import (
     estimate_tokens,
     markdown_to_html,
     trim_history_by_tokens,
+    trim_history_with_report,
 )
 
 # Грим и костюмы
@@ -114,6 +115,7 @@ __all__ = [
     "OPTIONS", "PARTICIPANTS", "PER_PARTICIPANT_OPTION_KEYS", "RANDOMIZE_CHARACTERS",
     "SETTINGS_FILE", "THINK_MODES", "VRAM_SAFE_CTX_STEP",
     "estimate_tokens", "markdown_to_html", "trim_history_by_tokens",
+    "trim_history_with_report",
     "generate_avatar_for_participant", "sanitize_avatar_name",
     "ask_model", "check_models_available", "check_vram_fit", "estimated_kv_bytes",
     "fetch_model_parameters", "fetch_ollama_models", "load_vram_measurements",

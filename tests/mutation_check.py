@@ -531,10 +531,10 @@ BUGS = {
     ],
     "говорящую модель снова не передают в обрезку истории": [
         ("aitheatre/show.py",
-         "        trimmed = text.trim_history_by_tokens(\n"
+         "        trimmed, trim_report = text.trim_history_with_report(\n"
          "            history_messages, text.estimate_tokens(system_prompt),\n"
          "            model=participant.get(\"model\", \"\"))",
-         "        trimmed = text.trim_history_by_tokens(\n"
+         "        trimmed, trim_report = text.trim_history_with_report(\n"
          "            history_messages, text.estimate_tokens(system_prompt),\n"
          '            model="")'),
     ],
@@ -567,6 +567,41 @@ BUGS = {
         ("aitheatre/show.py",
          "    dropped = trim_thinking_log()",
          "    dropped = 0"),
+    ],
+    "снимок запроса снимают в конце хода, а не в начале": [
+        ("aitheatre/show.py",
+         "        sent = copy.deepcopy(messages)",
+         "        sent = messages"),
+    ],
+    "сводка снимка не доезжает до поста": [
+        ("aitheatre/show.py",
+         '        "prompt": (prompt or {}).get("summary"),',
+         '        "prompt": None,'),
+    ],
+    "забытый снимок не говорит об этом в старом посте": [
+        ("aitheatre/show.py",
+         '                forgotten["summary"]["stored"] = False',
+         '                forgotten["summary"]["stored"] = True'),
+    ],
+    "снимки запросов запоминаются без конца": [
+        ("aitheatre/show.py",
+         "        overflow = len(self.prompt_log) - max(0, int(settings.PROMPT_KEEP_TURNS))",
+         "        overflow = 0"),
+    ],
+    "из отчёта обрезки пропадает, что именно выброшено": [
+        ("aitheatre/text.py",
+         "        for msg, tokens in messages_with_tokens[:removed_count]",
+         "        for msg, tokens in []"),
+    ],
+    "блок «что уехало» раскрывается сам, без клика": [
+        ("aitheatre/page.py",
+         '            return `<details class="post-thinking post-prompt" data-post-id="${post.id}">`',
+         '            return `<details open class="post-thinking post-prompt" data-post-id="${post.id}">`'),
+    ],
+    "маршрут снимка переименовали, а страница спрашивает старый": [
+        ("aitheatre/web.py",
+         "@app.route('/api/post/<int:post_id>/prompt')",
+         "@app.route('/api/post/<int:post_id>/prompt_text')"),
     ],
 }
 

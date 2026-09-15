@@ -99,7 +99,7 @@ CLOUD_DEFAULTS = (
     ("CLOUD_STREAM", True), ("CLOUD_SHOW_THINKING", True),
     ("CLOUD_LIMIT_PARAMS", True), ("CLOUD_NUM_CTX", 32768),
     ("CLOUD_MAX_TOKENS", 0), ("CLOUD_TURN_LIMIT", 120),
-    ("THINKING_KEEP_SHOWS", 20),
+    ("THINKING_KEEP_SHOWS", 20), ("PROMPT_KEEP_TURNS", 40),
 )
 
 
@@ -1868,6 +1868,185 @@ class TestCloudContextWindow(unittest.TestCase):
         printed = " ".join(str(call.args[0]) for call in fake_print.call_args_list if call.args)
         self.assertIn("из окна облака", printed,
                       "по строке в логе должно быть видно, чьё это окно")
+
+
+class TestPromptSnapshot(unittest.TestCase):
+    """Снимок запроса: что именно уехало в модель на этом ходу.
+
+    В ленте виден только ответ, а вопрос «почему модель не помнит начало сцены»
+    до сих пор требовал лезть в консоль — и там оставалась одна строка «доступно:
+    6935», по которой ничего не понять. Теперь у реплики есть снимок её запроса:
+    история целиком, чьим окном она мерена, что выброшено и какой системный
+    промпт уехал.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.session.topic = "Проверочная тема"
+
+    @staticmethod
+    def _participant(model: str = "fake-model") -> dict:
+        return {"display_name": "Проверка", "model": model, "gender": "male",
+                "instruction": "ГОВОРИ КОРОТКО"}
+
+    def _turn(self, participant: dict = None, reply: str = "Вот ответ.",
+              extra: list = None, search_count: int = 0):
+        """Один ход с подделанным шлюзом. extra — то, что ход дописывает в запрос."""
+        participant = participant or self._participant()
+
+        def answer(model, messages, participant_name, **kwargs):
+            # Настоящий ask_model дописывает в этот же список результаты поиска
+            if extra:
+                messages.extend(copy.deepcopy(extra))
+            return reply, search_count, ["проверочный запрос"] * search_count
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            self.session.handle_ai_turn(participant, 1)
+        return self.session.posts[-1]
+
+    def test_the_trim_report_names_the_window_and_what_was_dropped(self):
+        messages = [{"role": "user", "name": f"говорун{i}",
+                     "content": "реплика сцены " * 900} for i in range(4)]
+        trimmed, report = text.trim_history_with_report(
+            messages, 100, model="cloud:qwen/qwen3.8-flash")
+
+        self.assertEqual(report["window"], settings.CLOUD_NUM_CTX)
+        self.assertTrue(report["cloud"], "окно должно быть облачным — по говорящей модели")
+        self.assertLess(len(trimmed), len(messages))
+        self.assertEqual(report["messages_before"], len(messages))
+        self.assertEqual(report["messages_after"], len(trimmed))
+        self.assertEqual(report["messages_after"] + len(report["removed"]), len(messages),
+                         "выброшенное должно быть перечислено, а не потеряно молча")
+        self.assertTrue(report["removed"], "часть истории не влезла — об этом надо сказать")
+        early = report["removed"][0]
+        self.assertIn("говорун", early["speaker"])
+        self.assertGreater(early["tokens"], 0)
+        self.assertTrue(early["preview"], "у выброшенного должно остаться начало")
+        self.assertNotIn("\n", early["preview"], "в отчёте начало идёт одной строкой")
+        self.assertEqual(report["kept_tokens"],
+                         sum(text.estimate_tokens(m["content"]) for m in trimmed))
+
+    def test_a_local_window_is_not_called_a_cloud_one(self):
+        trimmed, report = text.trim_history_with_report(
+            [{"role": "user", "content": "привет"}], 10, model="qwen3:8b")
+
+        self.assertEqual(report["window"], settings.OPTIONS["num_ctx"])
+        self.assertFalse(report["cloud"])
+        self.assertFalse(report["unbounded"])
+        self.assertEqual(report["removed"], [], "обрезки не было — и выброшенных нет")
+        self.assertEqual(report["messages_after"], len(trimmed))
+
+    def test_the_post_carries_the_request_that_was_sent(self):
+        """У реплики модели есть снимок — и в нём ровно то, что читала модель."""
+        post = self._turn()
+
+        self.assertIsNotNone(post["prompt"], "у реплики нет снимка запроса")
+        payload = self.session.prompt_payload(post["id"])
+        self.assertIsNotNone(payload)
+        self.assertEqual(post["prompt"]["messages"], len(payload["messages"]))
+        self.assertEqual(payload["summary"]["tokens"],
+                         sum(m["tokens"] for m in payload["messages"]))
+
+        system = payload["messages"][0]
+        self.assertEqual(system["role"], "system")
+        self.assertIn("ГОВОРИ КОРОТКО", system["content"],
+                      "личная инструкция — тоже часть отправленного")
+        self.assertIn("Проверочная тема", system["content"], "тема уезжает в системном промпте")
+        self.assertEqual(payload["budget"]["system_tokens"], system["tokens"])
+        self.assertEqual(payload["who"]["model"], "fake-model")
+        self.assertEqual(payload["who"]["name"], "Проверка")
+
+    def test_the_snapshot_is_taken_before_the_search_rounds(self):
+        """Результаты поиска дописываются в тот же запрос уже по ходу дела.
+
+        Снимок должен остаться тем, с чего ход начался: иначе «что уехало»
+        показывало бы конец хода вместо начала, и по нему нельзя было бы понять,
+        что именно модель прочитала перед первым словом.
+        """
+        post = self._turn(extra=[{"role": "tool", "name": "search",
+                                  "content": "НАЙДЕННОЕ-ПОЗЖЕ"}], search_count=1)
+
+        payload = self.session.prompt_payload(post["id"])
+        sent = " ".join(m["content"] for m in payload["messages"])
+        self.assertNotIn("НАЙДЕННОЕ-ПОЗЖЕ", sent, "снимок снят уже после поиска")
+        self.assertIn("НАЙДЕННОЕ-ПОЗЖЕ",
+                      " ".join(m["content"] for m in payload["added"]),
+                      "дописанное ходом должно быть видно отдельно")
+        self.assertEqual(payload["summary"]["extra_messages"], 1)
+        self.assertGreater(payload["summary"]["extra_tokens"], 0)
+        self.assertEqual(payload["summary"]["search_rounds"], 1)
+
+    def test_an_old_snapshot_is_forgotten_and_the_post_says_so(self):
+        """Снимки живут в памяти только у последних ходов — и не молчат об этом.
+
+        Если бы блок у старой реплики просто переставал раскрываться, это
+        выглядело бы поломкой. Пост говорит сам, что снимок забыт.
+        """
+        with mock.patch.object(settings, "PROMPT_KEEP_TURNS", 2):
+            for _ in range(3):
+                self._turn()
+
+        first, last = self.session.posts[0], self.session.posts[-1]
+        self.assertFalse(first["prompt"]["stored"],
+                         "старый пост молчит о том, что снимок забыт")
+        self.assertIsNone(self.session.prompt_payload(first["id"]))
+        self.assertIsNotNone(self.session.prompt_payload(last["id"]))
+        self.assertTrue(last["prompt"]["stored"])
+        self.assertEqual(len(self.session.prompt_log), 2,
+                         "держим ровно столько снимков, сколько велено")
+
+    def test_a_human_reply_has_nothing_to_show(self):
+        post = show.create_post("Живой", "human", "сказано руками", 1)
+        self.assertIsNone(post["prompt"], "человек ничего никуда не отправлял")
+
+    def test_the_page_asks_for_the_snapshot_by_the_same_route(self):
+        routes = {rule.rule for rule in web_app.app.url_map.iter_rules()}
+        self.assertIn("/api/post/<int:post_id>/prompt", routes)
+        self.assertIn("/api/post/${box.dataset.postId}/prompt", page.HTML_TEMPLATE,
+                      "страница спрашивает снимок не по тому адресу, что есть у сервера")
+
+
+class TestPromptPanel(unittest.TestCase):
+    """Блок «что уехало в модель» на странице: свёрнут, тёмен и по требованию."""
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+
+    def block(self) -> str:
+        start = self.page.index("function postPromptHtml(")
+        return self.page[start:self.page.index("function addPost(", start)]
+
+    def test_the_block_appears_only_where_there_is_a_snapshot(self):
+        body = self.block()
+        self.assertIn("post.prompt", body)
+        self.assertIn("return ''", body, "без снимка блока быть не должно")
+
+    def test_the_block_is_collapsed_and_the_text_is_fetched_on_demand(self):
+        body = self.block()
+        self.assertIn('<details class="post-thinking post-prompt"', body)
+        self.assertNotIn('<details open', body, "снимок хода весит как сцена — пусть ждёт клика")
+        self.assertIn("data-post-id", body)
+        self.assertIn("${postPromptHtml(post)}", self.page, "блок не попал в саму реплику")
+        start = self.page.index("function addPost(")
+        add_body = self.page[start:self.page.index("function upsertStreamPost(", start)]
+        self.assertIn("loadPromptBox(promptBox)", add_body,
+                      "снимок нечем подгрузить — блок останется пустым")
+
+    def test_the_snapshot_has_its_own_colour_in_both_themes(self):
+        self.assertIn(".post-prompt {", self.page)
+        self.assertIn("body.dark .post-prompt", self.page)
+        self.assertIn("body.dark .prompt-text", self.page,
+                      "белое поле на тёмной сцене уже случалось — у текста должна быть своя темнота")
+
+    def test_the_body_names_the_window_and_the_dropped_messages(self):
+        start = self.page.index("function promptBodyHtml(")
+        body = self.page[start:self.page.index("function loadPromptBox(", start)]
+        self.assertIn("WINDOW_WORDS", body, "должно быть видно, чьим окном мерили")
+        self.assertIn("removed_messages", body)
+        self.assertIn("promptRemovedHtml(data.removed)", body)
+        self.assertIn("promptMessagesHtml(data.messages)", body,
+                      "надо показать и системный промпт, и историю")
 
 
 # ---------------------------------------------------------------- посты

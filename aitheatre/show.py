@@ -9,6 +9,7 @@
 модуль ничего не знает про Flask и Socket.IO.
 """
 
+import copy
 import json
 import random
 import re
@@ -144,11 +145,88 @@ def save_thinking_entry(post: dict):
     except Exception as e:
         print(f"  ⚠️  Не сохраняются размышления в {settings.THINKING_FILE.name}: {e}")
 
+def _message_view(msg: dict) -> dict:
+    """Сообщение в том виде, в каком его показывают: роль, говорящий, вес и текст.
+
+    Токены считаются тем же счётом, каким приложение меряет историю: строка
+    «уехало столько-то» должна сходиться с тем, чем резали, иначе она врёт.
+    """
+    content = msg.get("content", "") or ""
+    return {
+        "role": str(msg.get("role", "") or ""),
+        "name": str(msg.get("name", "") or ""),
+        "tokens": text.estimate_tokens(content),
+        "content": content,
+    }
+
+
+def build_prompt_payload(participant: dict, round_num: int, sent: list, added: list,
+                         trim_report: dict, topic: str = "", search_count: int = 0) -> dict:
+    """Снимок того, что уехало в модель на этом ходу.
+
+    В ленте видно только ответ, а сколько истории к нему приложено, чьим окном
+    она мерена и что из неё выброшено — не было видно нигде: это жило в консоли,
+    то есть уходило вместе с ней. Здесь это лежит рядом с репликой.
+
+    Сам снимок весит как сцена (десятки килобайт на ход), поэтому в посте
+    остаётся его сводка, а текст уходит странице отдельным запросом — когда
+    зритель блок раскроет (см. /api/post/<id>/prompt).
+    """
+    messages = [_message_view(m) for m in sent]
+    extra = [_message_view(m) for m in added]
+    removed = list(trim_report.get("removed") or [])
+    window = int(trim_report.get("window") or 0)
+    summary = {
+        "stored": True,
+        "messages": len(messages),
+        "tokens": sum(m["tokens"] for m in messages),
+        "window": window,
+        # Чьё окно мерило историю: у облачного участника оно своё, а «не ограничено»
+        # — это CLOUD_NUM_CTX = 0, то есть счёт без предела
+        "window_kind": ("unbounded" if trim_report.get("unbounded")
+                        else "cloud" if trim_report.get("cloud") else "local"),
+        "removed_messages": len(removed),
+        "removed_tokens": sum(int(r.get("tokens") or 0) for r in removed),
+        # Что ход дописал в запрос уже на своих кругах (поиск и его результаты):
+        # реплик там нет, а токены за них платятся — и знать об этом стоит
+        "extra_messages": len(extra),
+        "extra_tokens": sum(m["tokens"] for m in extra),
+        "search_rounds": int(search_count or 0),
+    }
+    return {
+        "summary": summary,
+        "who": {
+            "name": participant.get("display_name", ""),
+            "model": participant.get("model", ""),
+            "role": role_of(participant.get("is_moderator", False),
+                            participant.get("is_judge", False)),
+            "round": round_num,
+            "topic": topic or "",
+            "time": time.strftime("%H:%M"),
+        },
+        "budget": {
+            "window": window,
+            "kind": summary["window_kind"],
+            "reserve": int(trim_report.get("reserve") or 0),
+            "safety": int(trim_report.get("safety") or 0),
+            "system_tokens": int(trim_report.get("system_tokens") or 0),
+            "available": trim_report.get("available"),
+            "history_tokens": int(trim_report.get("history_tokens") or 0),
+            "kept_tokens": int(trim_report.get("kept_tokens") or 0),
+            "messages_before": int(trim_report.get("messages_before") or len(messages)),
+            "messages_after": int(trim_report.get("messages_after") or len(messages)),
+        },
+        "messages": messages,
+        "added": extra,
+        "removed": removed,
+    }
+
+
 def create_post(display_name: str, model_used: str, content: str, round_num: int, 
                 avatar_url: str = None, avatar_emoji: str = None,
                 search_count: int = 0, search_queries: list = None,
                 role: str = "participant", gender: str = "male",
-                thinking: str = "", sketch: str = "") -> dict:
+                thinking: str = "", sketch: str = "", prompt: dict = None) -> dict:
     """Единая функция создания поста для любого участника (human или AI)"""
     if search_queries is None:
         search_queries = []
@@ -185,6 +263,9 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "timestamp": time.strftime("%H:%M"),
         "search_count": search_count,
         "search_queries": search_queries,
+        # Что именно уехало в модель на этом ходу: в посте — только сводка,
+        # сам снимок живёт в памяти сессии (см. DebateSession.prompt_payload)
+        "prompt": (prompt or {}).get("summary"),
         "role": role,
         "role_icon": role_icons.get(role, "🎭"),
         "role_name": role_names.get(role, "Участник"),
@@ -378,6 +459,9 @@ class DebateSession:
         self.moderator_finished = False
         self.runtime_participants = []
         self.conversation_history = []
+        # Снимки запросов по номеру реплики: что именно уехало в модель
+        self.prompt_log = {}
+        self.prompt_forget_warned = False
         # Сцена: места состава без имён, аватаров и личных инструкций — роли,
         # модели, порядок и числа. None значит «своей сцены нет»: места берутся
         # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
@@ -457,6 +541,8 @@ class DebateSession:
         self.moderator_message = None
         self.moderator_finished = False
         self.conversation_history = []
+        # Новый спектакль — новые реплики: снимки прежних ходов к ним не подходят
+        self.prompt_log = {}
         self.sync_cast_media()
 
     def new_show(self):
@@ -482,7 +568,7 @@ class DebateSession:
     def add_post(self, display_name, model_used, content, round_num,
                  search_count=0, search_queries=None,
                  is_moderator=False, is_judge=False, gender="male", thinking="",
-                 sketch=""):
+                 sketch="", prompt=None):
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
 
@@ -490,7 +576,7 @@ class DebateSession:
 
         post = create_post(display_name, model_used, content, round_num,
                           avatar_url, avatar_emoji, search_count, search_queries, role,
-                          gender, thinking, sketch)
+                          gender, thinking, sketch, prompt)
         self.posts.append(post)
 
         if content.strip():
@@ -506,6 +592,36 @@ class DebateSession:
         # стенограмма, и её читают после занавеса, а не посреди разговора
         save_thinking_entry(post)
         return post
+
+    # ------------------------------------------------------------
+    # Снимки запросов: что именно уехало в модель
+    # ------------------------------------------------------------
+
+    def remember_prompt(self, post_id: int, payload: dict) -> None:
+        """Запомнить снимок запроса этого хода, забыв самые старые снимки.
+
+        Снимок живёт в памяти, а не в файле: один ход весит как сама сцена,
+        а через сотню ходов это уже десятки мегабайт — при том, что после
+        перезапуска приложения посты исчезают вместе со снимками, и хранить
+        их дольше просто не для кого (см. PROMPT_KEEP_TURNS).
+        """
+        self.prompt_log[post_id] = payload
+        overflow = len(self.prompt_log) - max(0, int(settings.PROMPT_KEEP_TURNS))
+        for old_id in list(self.prompt_log)[:max(0, overflow)]:
+            forgotten = self.prompt_log.pop(old_id, None)
+            # Сводка в посте и снимок — один и тот же словарь: пост сразу честно
+            # говорит, что раскрывать больше нечего. Стереть блок молча нельзя:
+            # «открыть и посмотреть» — это ровно то, зачем блок и делался
+            if forgotten:
+                forgotten["summary"]["stored"] = False
+        if overflow > 0 and not self.prompt_forget_warned:
+            self.prompt_forget_warned = True
+            print(f"  🗂  Снимки запросов: держим последние {settings.PROMPT_KEEP_TURNS}, "
+                  f"старые забываются — в старых репликах блок скажет об этом сам")
+
+    def prompt_payload(self, post_id: int) -> dict:
+        """Снимок запроса по номеру реплики (None — снимка нет и уже не будет)."""
+        return self.prompt_log.get(int(post_id))
 
     def current_participant_role(self) -> str:
         """Роль того, кто сейчас говорит: пустая строка, "moderator" или "judge".
@@ -718,7 +834,15 @@ class DebateSession:
     # Сборка сообщений для модели
     # ------------------------------------------------------------
 
-    def build_messages_for_ai(self, participant: dict, round_num: int) -> list:
+    def build_messages_for_ai(self, participant: dict, round_num: int,
+                              report: dict = None) -> list:
+        """Сообщения для этой модели на этом ходу.
+
+        report — необязательная посуда: если её передали, в неё ляжет отчёт
+        обрезки истории (чьё окно, сколько было и что выброшено). Так снимок
+        «что уехало в модель» получается из тех же чисел, которыми история
+        и резалась, а не из второго, отдельного расчёта.
+        """
         name = participant.get("display_name", "")
         name_norm = name.lower().replace(" ", "_")
         is_judge = participant.get("is_judge", False)
@@ -733,10 +857,12 @@ class DebateSession:
             history = self._get_history_for(participant, mode="participants_only",
                                             round_num=round_num)
             history_messages = self._format_history(name, history)
-            trimmed = text.trim_history_by_tokens(
+            trimmed, trim_report = text.trim_history_with_report(
                 history_messages, text.estimate_tokens(system_prompt),
                 model=participant.get("model", ""))
             messages.extend(trimmed)
+            if report is not None:
+                report.update(trim_report)
 
             if trimmed:
                 task = ("оцени только текущий акт — то, что сказано с прошлого вердикта. "
@@ -764,10 +890,12 @@ class DebateSession:
         history_messages = self._format_history(name, history)
         # Окно — той модели, которая будет говорить: у облачного оно своё,
         # иначе история сцены режется по олламовским 7 тысячам токенов
-        trimmed = text.trim_history_by_tokens(
+        trimmed, trim_report = text.trim_history_with_report(
             history_messages, text.estimate_tokens(system_prompt),
             model=participant.get("model", ""))
         messages.extend(trimmed)
+        if report is not None:
+            report.update(trim_report)
 
         participant_posts = [
             p for p in self.conversation_history
@@ -835,7 +963,14 @@ class DebateSession:
 
     def handle_ai_turn(self, participant: dict, round_num: int, on_draft=None) -> tuple:
         self.current_action = "thinking"
-        messages = self.build_messages_for_ai(participant, round_num)
+        # Отчёт обрезки приходит из той же сборки сообщений, что и сами
+        # сообщения: отдельного пересчёта для показа нет
+        trim_report = {}
+        messages = self.build_messages_for_ai(participant, round_num, report=trim_report)
+        # Снимок делается ДО хода и копией: ask_model дописывает в этот же список
+        # результаты поиска прямо на месте, и к концу хода «что уехало» было бы
+        # уже не тем, с чего ход начался
+        sent = copy.deepcopy(messages)
 
         # Черновик реплики: если спектакль умеет показывать её по кускам, текст
         # растёт в ленте, пока модель говорит (у местных моделей порций не будет —
@@ -860,7 +995,13 @@ class DebateSession:
             if draft is not None:
                 draft.finish()
 
-        self.add_post(
+        # Что ход дописал в запрос уже на своих кругах: реплик там нет, но токены
+        # за них платятся — и в снимке это должно быть видно отдельной строкой
+        prompt = build_prompt_payload(
+            participant, round_num, sent, messages[len(sent):], trim_report,
+            topic=self.topic, search_count=search_count)
+
+        post = self.add_post(
             display_name=participant["display_name"],
             model_used=participant["model"],
             content=response,
@@ -879,7 +1020,11 @@ class DebateSession:
             # (обычно — чтобы сначала поискать): тоже свёрнутым блоком, чтобы
             # зритель мог дочитать то, что мелькнуло в ленте и пропало
             sketch=draft.sketch if draft else "",
+            # А это снимок отправленного запроса: у этой реплики его можно
+            # раскрыть и посмотреть, что именно прочитала модель
+            prompt=prompt,
         )
+        self.remember_prompt(post["id"], prompt)
         self.current_action = None
         time.sleep(0.5)
         return response, search_count, search_queries
