@@ -128,8 +128,9 @@ HTML_TEMPLATE = """
         .post-prompt summary { color: #7d92a4; }
         .post-prompt .prompt-body { white-space: normal; }
         .prompt-line { font-size: 13px; line-height: 1.6; margin-bottom: 6px; color: #777777; }
-        /* Шаг хода — запрос к модели или поиск: своя строка, чтобы хронология читалась сверху вниз */
+        /* Шаг хода — запрос к модели, поиск или размышления: своя строка, чтобы хронология читалась сверху вниз */
         .prompt-step { font-size: 13px; line-height: 1.6; margin: 8px 0 0 0; color: #555555; }
+        .prompt-clock { font-family: Consolas, monospace; font-size: 12px; color: #9a9a9a; margin-right: 4px; }
         .prompt-hint { font-size: 12px; color: #9a9a9a; }
         .prompt-msg { margin: 12px 0 0 0; }
         .prompt-msg-head { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #999999; }
@@ -144,6 +145,7 @@ HTML_TEMPLATE = """
         body.dark .post-prompt summary { color: #8399ad; }
         body.dark .prompt-line { color: #8a8a8a; }
         body.dark .prompt-step { color: #b0b0b0; }
+        body.dark .prompt-clock { color: #7a7a7a; }
         body.dark .prompt-hint { color: #7a7a7a; }
         body.dark .prompt-msg-head { color: #8c8c8c; }
         body.dark .prompt-role { background: #2a2a2a; color: #b0b0b0; }
@@ -1638,13 +1640,26 @@ HTML_TEMPLATE = """
         // Один запрос хода одной строкой: здесь и объясняется, что значит
         // «1 431 + 1 246». Вход — то, что уехало (промпт, история, найденное),
         // вывод — то, что вернул вендор, вместе с оплаченными размышлениями
+        // Когда событие случилось: начало и конец — с тысячными долями. Без времени
+        // в хронологии нельзя ответить на «чем модель занималась две минуты»
+        function stepClock(step) {
+            const start = step.clock || '';
+            const end = step.clock_end || '';
+            if (!start) return '';
+            return `${start}${end && end !== start ? ' → ' + end : ''} · `;
+        }
+
         function turnAskText(step) {
-            if (step.error) return `отказ — ${escapeHtml(step.error)}`;
+            if (step.error) return `не прошёл — ${escapeHtml(step.error)}`;
             const parts = [];
             if (step.tokens_in === undefined && step.tokens_out === undefined) {
                 parts.push('числа токенов вендор не сообщил');
+                if (step.tokens_in_est) parts.push(`на глаз вход ≈${tokensText(step.tokens_in_est)} токенов`);
             } else {
-                parts.push(`вход ${tokensText(step.tokens_in)} → вывод ${tokensText(step.tokens_out)} токенов`);
+                // Рядом со числом вендора — своя оценка: по ней видно, сколько
+                // уехало, и когда вендор чисел не дал
+                const estimate = step.tokens_in_est ? ` (на глаз ≈${tokensText(step.tokens_in_est)})` : '';
+                parts.push(`вход ${tokensText(step.tokens_in)}${estimate} → вывод ${tokensText(step.tokens_out)} токенов`);
             }
             if (step.reasoning_tokens) parts.push(`из них размышлений ${tokensText(step.reasoning_tokens)}`);
             if (step.finish_reason) parts.push(`конец: ${escapeHtml(step.finish_reason)}`);
@@ -1701,24 +1716,32 @@ HTML_TEMPLATE = """
                     ? `выброшено ${s.removed_messages} сообщ. (${tokensText(s.removed_tokens)} токенов)`
                     : 'обрезать не пришлось')
                 + `; системный промпт — ${tokensText(b.system_tokens)} токенов</div>`);
+            // Одна хронология на всё: запросы, размышления и поиски идут в том
+            // порядке, как случились, — со временем и весом. Отдельных разделов
+            // под поиск и размышления нет нарочно: те же данные дважды — это
+            // не полнота, а каша
             const steps = data.steps || [];
-            parts.push('<div class="prompt-line"><b>Ход по порядку:</b></div>');
+            parts.push('<div class="prompt-line"><b>Хронология хода</b> — события в том порядке, как шли:</div>');
             if (!steps.length) {
                 parts.push('<div class="prompt-step">шагов не записано: ход не оставил следов</div>');
             }
             steps.forEach(step => {
+                const clock = stepClock(step);
                 if (step.kind === 'ask') {
-                    parts.push(`<div class="prompt-step"><b>запрос ${step.n}</b> — ${turnAskText(step)}</div>`);
+                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span><b>запрос ${step.n}</b> — ${turnAskText(step)}</div>`);
                 } else if (step.kind === 'search') {
-                    parts.push(`<div class="prompt-step"><b>поиск ${step.n}</b> (лимит ${step.limit}): `
-                        + `«${escapeHtml(step.query || '')}» — принесено:</div>`
+                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span><b>поиск ${step.n}</b> (лимит ${step.limit}): `
+                        + `«${escapeHtml(step.query || '')}» — принесено ${tokensText(step.tokens)} токенов</div>`
                         + `<pre class="prompt-text">${escapeHtml(step.results || '')}</pre>`);
+                } else if (step.kind === 'thought') {
+                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>💭 <b>размышления</b> (к запросу ${step.n}) — `
+                        + `${tokensText(step.tokens)} токенов, в реплику не попали</div>`
+                        + `<pre class="prompt-text">${escapeHtml(step.text || '')}</pre>`);
                 } else {
                     const mark = step.kind === 'refused' ? '⛔' : step.kind === 'silence' ? '⚠️' : '🔍';
-                    parts.push(`<div class="prompt-step">${mark} ${escapeHtml(step.text || '')}</div>`);
+                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>${mark} ${escapeHtml(step.text || '')}</div>`);
                 }
             });
-            parts.push(thinkingBlockHtml('💭 Размышления модели — оплачены как вывод, в реплику не попали:', data.thinking));
             parts.push(thinkingBlockHtml('🌱 ' + SKETCH_HINT, data.sketch));
             if (s.removed_messages) {
                 parts.push('<div class="prompt-line">✂️ что выбросила обрезка — самое раннее:</div>'
@@ -1726,15 +1749,11 @@ HTML_TEMPLATE = """
             }
             if (s.extra_messages) {
                 parts.push(`<div class="prompt-line">🔍 ход дописал в запрос ещё <b>${s.extra_messages}</b> `
-                    + `сообщ. (${tokensText(s.extra_tokens)} токенов): найденное едет к модели сверх истории — и платится тоже`
-                    + `</div>`);
+                    + `сообщ. (${tokensText(s.extra_tokens)} токенов) — это найденное поиском и напоминания; `
+                    + `и то и другое видно в хронологии, вместе со своим весом</div>`);
             }
-            parts.push('<div class="prompt-line"><b>Что уехало в модель целиком</b> — в том порядке, как читала модель:</div>');
+            parts.push('<div class="prompt-line"><b>Что уехало в модель целиком</b> — в том порядке, как читала модель, и ровно так, как ход начинался (дальше он дописывал сам — см. хронологию):</div>');
             parts.push(promptMessagesHtml(data.messages));
-            if ((data.added || []).length) {
-                parts.push('<div class="prompt-line">🔍 а это дописано сверх истории — уже по ходу дела:</div>'
-                    + promptMessagesHtml(data.added));
-            }
             parts.push('<div class="prompt-line"><b>Реплика, которой ход кончился:</b></div>'
                 + `<pre class="prompt-text">${escapeHtml(data.answer || '')}</pre>`);
             return parts.join('');
@@ -1766,6 +1785,7 @@ HTML_TEMPLATE = """
             if (!info) return '';
             const parts = [`запросов ${info.asks || 0}`];
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
+            if (info.thought_steps) parts.push(`размышлений ${info.thought_steps}`);
             parts.push(`${tokensText(info.tokens)} токенов на вход`);
             if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
             if (info.problems) parts.push(`заминок ${info.problems}`);

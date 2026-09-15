@@ -79,6 +79,18 @@ def _printed_text(fake_print):
     return " ".join(str(call.args[0]) for call in fake_print.call_args_list if call.args)
 
 
+def takes_tools(value: bool):
+    """Считать, что шлюз принимает (или нет) инструмент поиска — у любой модели.
+
+    Возвращает откат: набор «моделей без инструмента» общий на весь процесс,
+    и проверка, которая не вернёт его как было, оставит след для следующей —
+    а правила про поиск в промпте теперь зависят от того, дали ли инструмент.
+    """
+    patcher = mock.patch.object(cloud, "model_takes_tools", lambda model: value)
+    patcher.start()
+    return patcher.stop
+
+
 def cloud_setting(test, name, value):
     """Поставить настройку облака на время проверки.
 
@@ -1438,10 +1450,34 @@ class TestSystemPrompt(unittest.TestCase):
         """
         cloud_setting(self, "MIN_SEARCHES", 2)
         cloud_setting(self, "MAX_SEARCHES", 3)
-        prompt = self.session.get_system_prompt(non_judge_ai(self.session))
+        # Инструмент этой модели правда отправляется — иначе про поиск говорить
+        # нечего (см. test_a_model_without_the_search_tool_is_not_asked_to_search)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        self.addCleanup(takes_tools(True))
+        person = non_judge_ai(self.session)
+        prompt = self.session.get_system_prompt(person)
 
         self.assertIn("минимум 2 поиск", prompt)
         self.assertIn("не больше 3 поиск", prompt)
+
+    def test_a_model_without_the_search_tool_is_not_asked_to_search(self):
+        """Модель без инструмента поиска не должна слышать про поиск вообще.
+
+        Тот самый случай судьи на qwen3.8-flash: в промпте было «сделай минимум
+        поиск», а инструмента шлюз ей не дал — модель пыталась искать, не могла
+        и две минуты молотила размышления, пока ход не оборвался по
+        CLOUD_TURN_LIMIT. Правила и возможности должны совпадать.
+        """
+        cloud_setting(self, "MIN_SEARCHES", 2)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)   # поиск включён…
+        self.addCleanup(takes_tools(False))             # …а инструмент не дошёл
+        person = non_judge_ai(self.session)
+        prompt = self.session.get_system_prompt(person)
+
+        self.assertNotIn("минимум 2 поиск", prompt,
+                         "поиск требуется у модели, которой его не дали")
+        self.assertIn("не подключён", prompt,
+                      "модель должна знать, что искать ей нечем")
 
     def test_the_last_reply_does_not_travel_to_the_model_twice(self):
         """Реплика собеседника уезжает в модель ровно один раз.
@@ -2178,6 +2214,82 @@ class TestTurnReport(unittest.TestCase):
         self.assertIn("население", search["query"], "без формулировки запроса поиск бесполезен")
         self.assertIn("737 000", search["results"], "и без найденного тоже")
 
+    def test_the_timeline_names_the_time_and_the_weight_of_each_event(self):
+        """У каждого события хронологии есть время, а у запроса и поиска — вес.
+
+        Без времени на вопрос «чем модель занималась две минуты» ответить нечем,
+        а без веса найденного не понять, за что именно заплачено входными
+        токенами: найденное едет к модели сверх истории.
+        """
+        started, ended = 1_700_000_000.0, 1_700_000_012.345
+        steps = [
+            {"kind": "ask", "n": 1, "t": started, "t_end": ended,
+             "tokens_in": 3431, "tokens_out": 1246, "tokens_in_est": 3400,
+             "reasoning_tokens": 1160, "finish_reason": "length", "tools": True},
+            {"kind": "thought", "n": 1, "t": started + 0.5, "t_end": ended - 0.5,
+             "text": "Прикидываю доводы.", "tokens": 63},
+            {"kind": "search", "n": 1, "query": "Сыктывкар население",
+             "limit": 3, "t": ended + 0.1, "t_end": ended + 1.2,
+             "results": "1. Республика Коми — 737 000 человек", "tokens": 900},
+        ]
+        post = self._turn(steps=steps)
+        payload = self.session.turn_report(post["id"])
+
+        ask, thought, search = payload["steps"]
+        number = re.compile(r"^\d\d:\d\d:\d\d\.\d\d\d$")
+        self.assertRegex(ask["clock"], number, "у запроса должно быть время начала")
+        self.assertRegex(ask["clock_end"], number, "и время окончания")
+        self.assertRegex(thought["clock"], number, "и размышления — обычное событие со временем")
+        self.assertRegex(search["clock_end"], number)
+        self.assertEqual(post["turn"]["thought_steps"], 1,
+                         "о размышлениях должно быть сказано в свёрнутой строке")
+        self.assertIn("на глаз", show.ask_line(ask),
+                      "рядом с числом вендора видна и своя оценка")
+        line = show.step_markdown(search)
+        self.assertIn("население", line, "в хронологии ДАМПа видна формулировка запроса")
+        self.assertIn("900", line, "и вес найденного")
+
+    def test_the_dump_is_written_while_the_turn_is_still_going(self):
+        """ДАМП пишется по ходу дела, а не в конце: у оборванного хода не было следов.
+
+        Именно этого не хватало в случае судьи: две минуты размышлений, оборванный
+        ход — и в файле ни строчки, потому что весь ход писался одной записью
+        в самом конце. Теперь событие уходит в файл в тот момент, когда случилось,
+        а в конце дописывается только реплика.
+        """
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+        seen = {}
+
+        def answer(model, messages, participant_name, **kwargs):
+            # Так же, как настоящий ask_model: запрос открыт, мысли текут
+            report = kwargs["report"]
+            cloud.journal_ask_start(report, tokens_in_est=1000, tools=True, messages=3)
+            cloud.journal_thought(report, "Прикидываю доводы.", True)
+            kwargs["on_thought"]("Прикидываю доводы.", True)
+            # Ход ещё не кончился — а файл уже должен говорить, чем модель занята
+            seen["mid_turn"] = dump.read_text(encoding="utf-8")
+            cloud.journal_ask(report, {"tokens_in": 1000, "tokens_out": 50})
+            kwargs["on_delta"]("Вот ответ.", True)
+            return "Вот ответ.", 0, []
+
+        drafts = []
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Проверочная тема")
+            with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+                self.session.handle_ai_turn(self._participant(), 1, on_draft=drafts.append)
+            written = dump.read_text(encoding="utf-8")
+
+        mid = seen.get("mid_turn", "")
+        self.assertIn("### Хронология", mid, "хронология должна начинаться до запроса")
+        self.assertIn("запрос 1", mid, "запрос должен быть виден, пока модель думает")
+        self.assertIn("Прикидываю доводы.", mid, "размышления должны течь в файл сразу")
+        self.assertNotIn("### Реплика", mid, "реплики в середине хода ещё нет")
+        self.assertIn("Вот ответ.", written)
+        self.assertIn("### Реплика", written)
+        self.assertEqual(written.count("### Что уехало в модель"), 1,
+                         "ход должен попасть в файл один раз, а не дважды")
+
     def test_a_search_round_lands_in_the_turn_step_by_step(self):
         """Ход собирается по шагам из настоящих ответов шлюза, а не из догадок.
 
@@ -2219,6 +2331,14 @@ class TestTurnReport(unittest.TestCase):
         self.assertTrue(first["tools"], "надо видеть, ушёл ли инструмент поиска")
         self.assertNotIn("tokens_in", first,
                          "шлюз не прислал чисел — выдумывать их нельзя")
+        # У каждого события — своё время: и когда запрос ушёл, и когда пришёл ответ.
+        # Без этого «чем модель занималась две минуты» узнать неоткуда
+        number = re.compile(r"^\d\d:\d\d:\d\d\.\d\d\d$")
+        self.assertRegex(first["clock"], number, "у запроса нет времени отправки")
+        self.assertRegex(first["clock_end"], number, "у запроса нет времени ответа")
+        self.assertRegex(search["clock"], number, "у поиска нет времени")
+        self.assertRegex(search["clock_end"], number)
+        self.assertGreater(search["tokens"], 0, "вес найденного должен быть виден")
         self.assertEqual(search["query"], "Сыктывкар население")
         self.assertIn("НАЙДЕНО ПОИСКОМ", search["results"])
         self.assertEqual(second["tokens_in"], 3431, "вход второго запроса должен быть виден")
@@ -2423,13 +2543,21 @@ class TestRoleMarks(unittest.TestCase):
                       self.page)
 
     def test_the_thoughts_stay_in_the_finished_reply(self):
-        """Готовый пост хранит мысли — внутри блока о ходе: читать можно и после занавеса."""
+        """Готовый пост хранит мысли — шагом хронологии: читать можно и после занавеса.
+
+        Отдельным разделом они были лишними: размышления — такое же событие
+        хода, как запрос и поиск, и стоят в общем порядке со своим временем.
+        """
         start = self.page.index("function turnBodyHtml(")
         body = self.page[start:self.page.index("function loadTurnBox(", start)]
-        self.assertIn("data.thinking", body, "мысли пропали из готовой реплики")
-        self.assertIn("thinkingBlockHtml", body,
+        self.assertIn("step.kind === 'thought'", body,
+                      "мысли пропали из хронологии готовой реплики")
+        self.assertIn("escapeHtml(step.text", body,
                       "мысли показываем текстом, а не разметкой")
-        self.assertIn("escapeHtml(body)", self.page, "текст блока экранируется")
+        self.assertIn("stepClock(step)", body,
+                      "у события хронологии должно быть время")
+        # И в свёрнутой строке видно, что они были
+        self.assertIn("info.thought_steps", self.page)
         # У черновика свой — открытый — блок: там видно, что модель ещё думает
         self.assertIn('<details class="post-thinking" open>', self.page)
 
@@ -2939,6 +3067,27 @@ class TestCloudGateway(unittest.TestCase):
 
         self.assertIn("CLOUD_TURN_LIMIT", content, "об обрыве надо сказать вслух")
         self.assertEqual(tools, [])
+
+    def test_the_cut_explains_itself_and_names_the_search_trouble(self):
+        """Обрыв хода должен называть и срок, и причину, а не врать про «без предела».
+
+        Тот самый случай судьи: в ленте появилось «ход длился дольше 120 с
+        и оборван … (CLOUD_TURN_LIMIT, 0 — без предела)» — хотя предел был, и он
+        же и сработал. А в этом случае самое важное — что правила про поиск
+        в промпте были, а инструмента модель не получила: именно из этого
+        рождается петля, в которой модель не переходит к ответу.
+        """
+        self.gateway.stream_text = self._sse(self._piece("мусор"))
+        cloud_setting(self, "CLOUD_SEND_TOOLS", False)
+        cloud_setting(self, "ENABLE_SEARCH", True)
+        with mock.patch.object(cloud, "turn_limit", mock.Mock(return_value=0.000001)):
+            content, _ = cloud.chat(self.MODEL, [{"role": "user", "content": "?"}],
+                                    on_delta=lambda piece, replace: None, report={})
+
+        self.assertNotIn("без предела", content,
+                         "срок был — и именно он сработал")
+        self.assertIn("не отправлен", content,
+                      "в этом и причина петли: про поиск в промпте — а инструмента нет")
 
     def test_a_cut_turn_keeps_what_was_said(self):
         """Оборванный по сроку ход отдаёт сказанное: половина реплики лучше ничего."""

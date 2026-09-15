@@ -712,18 +712,54 @@ BUGS = {
     # происходило по порядку» должны быть видны и в ленте, и в ДАМПе.
     "журнал хода снова не пополняется: числа и поиски неоткуда взять": [
         ("aitheatre/cloud.py",
-         '    report.setdefault("steps", []).append(entry)',
+         '    report.setdefault("steps", []).append(step)',
          "    pass"),
     ],
+    # Сам отчёт собирается до запроса, а шаги в него попадают из журнала;
+    # выброшенные шаги — это снова «ход был, а что в нём — не видно»
     "шаги хода снова не доезжают до отчёта у реплики": [
         ("aitheatre/show.py",
-         '            steps=journal.get("steps"))',
-         "            steps=None)"),
+         '    turn["steps"] = steps',
+         '    turn["steps"] = []'),
     ],
     "ход снова не попадает в ДАМП": [
         ("aitheatre/show.py",
-         "            handle.write(dump_turn_markdown(post, turn))",
-         '            handle.write("")'),
+         "    dump_write(dump_turn_header(post_id, turn))",
+         '    dump_write("")'),
+    ],
+    # Из жизни: судья на qwen3.8-flash две минуты размышлял, ход оборвался —
+    # и в файле не оставалось ни строчки, потому что ДАМП писался целиком в конце
+    "ДАМП снова пишется только в конце хода — у оборванного хода нет следов": [
+        ("aitheatre/cloud.py",
+         '    sink = report.get("sink")',
+         "    sink = None"),
+    ],
+    "у запроса снова нет времени окончания": [
+        ("aitheatre/cloud.py",
+         '    entry["t_end"] = time.time()',
+         '    entry["t_end"] = 0'),
+    ],
+    "вес найденного снова не называется": [
+        ("aitheatre/ollama_api.py",
+         '        "tokens": text.estimate_tokens(results),',
+         '        "tokens": 0,'),
+    ],
+    "размышлений снова нет в хронологии: они отдельным блоком": [
+        ("aitheatre/show.py",
+         '    summary["thought_steps"] = sum(1 for step in steps if step.get("kind") == "thought")',
+         '    summary["thought_steps"] = 0'),
+    ],
+    # Из жизни: в промпте «сделай минимум поиск», а инструмента шлюз модели
+    # не дал — и она дважды ушла в петлю размышлений вместо ответа
+    "модель снова просят искать, не дав ей инструмента": [
+        ("aitheatre/show.py",
+         '        if not ollama_api.takes_tools_now(participant.get("model", "")):',
+         "        if False:"),
+    ],
+    "обрыв хода снова валят на «без предела»": [
+        ("aitheatre/cloud.py",
+         '        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT) и оборван: "',
+         '        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT, 0 — без предела) и оборван: "'),
     ],
     "ДАМП снова растёт от спектакля к спектаклю": [
         ("aitheatre/show.py",

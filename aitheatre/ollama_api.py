@@ -20,6 +20,7 @@ from . import cloud
 from . import deps
 from . import search
 from . import settings
+from . import text
 from . import tooltext
 
 # Кэш для хранения информации о поддержке tools моделями
@@ -860,6 +861,13 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
             if tool_choice:
                 data["tool_choice"] = tool_choice
         
+        # Местный запрос тоже попадает в хронологию со своими метками времени:
+        # у судьи на облаке и у судьи на Ollama ход должен читаться одинаково,
+        # и у обоих видно, что запрос ушёл и сколько в нём уехало
+        cloud.journal_ask_start(report,
+                                tokens_in_est=cloud.messages_tokens(data.get("messages")),
+                                tools=bool(data.get("tools")),
+                                messages=len(data.get("messages") or []))
         req = urllib.request.Request(
             settings.OLLAMA_URL,
             data=json.dumps(data).encode('utf-8'),
@@ -868,6 +876,11 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         
         with urllib.request.urlopen(req, timeout=120) as response:
             result = json.loads(response.read().decode('utf-8'))
+            msg = result.get("message") or {}
+            # Размышления местной модели — в ту же хронологию, и раньше итога
+            # запроса: они случились по дороге к ответу
+            if msg.get("thinking"):
+                cloud.journal_thought(report, str(msg["thinking"]), replace=True)
             # Ollama считает токены сама (prompt_eval_count / eval_count): без этого
             # у местных моделей в журнале хода не было бы ни одного числа, а у облачных
             # они есть — и эта разница выгладела бы необъяснимой
@@ -877,16 +890,17 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
                 "finish_reason": str(result.get("done_reason") or ""),
             })
             if "message" in result:
-                msg = result["message"]
                 return msg.get("content", "") or "", msg.get("tool_calls") or []
             return "", []
     except urllib.error.HTTPError as e:
         error_body = e.read().decode('utf-8') if e.fp else "Нет деталей ошибки"
         print(f"  ⚠️  HTTP ошибка {e.code}: {e.reason}")
         print(f"  📋 Детали: {error_body}")
+        cloud.journal_ask(report, {"error": f"HTTP {e.code}: {e.reason}"})
         return f"[ОШИБКА: HTTP {e.code}]", []
     except Exception as e:
         print(f"  ⚠️  Ошибка запроса к модели: {e}")
+        cloud.journal_ask(report, {"error": str(e)})
         return f"[ОШИБКА: {e}]", []
 
 def search_web(query: str, max_results: int = None) -> str:
@@ -930,27 +944,34 @@ def _as_int(value) -> int:
 
 
 def journal_search(report: dict, index: int, query: str, results: str,
-                   limit: int) -> None:
-    """Дописать в журнал хода строку о поиске — с запросом и всем принесённым.
+                   limit: int, started: float = None) -> None:
+    """Дописать в журнал хода событие о поиске — с запросом и всем принесённым.
 
     В ленте результаты поиска и раньше виднелись за «Источники», а вот самого
     запроса там не было — как и связи между «нашлось вот это» и «модель сказала
     вот так». Теперь это одна хронология: строки хода идут по порядку, и у каждой
-    видно и вопрос, и ответ на него (см. show.build_turn_report).
+    видно и вопрос, и ответ на него, и сколько каждый весил (см.
+    show.build_turn_report).
     """
     if report is None:
         return
-    report.setdefault("steps", []).append({
+    results = results or ""
+    cloud.journal_push(report, {
         "kind": "search", "n": int(index), "query": query,
-        "limit": int(limit), "results": results or "",
+        "limit": int(limit), "results": results,
+        # Вес найденного — как и у всего остального в журнале: найденное уезжает
+        # к модели сверх истории и платится входными токенами
+        "tokens": text.estimate_tokens(results),
+        "t": time.time() if started is None else float(started),
+        "t_end": time.time(),
     })
 
 
 def journal_note(report: dict, text: str, kind: str = "note") -> None:
-    """Дописать в журнал хода строку-объяснение: что сделал код и почему."""
+    """Дописать в журнал хода событие-объяснение: что сделал код и почему."""
     if report is None or not str(text or "").strip():
         return
-    report.setdefault("steps", []).append({"kind": kind, "text": str(text)})
+    cloud.journal_push(report, {"kind": kind, "text": str(text), "t": time.time()})
 
 
 def silence_reason(report: dict = None, asked_for_search: bool = False) -> str:
@@ -1036,6 +1057,14 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
     # придётся собирать по кускам
     report = report if report is not None else {}
     refused_search = False  # модель просила ещё поиск, а мы уже отказали
+
+    # Размышления — такое же событие хронологии, как запросы и поиски: по ним
+    # видно, чем модель занималась вместо ответа. Собираем их здесь, по дороге
+    # в ленту: черновик показывает только хвост, а в ДАМПе нужно всё
+    def take_thought(piece, replace=False):
+        cloud.journal_thought(report, piece, replace)
+        if on_thought is not None:
+            on_thought(piece, replace)
     
     # Вычисляем нормализованное имя один раз
     participant_name_normalized = participant_name.lower().replace(" ", "_")
@@ -1057,7 +1086,7 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         
         content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice,
                                                    options=options, think=think, on_delta=on_delta,
-                                                   on_thought=on_thought, report=report)
+                                                   on_thought=take_thought, report=report)
         tool_calls = tool_calls or []
 
         # Модель может попросить поиск не протоколом, а словами: напечатать
@@ -1152,11 +1181,13 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                 search_queries.append(query)
                 search_count += 1
                 
+                started = time.time()
                 result = search_web(query, max_results)
                 # В журнал — вместе с формулировкой запроса: в ленте «Источники»
                 # показывают её отдельно, а в ДАМПе нужно, чтобы вопрос и то, что
-                # по нему нашлось, лежали рядом
-                journal_search(report, search_count, query, result, max_searches)
+                # по нему нашлось, лежали рядом — со временем и весом
+                journal_search(report, search_count, query, result, max_searches,
+                               started=started)
                 
                 if tc.get("textual"):
                     # Найденное — обычным сообщением: с этой моделью мы говорим
@@ -1230,7 +1261,7 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             # раз, как это и случилось у gpt-5-nano (см. tools в ask_model_with_tools)
             content, _tool_calls = ask_model_with_tools(model, messages, tool_choice=None,
                                                         options=options, think=False, tools=False,
-                                                        on_delta=on_delta, on_thought=on_thought,
+                                                        on_delta=on_delta, on_thought=take_thought,
                                                         report=report)
             # И тут просьба о поиске может прийти словами: репликой её считать
             # нельзя, а выполнять уже нечего — ход кончается (см. tooltext)

@@ -57,6 +57,7 @@ import urllib.error
 import urllib.request
 
 from . import settings
+from . import text
 
 # Список моделей шлюза кэшируется: проверка готовности состава обращается к нему
 # на каждую правку состава, а меняется этот список раз в месяц
@@ -1044,8 +1045,64 @@ def _turn_notes(answer: dict) -> dict:
     return notes
 
 
+# ── ЖУРНАЛ ХОДА ─────────────────────────────────────────────────────────────
+# Ход — не одна строка, а цепочка событий: запрос ушёл, модель подумала,
+# попросила поиск, получила, ответила. Каждое событие попадает в журнал
+# в тот момент, когда случилось, со своей меткой времени — поэтому по журналу
+# видно, на что ушло время и откуда взялось каждое число. Тот же журнал
+# раскрывается у реплики в ленте и дописывается в ДАМП спектакля, причём
+# в файл — сразу: у модели, зациклившейся на две минуты, иначе не остаётся
+# следов вовсе (см. show.dump_step_sink).
+
+def journal_push(report: dict, step: dict, piece: str = None) -> None:
+    """Положить событие в журнал — и сразу отдать его тому, кто пишет ДАМП.
+
+    piece — то, что событие добрало на этот раз (кусок размышлений): в файл
+    он уходит отдельной строкой, потому что писать размышления одним куском
+    в конце — это и значит терять их, когда ход обрывается на середине.
+    """
+    if report is None:
+        return
+    report.setdefault("steps", []).append(step)
+    sink = report.get("sink")
+    if sink is not None:
+        try:
+            sink(step, piece)
+        except Exception:
+            pass
+
+
+def journal_ask_start(report: dict, tokens_in_est: int = None, tools: bool = None,
+                      messages: int = None) -> dict:
+    """Отметить, что запрос ушёл: числа появятся, когда придёт ответ.
+
+    Запись делается до ответа не для красоты: пока модель думает, в ДАМПе уже
+    видно, что запрос был и сколько в нём уехало. Без этого у хода, оборванного
+    по времени, не оставалось следа вообще (см. журнал_ask — он закрывает эту же
+    запись, дописывая к ней числа и время окончания).
+    """
+    if report is None:
+        return {}
+    entry = {"kind": "ask", "n": asks_count(report) + 1, "t": time.time(),
+             "open": True}
+    if tokens_in_est is not None:
+        entry["tokens_in_est"] = int(tokens_in_est)
+    if tools is not None:
+        entry["tools"] = bool(tools)
+    if messages is not None:
+        entry["messages"] = int(messages)
+    journal_push(report, entry)
+    return entry
+
+
+def asks_count(report: dict) -> int:
+    """Сколько запросов уже было в этом ходу — по журналу, а не по счётчику."""
+    return sum(1 for step in ((report or {}).get("steps") or [])
+               if step.get("kind") == "ask")
+
+
 def journal_ask(report: dict, notes: dict) -> dict:
-    """Дописать в журнал хода одну строку: этот запрос глазами чисел.
+    """Закрыть запись о запросе: числа, чем кончился — и время окончания.
 
     Журнал (report["steps"]) и есть «полная картина» хода: в нём по порядку лежит
     всё, что случилось, — сколько уехало на входе, что модель попросила, что ей
@@ -1058,12 +1115,58 @@ def journal_ask(report: dict, notes: dict) -> dict:
     """
     if report is None:
         return notes
-    entry = dict(notes or {})
-    entry["kind"] = "ask"
-    entry["n"] = sum(1 for step in (report.get("steps") or [])
-                     if step.get("kind") == "ask") + 1
-    report.setdefault("steps", []).append(entry)
+    entry = None
+    for step in reversed(report.get("steps") or []):
+        if step.get("kind") == "ask" and step.get("open"):
+            entry = step
+            break
+    if entry is None:
+        # Запрос сделан мимо журнала (местная модель спрашивает сама) — заведём
+        # запись и закроем её тут же: пропуск в хронологии хуже лишней строки
+        entry = journal_ask_start(report)
+    entry.update(notes or {})
+    entry["t_end"] = time.time()
+    entry.pop("open", None)
     return notes
+
+
+def journal_thought(report: dict, piece: str, replace: bool = False) -> None:
+    """Порция размышлений — обычное событие хронологии, а не отдельный блок.
+
+    Размышления приходят кусками и относятся к тому запросу, который сейчас
+    в работе: куски одной порции сливаются в одно событие (иначе их были бы
+    сотни), а новое событие начинается, когда модель начала думать заново
+    (replace) или между ними случилось что-то ещё.
+    """
+    if report is None or not piece:
+        return
+    steps = report.setdefault("steps", [])
+    n = asks_count(report) or 1
+    last = steps[-1] if steps else None
+    if (replace or last is None or last.get("kind") != "thought"
+            or last.get("n") != n):
+        journal_push(report, {"kind": "thought", "n": n, "t": time.time(),
+                              "text": piece, "tokens": text.estimate_tokens(piece)},
+                     piece)
+        return
+    last["text"] += piece
+    last["tokens"] = text.estimate_tokens(last["text"])
+    last["t_end"] = time.time()
+    journal_push(report, last, piece)
+
+
+def messages_tokens(messages: list) -> int:
+    """Вес запроса на глаз — тем же счётом, каким меряется история.
+
+    Нужен на случай, когда вендор чисел не прислал: без своей оценки в журнале
+    на месте входа осталась бы дыра, а «сколько уехало» — первое, что хочется
+    знать, разбирая ход. Точное число вендора, если оно есть, называется рядом.
+    """
+    total = 0
+    for message in messages or []:
+        if isinstance(message, dict):
+            total += text.estimate_tokens(str(message.get("content") or ""))
+    return total
 
 
 def chat(model: str, messages: list, options: dict = None, tool_choice: str = None,
@@ -1129,15 +1232,38 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
             payload["tool_choice"] = "required" if tool_choice == "any" else tool_choice
 
     def ask(body):
-        """Один запрос — с потоком или без: разбор ответа выбирается здесь."""
+        """Один запрос — с потоком или без: разбор и запись в журнал — здесь.
+
+        Записей в журнал две, и обе — с меткой времени: «запрос ушёл» (сколько
+        в нём текста, был ли инструмент поиска) и «запрос кончился» (что сказал
+        вендор). Так у хода, оборванного по времени или по ошибке, всё равно
+        остаётся след в ДАМПе, а не дыра там, где модель думала две минуты.
+        """
         def read(response):
             if streaming:
                 return _read_stream(response, on_delta, on_thought, deadline)
             return _read_answer(response)
-        return _request("chat/completions", payload=body, method="POST", read=read)
+        tools_sent = bool(uses_tools and "tools" in body)
+        journal_ask_start(report, tokens_in_est=messages_tokens(messages),
+                          tools=tools_sent,
+                          messages=len(body.get("messages") or []))
+        answer, error = _request("chat/completions", payload=body, method="POST", read=read)
+        notes = {"error": str(error)} if error else _turn_notes(answer)
+        if not error:
+            if answer.get("error"):
+                notes["error"] = hide_key(answer["error"])
+            # Был ли у этого запроса инструмент поиска: по журналу потом видно,
+            # почему модель не искала — не дали инструмент или сама не стала
+            notes["tools"] = tools_sent
+            notes["tokens_in_est"] = messages_tokens(messages)
+            notes["tokens_out_est"] = (
+                text.estimate_tokens(answer.get("content") or "")
+                + text.estimate_tokens(answer.get("thinking") or ""))
+        journal_ask(report, notes)
+        return answer, error, notes
 
     body = payload
-    answer, error = ask(body)
+    answer, error, notes = ask(body)
 
     # 400 значит «запрос не понят». Причина почти всегда в нашем же поле, и она
     # узнаётся по словам самого шлюза — такое лечим (см. _eased_body). Кругов
@@ -1151,7 +1277,7 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         if eased is None:
             break
         body = eased
-        answer, error = ask(body)
+        answer, error, notes = ask(body)
 
     # Метку «инструмент не принят» ставим только тогда, когда запрос без него
     # правда прошёл: иначе по 400 другой причины модель была бы помечена зря
@@ -1162,30 +1288,34 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
 
     if error:
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {error}")
-        # Отказ тоже — часть хода: без него в ДАМПе была бы дыра там, где что-то
-        # пошло не так, а по журналу видно, что запрос был и чем он кончился
-        journal_ask(report, {"error": str(error), "tokens_out": 0})
+        # Отказ тоже — часть хода, и он уже лежит в журнале (см. ask): без него
+        # в ДАМПе была бы дыра там, где что-то пошло не так
         return f"[ОШИБКА: {error}]", []
 
     if answer.get("error"):
         problem = hide_key(answer["error"])
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {problem}")
-        journal_ask(report, {"error": problem, "tokens_out": 0})
         return f"[ОШИБКА: {problem}]", []
 
     if answer.get("cut"):
-        # Не молчим: иначе оборванная реплика выглядела бы свойством модели
-        note = (f"ход длился дольше {seconds:g} с и оборван: модель зациклилась "
-                f"и не перешла к ответу (CLOUD_TURN_LIMIT, 0 — без предела)")
+        # Не молчим: иначе оборванная реплика выглядела бы свойством модели.
+        # И называем настоящее число, а не «0 — без предела»: сколько именно
+        # терпения не хватило, видно потом и в логе, и в ДАМПе
+        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT) и оборван: "
+                f"модель так и не перешла к ответу")
+        if not uses_tools and settings.ENABLE_SEARCH:
+            note += (", а инструмент поиска ей не отправлен — при правилах про "
+                     "поиск в промпте это частая причина такой петли")
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {note}")
+        journal_push(report, {"kind": "silence", "text": note, "t": time.time()})
         if not (answer.get("content") or "").strip() and not answer.get("tool_calls"):
             return f"[ОШИБКА: {note}]", []
 
-    notes = _turn_notes(answer)
-    # Был ли у этого запроса инструмент поиска: по журналу потом видно, почему
-    # модель не искала — не дали инструмент или сама не стала
-    notes["tools"] = bool(uses_tools and "tools" in body)
-    journal_ask(report, notes)
+    # Размышления, пришедшие целиком (шлюз не отдал их потоком): в хронологию
+    # так же, как и полученные по кускам — иначе у них не было бы места в ходе
+    if not streaming and answer.get("thinking"):
+        journal_thought(report, answer["thinking"])
+
     if report is not None:
         report.update(notes)
     usage = answer.get("usage") or {}

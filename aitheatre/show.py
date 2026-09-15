@@ -18,6 +18,7 @@ import traceback
 import uuid
 from pathlib import Path
 
+from . import cloud
 from . import ollama_api
 from . import settings
 from . import text
@@ -158,17 +159,52 @@ def quoted(text: str) -> str:
     return "\n".join(f"> {line}" if line.strip() else ">" for line in lines) or ">"
 
 
+def clock(when) -> str:
+    """Время события с тысячными долями — по хронологии видно, кто кого ждал.
+
+    До микросекунд не нужны: ход длится секунды и минуты, а разница между
+    двумя соседними событиями — это доли секунды, которых хватает, чтобы
+    отличить «модель думала две минуты» от «две минуты шёл поиск».
+    """
+    try:
+        moment = float(when)
+    except (TypeError, ValueError):
+        return ""
+    return (time.strftime("%H:%M:%S", time.localtime(moment))
+            + f".{int(moment % 1 * 1000):03d}")
+
+
+def step_period(step: dict) -> str:
+    """Когда событие началось и когда кончилось — одной строкой."""
+    start = clock(step.get("t"))
+    end = clock(step.get("t_end")) if step.get("t_end") else ""
+    if start and end and end != start:
+        return f"{start} → {end}"
+    return start
+
+
 def ask_line(step: dict) -> str:
     """Один запрос хода одной строкой — с числами и их названиями.
 
     Именно здесь закрывается вопрос «что значит 3431 + 1246»: вход — это то,
     что уехало (системный промпт, история, найденное), вывод — то, что вендор
     вернул, включая оплаченные размышления, которые в реплику не попадают.
+    Если вендор чисел не прислал, рядом стоит своя оценка: без неё на месте
+    входа была бы дыра, а «сколько уехало» — первое, что хочется знать.
     """
     if step.get("error"):
-        return f"отказ — {step['error']}"
-    parts = [f"вход {numbers_word(step.get('tokens_in'))} · "
-             f"вывод {numbers_word(step.get('tokens_out'))} токенов"]
+        return f"не прошёл — {step['error']}"
+    estimate = step.get("tokens_in_est")
+    if step.get("tokens_in") is None and step.get("tokens_out") is None:
+        weight = "числа токенов вендор не сообщил"
+        if estimate:
+            weight += f" · на глаз вход ≈{numbers_word(estimate)} токенов"
+    else:
+        weight = f"вход {numbers_word(step.get('tokens_in'))}"
+        if estimate:
+            weight += f" (на глаз ≈{numbers_word(estimate)})"
+        weight += f" · вывод {numbers_word(step.get('tokens_out'))} токенов"
+    parts = [weight]
     if step.get("reasoning_tokens"):
         parts.append(f"из них размышлений {numbers_word(step['reasoning_tokens'])}")
     if step.get("finish_reason"):
@@ -178,33 +214,51 @@ def ask_line(step: dict) -> str:
     return ", ".join(parts)
 
 
-def dump_turn_markdown(post: dict, turn: dict = None) -> str:
-    """Ход в ДАМПе — то же, что раскрывается в ленте у реплики, только текстом.
+# Каким значком помечать строку хронологии: шаг — он и есть шаг, а вот заминки
+# и отказы должны отличаться от обычного запроса с первого взгляда
+STEP_MARKS = {"refused": "⛔", "force": "🔍", "silence": "⚠️", "note": "·"}
 
-    В посте уже лежит всё нужное (см. build_turn_report); здесь это разложено
-    по строкам, чтобы файл читался глазами и в нём не оставалось ни одного числа
-    без объяснения: откуда ход (чьё окно), что уехало (промпт и история целиком),
-    что происходило по порядку (запросы, поиски с формулировкой и результатами,
-    отказы и примечания) и что модель в итоге сказала.
 
-    Отчёт передаётся отдельно, а не берётся из поста: в посте от него остаётся
-    только сводка (см. create_post) — сам отчёт весит как сцена, и держать его
-    в ленте незачем.
+def step_markdown(step: dict, with_text: bool = True) -> str:
+    """Одно событие хода — строкой. ДАМП и строится по событию за раз.
+
+    with_text=False — только шапка события: так пишутся размышления, текст
+    которых льётся в файл по кускам, в тот момент как приходит (см.
+    dump_step_sink).
     """
-    turn = turn or {}
+    period = step_period(step)
+    head = f"- {period} · " if period else "- "
+    kind = step.get("kind")
+    if kind == "ask":
+        return f"{head}**запрос {step.get('n')}** — {ask_line(step)}"
+    if kind == "search":
+        line = (f"{head}🔍 **поиск {step.get('n')}** (лимит {step.get('limit')}): "
+                f"«{step.get('query')}» — принесено "
+                f"{numbers_word(step.get('tokens'))} токенов")
+        return line + "\n" + quoted(step.get("results")) if with_text else line
+    if kind == "thought":
+        line = (f"{head}💭 **размышления** (к запросу {step.get('n')}) — "
+                f"{numbers_word(step.get('tokens'))} токенов, в реплику не попадают")
+        return line + "\n" + quoted(step.get("text")) if with_text else line
+    mark = STEP_MARKS.get(kind, "·")
+    return f"{head}{mark} {step.get('text')}"
+
+
+def dump_turn_header(post_id: int, turn: dict) -> str:
+    """Начало записи о ходе: кто, откуда, что уехало — до первого события.
+
+    Пишется ДО запроса к модели (см. open_dump_turn): у хода, который оборвался
+    на середине, в файле должно остаться начало, а не пустота. Раздела
+    «дописано ходом» здесь нет нарочно: дописанное — это результаты поисков
+    и напоминания, и все они видны в хронологии со своим весом. В двух местах
+    одни и те же данные — это не полнота, а каша (см. build_turn_report).
+    """
     who = turn.get("who") or {}
     budget = turn.get("budget") or {}
     summary = turn.get("summary") or {}
-    out = [f"\n## {post.get('id')} · {post.get('timestamp')} · {post.get('display_name')} "
-           f"· {post.get('model_used')} · {post.get('role_name')} "
-           f"· Акт {post.get('round')}\n"]
-
-    if not turn:
-        # Ход живого участника: отправлять никуда нечего, но в хронологии он есть
-        out.append("Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n")
-        out.append(quoted(post.get("content")))
-        return "\n".join(out) + "\n"
-
+    out = [f"\n## {post_id} · {who.get('time')} · {who.get('name')} · "
+           f"{who.get('model')} · {who.get('role_name') or who.get('role')} "
+           f"· Акт {who.get('round')}\n"]
     out.append(f"**Кто:** {who.get('name')} · {who.get('model')} · "
                f"{who.get('role_name') or who.get('role')} · {who.get('time')}\n")
     out.append(f"**Откуда ход:** {WINDOW_NAMES.get(budget.get('kind'), 'окно модели')} "
@@ -220,53 +274,124 @@ def dump_turn_markdown(post: dict, turn: dict = None) -> str:
                f"{budget.get('messages_before')} — {cut}; из этого системный "
                f"промпт — {numbers_word(budget.get('system_tokens'))} токенов, "
                f"остальное — реплики сцены и задания\n")
-
     out.append("### Что уехало в модель\n")
     for index, message in enumerate(turn.get("messages") or [], 1):
         out.append(f"- №{index} · {message.get('role')} · "
                    f"{message.get('name') or '—'} · "
                    f"{numbers_word(message.get('tokens'))} токенов")
         out.append(quoted(message.get("content")))
-    if turn.get("added"):
-        out.append("\n**Дописано ходом сверх истории:**")
-        for message in turn["added"]:
-            out.append(f"- {message.get('role')} · {message.get('name') or '—'} · "
-                       f"{numbers_word(message.get('tokens'))} токенов")
-            out.append(quoted(message.get("content")))
     if summary.get("removed_messages"):
         out.append("\n**Что выбросила обрезка (самое раннее):**")
         for gone in turn.get("removed") or []:
             out.append(f"- {gone.get('speaker')} · {numbers_word(gone.get('tokens'))} токенов · "
                        f"{gone.get('preview')}")
+    out.append("\n### Хронология\n")
+    return "\n".join(out) + "\n"
 
-    if turn.get("steps"):
-        out.append("\n### Ход по порядку\n")
-        for step in turn["steps"]:
-            kind = step.get("kind")
-            if kind == "ask":
-                out.append(f"- **запрос {step.get('n')}** — {ask_line(step)}")
-            elif kind == "search":
-                out.append(f"- **поиск {step.get('n')}** (лимит {step.get('limit')}): "
-                           f"«{step.get('query')}» — принесено:")
-                out.append(quoted(step.get("results")))
-            elif kind == "refused":
-                out.append(f"- ⛔ {step.get('text')}")
-            elif kind == "force":
-                out.append(f"- 🔍 {step.get('text')}")
-            elif kind == "silence":
-                out.append(f"- ⚠️ {step.get('text')}")
-            else:
-                out.append(f"- {step.get('text')}")
 
-    if post.get("thinking"):
-        out.append("\n### Размышления модели\n")
-        out.append(quoted(post["thinking"]))
+def dump_turn_tail(post: dict, turn: dict) -> str:
+    """Конец записи о ходе: чем он кончился — репликой и прежней её версией."""
+    out = []
     if post.get("sketch"):
-        out.append("\n### Сказано раньше — первая версия реплики\n")
+        out.append("\n### Сказано раньше — прежняя версия реплики\n")
         out.append(quoted(post["sketch"]))
     out.append("\n### Реплика\n")
     out.append(quoted(post.get("content")))
     return "\n".join(out) + "\n"
+
+
+def dump_human_markdown(post: dict) -> str:
+    """Ход живого участника: отправлять никуда нечего, но в хронологии он есть."""
+    return (f"\n## {post.get('id')} · {post.get('timestamp')} · {post.get('display_name')} "
+            f"· {post.get('model_used')} · {post.get('role_name')} "
+            f"· Акт {post.get('round')}\n\n"
+            f"Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
+            + quoted(post.get("content")) + "\n")
+
+
+# Открытый файл ДАМПа и событие, которое сейчас дописывается: держим их между
+# вызовами, потому что ход пишется по частям — от запроса к запросу и от куска
+# размышлений к куску (см. dump_step_sink)
+_DUMP = {"handle": None, "thought": None}
+
+
+def dump_write(text: str, force: bool = True) -> None:
+    """Дописать в ДАМП — сразу, а не в конце хода.
+
+    Сбрасывается на диск каждое событие, и даже каждый кусок размышлений:
+    в этом и смысл живого ДАМПа — файл читают в тот момент, когда ход ещё идёт
+    (или уже оборвался), а не после. Куски невелики, а ходов в спектакле десятки:
+    экономить на сбросах здесь незачем.
+    """
+    if not text:
+        return
+    handle = _DUMP.get("handle")
+    try:
+        if handle is None:
+            with open(settings.DUMP_FILE, "a", encoding="utf-8") as one:
+                one.write(text)
+            return
+        handle.write(text)
+        if force:
+            handle.flush()
+    except Exception as e:
+        print(f"  ⚠️  Не сохраняется ход в {settings.DUMP_FILE.name}: {e}")
+
+
+def dump_step_sink(step: dict, piece: str = None) -> None:
+    """Событие хода — в файл, в тот же миг, как оно случилось.
+
+    Размышления приходят кусками: шапка пишется одна, а дальше в файл течёт сам
+    текст. Именно ради этого ДАМП и пишется по ходу дела — у модели, которая
+    две минуты думает и так и не отвечает, в файле видно ровно то, что она
+    думала, а не пустое место (см. cloud.journal_thought).
+    """
+    if step.get("kind") == "thought":
+        if _DUMP.get("thought") is not step:
+            _DUMP["thought"] = step
+            dump_write(step_markdown(step, with_text=False) + "\n")
+        if piece:
+            # Без force=False: файл читают глазами прямо во время хода
+            dump_write(piece)
+        return
+    if _DUMP.get("thought") is not None:
+        # Размышления кончились: отделяем их от следующего события
+        _DUMP["thought"] = None
+        dump_write("\n")
+    dump_write(step_markdown(step) + "\n")
+
+
+def open_dump_turn(post_id: int, turn: dict, report: dict) -> None:
+    """Начать запись о ходе и отдать журналу «перо»: события пишутся сразу.
+
+    report["sink"] — это и есть перо (см. cloud.journal_push): каждое событие
+    хода улетает в файл в тот момент, когда случилось. Файл открыт всё время
+    хода, поэтому и оборванный ход остаётся в ДАМПе.
+    """
+    _DUMP["thought"] = None
+    try:
+        _DUMP["handle"] = open(settings.DUMP_FILE, "a", encoding="utf-8")
+    except Exception as e:
+        print(f"  ⚠️  Не открывается {settings.DUMP_FILE.name}: {e}")
+        _DUMP["handle"] = None
+    dump_write(dump_turn_header(post_id, turn))
+    if report is not None:
+        report["sink"] = dump_step_sink
+
+
+def close_dump_turn(post: dict, turn: dict) -> None:
+    """Закончить запись о ходе: реплика, прежняя её версия — и закрыть файл."""
+    if _DUMP.get("thought") is not None:
+        _DUMP["thought"] = None
+        dump_write("\n")
+    dump_write(dump_turn_tail(post, turn))
+    handle = _DUMP.get("handle")
+    _DUMP["handle"] = None
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
 
 
 def start_dump(topic: str) -> None:
@@ -277,12 +402,14 @@ def start_dump(topic: str) -> None:
     разбора свежего случая — так и было со стенограммой, которая никого не
     чистилась и после десятков спектаклей стала мегабайтами.
     """
+    close_dump_turn({}, {})     # на всякий случай: прошлый файл больше не наш
     when = time.strftime("%d.%m.%Y %H:%M")
     header = (
         f"# ДАМП · {when} · {(topic or '').strip() or 'без темы'}\n\n"
-        f"Хронология последнего спектакля, по ходам: что уехало в модель, \n"
-        f"что она попросила, что ей принесли и что она сказала — с числами.\n"
-        f"Пишется заново на каждый новый спектакль (порт {settings.PORT}).\n"
+        f"Хронология последнего спектакля: что уехало в модель, что она попросила,\n"
+        f"что ей принесли и что она сказала — со временем и числами токенов.\n"
+        f"Пишется по ходу дела, заново на каждый новый спектакль "
+        f"(порт {settings.PORT}).\n"
     )
     try:
         settings.DUMP_FILE.write_text(header, encoding="utf-8")
@@ -291,16 +418,17 @@ def start_dump(topic: str) -> None:
 
 
 def save_dump_entry(post: dict, turn: dict = None) -> None:
-    """Дописать ход в ДАМП — по одной записи на реплику, в том порядке, как шли.
+    """Дописать в ДАМП реплику, чей ход не писался по ходу дела.
 
-    Пишется и для человека, и для модели: в хронологии важны все голоса,
-    а у живой реплики просто не будет ни токенов, ни поиска (см. dump_turn_markdown).
+    Так приходит только живая реплика: у неё ни запросов, ни поиска, поэтому
+    ей нечего было писать заранее. Всё машинное пишется иначе — открывается
+    до запроса и дописывается по событию (см. open_dump_turn).
     """
-    try:
-        with open(settings.DUMP_FILE, "a", encoding="utf-8") as handle:
-            handle.write(dump_turn_markdown(post, turn))
-    except Exception as e:
-        print(f"  ⚠️  Не сохраняется ход в {settings.DUMP_FILE.name}: {e}")
+    if turn:
+        dump_write(dump_turn_header(post.get("id"), turn))
+        dump_write(dump_turn_tail(post, turn))
+        return
+    dump_write(dump_human_markdown(post))
 
 def _message_view(msg: dict) -> dict:
     """Сообщение в том виде, в каком его показывают: роль, говорящий, вес и текст.
@@ -332,13 +460,16 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
     Отчёт весит как сцена (десятки килобайт на ход), поэтому в посте остаётся его
     сводка, а текст уходит странице отдельным запросом — когда зритель блок
     раскроет (см. /api/post/<id>/turn). Тот же отчёт целиком уезжает в ДАМП
-    спектакля (см. dump_turn_markdown).
+    спектакля (см. dump_turn_header и step_markdown).
     """
     messages = [_message_view(m) for m in sent]
     extra = [_message_view(m) for m in added]
     removed = list(trim_report.get("removed") or [])
     window = int(trim_report.get("window") or 0)
-    steps = [dict(step) for step in (steps or [])]
+    # Журнал хода передаётся сюда тем же списком, а не копией: отчёт собирается
+    # ДО запроса к модели (иначе ДАМП не с чего было бы начинать), а события
+    # хода ложатся в этот список по ходу дела и должны быть видно в отчёте
+    steps = steps if steps is not None else []
     summary = {
         "messages": len(messages),
         "tokens": sum(m["tokens"] for m in messages),
@@ -365,7 +496,7 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
             "role": role_of(participant.get("is_moderator", False),
                             participant.get("is_judge", False)),
             # То же слово по-русски: в ДАМПе читают глазами, а «participant»
-            # по-русски не читается (см. dump_turn_markdown)
+            # по-русски не читается (см. dump_turn_header)
             "role_name": ROLE_NAMES.get(role_of(participant.get("is_moderator", False),
                                                 participant.get("is_judge", False)),
                                         "Участник"),
@@ -392,7 +523,49 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
     }
 
 
-# Как называть роль по-русски: и в ленте, и в ДАМПе (см. dump_turn_markdown)
+def refresh_turn_report(turn: dict, added: list, search_count: int,
+                        journal: dict = None) -> None:
+    """Дописать в отчёт то, что стало известно только к концу хода.
+
+    Отчёт собирается до запроса к модели (см. build_turn_report), а к концу надо
+    дописать то, чего тогда ещё не было: сколько ход дописал сам и сколько раз
+    просил поиск. Шаги пересчитываются по журналу — он общий с отчётом и к этому
+    моменту уже полон.
+    """
+    extra = [_message_view(m) for m in (added or [])]
+    summary = turn.setdefault("summary", {})
+    # Шаги берём из журнала, а не из старой ссылки: так же на них смотрит и
+    # страница (см. turn_report), и подменённый список не остаётся незамеченным
+    steps = (journal or {}).get("steps")
+    if steps is None:
+        steps = turn.get("steps") or []
+    turn["steps"] = steps
+    summary["extra_messages"] = len(extra)
+    summary["extra_tokens"] = sum(m["tokens"] for m in extra)
+    summary["search_rounds"] = int(search_count or 0)
+    summary["asks"] = sum(1 for step in steps if step.get("kind") == "ask")
+    # Размышления — тоже шаг хронологии, и о них стоит сказать в свёрнутой
+    # строке: иначе о том, что модель что-то говорила сама с собой, и не узнать
+    summary["thought_steps"] = sum(1 for step in steps if step.get("kind") == "thought")
+    summary["problems"] = sum(1 for step in steps
+                               if step.get("kind") in ("refused", "silence"))
+    turn["added"] = extra
+
+
+def _step_view(step: dict) -> dict:
+    """Событие хода в том виде, в каком его показывает страница.
+
+    Время — словами: в JSON метка времени нечитаема, а в хронологии важно именно
+    «когда» (см. clock). Технический признак «запись ещё открыта» наружу тоже
+    не идёт — страница показывает закрытые записи.
+    """
+    view = {key: value for key, value in step.items() if key != "open"}
+    view["clock"] = clock(step.get("t"))
+    view["clock_end"] = clock(step.get("t_end")) if step.get("t_end") else ""
+    return view
+
+
+# Как называть роль по-русски: и в ленте, и в ДАМПе (см. dump_turn_header)
 ROLE_NAMES = {
     "participant": "Участник",
     "moderator": "Модератор",
@@ -759,7 +932,12 @@ class DebateSession:
     def add_post(self, display_name, model_used, content, round_num,
                  search_count=0, search_queries=None,
                  is_moderator=False, is_judge=False, gender="male", thinking="",
-                 sketch="", turn=None):
+                 sketch="", turn=None, dump=True):
+        """Создать пост.
+
+        dump=False — ход уже писался в ДАМП по ходу дела (см. open_dump_turn):
+        дописывать его целиком второй раз — значит удвоить ход в файле.
+        """
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
 
@@ -781,7 +959,8 @@ class DebateSession:
         # Размышления в память спектакля не идут (иначе следующая модель прочитала
         # бы чужой черновик мыслей как сказанное вслух), а в ДАМП — идут: там
         # хронология спектакля, и её читают после занавеса, а не посреди разговора
-        save_dump_entry(post, turn)
+        if dump:
+            save_dump_entry(post, turn)
         return post
 
     # ------------------------------------------------------------
@@ -801,8 +980,18 @@ class DebateSession:
         self.turn_log[int(post_id)] = payload
 
     def turn_report(self, post_id: int) -> dict:
-        """Отчёт о ходе по номеру реплики (None — отчёта нет)."""
-        return self.turn_log.get(int(post_id))
+        """Отчёт о ходе по номеру реплики (None — отчёта нет).
+
+        Отдаётся копия с готовыми шагами: у каждого — время словами, а «перо»,
+        которым ход писался в ДАМП, странице не нужно (это функция, и в JSON
+        ей делать нечего).
+        """
+        payload = self.turn_log.get(int(post_id))
+        if payload is None:
+            return None
+        view = {key: value for key, value in payload.items() if key != "sink"}
+        view["steps"] = [_step_view(step) for step in (payload.get("steps") or [])]
+        return view
 
     def current_participant_role(self) -> str:
         """Роль того, кто сейчас говорит: пустая строка, "moderator" или "judge".
@@ -991,16 +1180,29 @@ class DebateSession:
             + self._substitute(custom.strip(), participant, other_names)
         ]
 
-    def _search_block(self) -> list:
+    def _search_block(self, participant: dict) -> list:
         """Правила поиска для модели — с обоими числами из настроек.
 
         Минимум — чтобы модель искала до первого слова, а не после (см.
         SEARCH_BEFORE_REPLY). Максимум назван не зря: модель, не знающая
         потолка, просит поиск снова и снова — а ей отказывают молча,
         и со стороны это выглядит как задумавшаяся модель (см. MAX_SEARCHES).
+
+        Но правила про поиск уместны только тогда, когда инструмент этой модели
+        правда отправляется. Модель, которой про поиск сказали, а инструмента
+        не дали, зацикливается: она пытается искать и не переходит к ответу —
+        так судья на qwen3.8-flash просидел две минуты и был оборван по
+        CLOUD_TURN_LIMIT, а в ленте появилось только «ход оборван»
+        (см. ollama_api.takes_tools_now).
         """
         if not settings.ENABLE_SEARCH:
             return []
+        if not ollama_api.takes_tools_now(participant.get("model", "")):
+            return [
+                "Инструмент поиска в интернете тебе сейчас не подключён: не проси "
+                "поиск и не выдумывай источники — говори по тому, что знаешь, "
+                "и честно оговаривай, где не уверен."
+            ]
         min_text = (f" Сделай минимум {settings.MIN_SEARCHES} поиск(ов) перед ответом."
                     if settings.MIN_SEARCHES > 0 else "")
         max_searches = max(1, int(settings.MAX_SEARCHES))
@@ -1019,7 +1221,7 @@ class DebateSession:
         if not is_judge:
             blocks.extend(self._moderator_intro_block())
         blocks.extend(self._personal_instruction_block(participant))
-        blocks.extend(self._search_block())
+        blocks.extend(self._search_block(participant))
         return "\n\n".join(b for b in blocks if b)
 
     # ------------------------------------------------------------
@@ -1172,9 +1374,16 @@ class DebateSession:
         # уже не тем, с чего ход начался
         sent = copy.deepcopy(messages)
         # Журнал хода: сюда ляжет всё, что происходит по порядку — запросы с их
-        # входом и выводом (пишет облачный путь и путь Ollama) и поиски с их
-        # формулировками и результатами (пишет цикл поиска)
-        journal = {}
+        # входом и выводом, поиски с формулировкой и весом найденного,
+        # размышления модели. Тот же журнал дописывается в ДАМП, причём каждое
+        # событие уходит в файл в тот момент, когда случилось
+        journal = {"steps": []}
+        # Отчёт собирается ДО запроса к модели: ДАМП надо открыть и записать
+        # «что уехало» раньше, чем модель начнёт думать — иначе у хода,
+        # зациклившегося на две минуты, в файле не осталось бы вообще ничего
+        turn = build_turn_report(participant, round_num, sent, [], trim_report,
+                                 topic=self.topic, steps=journal["steps"])
+        open_dump_turn(len(self.posts) + 1, turn, journal)
 
         # Черновик реплики: если спектакль умеет показывать её по кускам, текст
         # растёт в ленте, пока модель говорит (у местных моделей порций не будет —
@@ -1200,13 +1409,17 @@ class DebateSession:
             if draft is not None:
                 draft.finish()
 
-        # Отчёт о ходе: что уехало, что происходило по порядку и чем кончилось.
-        # Лишнее («ход дописал в запрос вот это») видно отдельно — токены за это
-        # платятся, а в самой истории его нет
-        turn = build_turn_report(
-            participant, round_num, sent, messages[len(sent):], trim_report,
-            topic=self.topic, search_count=search_count,
-            steps=journal.get("steps"))
+        # То, что стало известно к концу хода: сколько он дописал сам и сколько
+        # раз просил поиск. Шаги при этом уже в отчёте — журнал у них общий
+        refresh_turn_report(turn, messages[len(sent):], search_count, journal)
+        # Размышления, не попавшие в хронологию шагами (модель без потока, шлюз,
+        # отдавший размышления одним куском): мысли оплачены, и это единственный
+        # след того, чем модель занималась, — терять его нельзя
+        thoughts = draft.thinking_full() if draft else ""
+        turn["thinking"] = thoughts
+        if thoughts and not any(step.get("kind") == "thought"
+                                for step in turn["steps"]):
+            cloud.journal_thought(journal, thoughts, replace=True)
 
         post = self.add_post(
             display_name=participant["display_name"],
@@ -1230,10 +1443,13 @@ class DebateSession:
             # А это полный отчёт о ходе: у этой реплики его можно раскрыть
             # и посмотреть, что именно прочитала модель
             turn=turn,
+            # Ход уже лёг в ДАМП по событию — второй раз его писать не надо
+            dump=False,
         )
         # Ответ едет в отчёте вместе с остальным: в ленте он и так есть, а вот
         # в ДАМПе ход должен заканчиваться тем, чем он кончился
         turn["answer"] = response
+        close_dump_turn(post, turn)
         self.remember_turn(post["id"], turn)
         self.current_action = None
         time.sleep(0.5)
