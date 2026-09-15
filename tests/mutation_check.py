@@ -196,6 +196,26 @@ BUGS = {
          "        save_thinking_entry(post)",
          "        pass"),
     ],
+    "сметённая реплика снова пропадает из ленты": [
+        ("aitheatre/show.py",
+         "        if replace:\n            self.keep_sketch()",
+         "        if replace:\n            self.sketch = \"\""),
+    ],
+    "набросок снова не доходит до готового поста": [
+        ("aitheatre/show.py",
+         '            sketch=draft.sketch if draft else "",',
+         '            sketch="",'),
+    ],
+    "черновик реплики снова идёт без разметки": [
+        ("aitheatre/page.py",
+         "postText.innerHTML = draft.content_html || escapeHtml(draft.content || '');",
+         "postText.textContent = draft.content || '';"),
+    ],
+    "блок наброска снова перекрывает блок мыслей": [
+        ("aitheatre/page.py",
+         "element.querySelector('.post-thinking:not(.post-sketch)')",
+         "element.querySelector('.post-thinking')"),
+    ],
     "состояние снова не рассылается по сокету": [
         ("aitheatre/web.py",
          "    socketio.emit('status_update', status_payload(with_posts=False))",

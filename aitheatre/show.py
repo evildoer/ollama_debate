@@ -71,17 +71,27 @@ def start_thinking_log(topic: str):
 def save_thinking_entry(post: dict):
     """Складывает размышления хода в стенограмму — по одной записи на реплику.
 
+    Туда же идёт набросок — прежняя версия реплики, которую модель сказала
+    до поиска, а потом переписала: в ленте он живёт свёрнутым блоком, но после
+    занавеса ленты уже нет, и прочитать его можно только здесь.
+
     Пустые размышления не пишутся: у местных моделей их не бывает вовсе,
     и файл не должен пухнуть заголовками без единой мысли.
     """
     thoughts = (post.get("thinking") or "").strip()
-    if not thoughts:
+    sketch = (post.get("sketch") or "").strip()
+    if not thoughts and not sketch:
         return
     title = (f"\n### {post.get('timestamp', '')} · {post.get('display_name', '')} "
              f"({post.get('model_used', '')}) · Акт {post.get('round', '?')}\n\n")
+    body = ""
+    if thoughts:
+        body += thoughts + "\n"
+    if sketch:
+        body += f"\n**Сказано раньше (потом модель ответила заново):**\n\n{sketch}\n"
     try:
         with open(settings.THINKING_FILE, "a", encoding="utf-8") as handle:
-            handle.write(title + thoughts + "\n")
+            handle.write(title + body)
     except Exception as e:
         print(f"  ⚠️  Не сохраняются размышления в {settings.THINKING_FILE.name}: {e}")
 
@@ -89,7 +99,7 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
                 avatar_url: str = None, avatar_emoji: str = None,
                 search_count: int = 0, search_queries: list = None,
                 role: str = "participant", gender: str = "male",
-                thinking: str = "") -> dict:
+                thinking: str = "", sketch: str = "") -> dict:
     """Единая функция создания поста для любого участника (human или AI)"""
     if search_queries is None:
         search_queries = []
@@ -119,6 +129,9 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         # В ленте они живут свёрнутым блоком, так что прочитать их можно и после
         # спектакля, а не только пока модель говорит (см. _StreamingReply)
         "thinking": thinking or "",
+        # А это прежняя версия самой реплики: модель сказала её до поиска и потом
+        # ответила заново. В ленте ей отведён свой свёрнутый блок
+        "sketch": sketch or "",
         "round": round_num,
         "timestamp": time.strftime("%H:%M"),
         "search_count": search_count,
@@ -153,12 +166,15 @@ class _StreamingReply:
     INTERVAL = 0.12          # как часто отправлять набранное, в секундах
     THOUGHT_LIMIT = 20000    # сколько знаков размышлений держим в памяти
     THOUGHT_SHOWN = 600      # сколько из них видно в ленте, пока модель говорит
+    SKETCH_LIMIT = 20000     # сколько знаков «сказано раньше» держим в памяти
+    SKETCH_MARK = "\n\n———\n\n"   # разделитель, если версий было несколько
 
     def __init__(self, participant: dict, round_num: int, publisher):
         self.publisher = publisher
         self.stream_id = f"stream-{uuid.uuid4().hex[:8]}"
         self.text = ""
         self.thoughts = ""
+        self.sketch = ""
         self.answer_started = False
         self.sent_at = 0.0
         self.started = False
@@ -184,12 +200,31 @@ class _StreamingReply:
         replace приходит на первый кусок каждого запроса: за один ход модель
         может говорить дважды (сказала без поиска, а после поиска — заново),
         и тогда в ленте должна остаться вторая реплика, а не склейка двух.
+
+        Но сказанное в первый раз уже видел зритель и за него заплачены токены,
+        поэтому оно не выбрасывается, а уходит в набросок (см. keep_sketch).
         """
         if replace:
+            self.keep_sketch()
             self.text = ""
             self.answer_started = True
         self.text += piece
         self.send_soon(force=replace)
+
+    def keep_sketch(self):
+        """Сберечь сказанное до новой попытки: этот текст уже был в ленте.
+
+        Ход бывает не один: сперва модель отвечает сама, потом её просят
+        поискать, и она отвечает заново. Раньше в этот момент из ленты пропадало
+        то, что зритель уже прочитал, — и выглядело это как «мысли, которые
+        потом убрали». Набросок остаётся свёрнутым блоком (см. sketch в send),
+        а в конце хода уходит в готовый пост.
+        """
+        text = self.text.strip()
+        if not text:
+            return
+        joined = text if not self.sketch else self.sketch + self.SKETCH_MARK + text
+        self.sketch = joined[-self.SKETCH_LIMIT:]
 
     def think(self, piece: str, replace: bool = False):
         """Порция размышлений: модель говорит сама с собой, пока не сказала вслух.
@@ -234,11 +269,13 @@ class _StreamingReply:
                         "stream_id": self.stream_id,
                         "content": self.text,
                         "thinking": self.thought_tail(),
+                        "sketch": self.sketch,
                         "answer_started": self.answer_started,
-                        # Черновик идёт простым текстом: markdown в нём ещё не
-                        # сложился (незакрытая звёздочка — обычное дело), а число
-                        # на каждой порции ничего не стоит
-                        "content_html": None,
+                        # Разметку собираем на каждой порции: жирный текст, списки
+                        # и формулы-строчки появляются на глазах, а не в самом
+                        # конце хода. Незакрытая звёздочка так звёздочкой
+                        # и остаётся — её съест только готовая пара
+                        "content_html": text.markdown_to_html(self.text),
                         "draft": True})
 
     def finish(self):
@@ -383,7 +420,8 @@ class DebateSession:
 
     def add_post(self, display_name, model_used, content, round_num,
                  search_count=0, search_queries=None,
-                 is_moderator=False, is_judge=False, gender="male", thinking=""):
+                 is_moderator=False, is_judge=False, gender="male", thinking="",
+                 sketch=""):
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
 
@@ -391,7 +429,7 @@ class DebateSession:
 
         post = create_post(display_name, model_used, content, round_num,
                           avatar_url, avatar_emoji, search_count, search_queries, role,
-                          gender, thinking)
+                          gender, thinking, sketch)
         self.posts.append(post)
 
         if content.strip():
@@ -770,6 +808,10 @@ class DebateSession:
             # Мысли, сказанные по дороге к ответу: в ленте — свёрнутым блоком,
             # в стенограмме — текстом. Черновик держит их для этого (см. think)
             thinking=draft.thinking_full() if draft else "",
+            # А это прежняя версия реплики, от которой модель отказалась по пути
+            # (обычно — чтобы сначала поискать): тоже свёрнутым блоком, чтобы
+            # зритель мог дочитать то, что мелькнуло в ленте и пропало
+            sketch=draft.sketch if draft else "",
         )
         self.current_action = None
         time.sleep(0.5)

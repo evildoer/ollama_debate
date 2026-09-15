@@ -721,6 +721,88 @@ class TestStreamingReply(unittest.TestCase):
         self.assertIn(self._participant()["display_name"], written)
         self.assertNotIn("Вот ответ.", written, "в стенограмме только мысли, не реплики")
 
+    def test_the_rewritten_reply_is_kept_as_a_sketch(self):
+        """Вторая версия реплики — главная, первая остаётся наброском.
+
+        Так выглядит каждый ход с поиском: сперва модель отвечает сама, потом её
+        просят поискать, и она отвечает заново. Раньше первая версия исчезала
+        из ленты на глазах зрителя, хотя уже была прочитана и оплачена.
+        """
+        def answer(model, messages, participant_name, **kwargs):
+            feed = kwargs["on_delta"]
+            feed("Первый ответ.", True)      # сказала сама
+            feed("Второй ответ.", True)      # сказала заново, после поиска
+            return "Второй ответ.", 1, ["проверочный запрос"]
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+
+        kept = [d for d in self.drafts if d.get("sketch")]
+        self.assertTrue(kept, "сметённая реплика пропала из ленты, как раньше")
+        self.assertEqual(kept[0]["sketch"], "Первый ответ.")
+        self.assertEqual(kept[-1]["content"], "Второй ответ.")
+
+        post = self.session.posts[0]
+        self.assertEqual(post["content"], "Второй ответ.")
+        self.assertEqual(post["sketch"], "Первый ответ.",
+                         "в готовом посте прежняя версия должна остаться")
+
+    def test_the_sketch_stays_out_of_the_memory_of_the_play(self):
+        """Набросок — не сказанное вслух: в память спектакля он не идёт.
+
+        Иначе следующая модель прочитает отброшенную версию как реплику,
+        которая уже прозвучала, — и ответит на неё, а не на спектакль.
+        """
+        def answer(model, messages, participant_name, **kwargs):
+            feed = kwargs["on_delta"]
+            feed("Первый ответ.", True)
+            feed("Второй ответ.", True)
+            return "Второй ответ.", 1, ["проверочный запрос"]
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+
+        self.assertEqual(self.session.conversation_history[0]["content"], "Второй ответ.")
+
+    def test_the_draft_carries_live_markup(self):
+        """Разметку черновик получает сразу: жирное слово не ждёт конца хода."""
+        def answer(model, messages, participant_name, **kwargs):
+            kwargs["on_delta"]("**Жирное** слово.", True)
+            return "**Жирное** слово.", 0, []
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+
+        marked = [d for d in self.drafts if d.get("content_html")]
+        self.assertTrue(marked, "черновик шёл без разметки — придётся ждать конца хода")
+        self.assertIn("<strong>Жирное</strong>", marked[-1]["content_html"])
+        # И простой текст рядом: он нужен тем местам, где HTML не подходит
+        self.assertEqual(marked[-1]["content"], "**Жирное** слово.")
+
+    def test_the_sketch_lays_down_in_the_transcript(self):
+        """Прежнюю версию реплики можно прочитать и после занавеса.
+
+        Мыслей у модели могло и не быть, но набросок есть — и в стенограмме
+        он должен оказаться и без них.
+        """
+        folder = Path(tempfile.mkdtemp())
+        transcript = folder / ".theatre_thinking.md"
+
+        def answer(model, messages, participant_name, **kwargs):
+            feed = kwargs["on_delta"]
+            feed("Первый ответ.", True)
+            feed("Второй ответ.", True)
+            return "Второй ответ.", 1, ["проверочный запрос"]
+
+        with mock.patch.object(settings, "THINKING_FILE", transcript):
+            show.start_thinking_log("Проверочная тема")
+            with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+                self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+            written = transcript.read_text(encoding="utf-8")
+
+        self.assertIn("Первый ответ.", written)
+        self.assertIn("Сказано раньше", written)
+
     def test_a_turn_without_thoughts_leaves_the_transcript_alone(self):
         """Местные модели не размышляют — файла без мыслей быть не должно."""
         transcript = Path(tempfile.mkdtemp()) / ".theatre_thinking.md"
@@ -1528,8 +1610,33 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("thoughts.querySelector('.thinking-text').textContent = thought;",
                       self.page)
         self.assertIn("draft.answer_started ? '💭 мысли' : '💭 размышляет'", self.page)
-        # Черновик идёт простым текстом: markdown посередине реплики — мусор
-        self.assertIn("postText.textContent = draft.content", self.page)
+        # Разметка в черновике собирается на каждой порции — текст жирнеет на глазах
+        self.assertIn("postText.innerHTML = draft.content_html || escapeHtml(draft.content || '')",
+                      self.page)
+
+    def test_the_rewritten_reply_is_shown_as_said_earlier(self):
+        """Прежняя версия реплики не пропадает в тишину, а живёт свёрткой.
+
+        Модель отвечает, потом её просят поискать, и она отвечает заново. Текст
+        первой версии уже мелькнул в ленте (и оплачен) — значит, у него должно
+        быть место и в черновике, и в готовом посте.
+        """
+        self.assertIn("function postSketchHtml(post)", self.page)
+        self.assertIn("${postSketchHtml(post)}", self.page)
+        self.assertIn('post-thinking post-sketch', self.page)
+        self.assertIn('🌱 сказано раньше ·', self.page)
+        self.assertIn("escapeHtml(sketch)", self.page, "набросок показываем текстом")
+        # В черновике этот блок есть сразу: он заполняется по мере хода
+        self.assertIn("const sketch = element.querySelector('.post-sketch');", self.page)
+        self.assertIn("sketch.querySelector('.thinking-text').textContent = said;", self.page)
+        # У мыслей свой блок, и селектор их не должен хватать набросок вместо них
+        self.assertIn("element.querySelector('.post-thinking:not(.post-sketch)')", self.page)
+
+    def test_the_said_before_block_has_its_own_look(self):
+        """«Сказано раньше» — не мысли, и выглядят иначе: читается как версия."""
+        self.assertIn(".post-sketch { border-left-color:", self.page)
+        self.assertIn("body.dark .post-sketch { border-left-color:", self.page)
+        self.assertIn(".post-sketch .thinking-hint {", self.page)
 
     def test_toggle_is_wired_and_remembered(self):
         self.assertIn('id="rolesBtn"', self.page)

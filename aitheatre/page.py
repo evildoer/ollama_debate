@@ -112,8 +112,15 @@ HTML_TEMPLATE = """
         .post-thinking summary { cursor: pointer; font-style: normal; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: #888888; }
         .post-thinking[open] summary { margin-bottom: 8px; }
         .post-thinking .thinking-text { white-space: pre-wrap; }
+        /* Сказано раньше: прежняя версия этой же реплики, от которой модель ушла
+           (обычно — чтобы сначала поискать). За неё заплачены те же токены,
+           поэтому она остаётся в посте свёрнутым блоком, а не пропадает */
+        .post-sketch { border-left-color: #e0d0b0; }
+        .post-sketch .thinking-hint { font-size: 13px; margin-bottom: 8px; color: #9a9a9a; }
         body.dark .post-thinking { background: #141414; border-left-color: #4a4a4a; color: #a3a3a3; }
         body.dark .post-thinking summary { color: #8c8c8c; }
+        body.dark .post-sketch { border-left-color: #4a4030; }
+        body.dark .post-sketch .thinking-hint { color: #7a7a7a; }
         /* Формулы: LaTeX от сервера, MathML от браузера */
         .post-text .math { font-size: 1.05em; }
         .post-text .math-block { display: block; margin: 14px 0; text-align: center; }
@@ -1571,6 +1578,19 @@ HTML_TEMPLATE = """
                 + `<div class="thinking-text">${escapeHtml(thoughts)}</div></details>`;
         }
 
+        // «Сказано раньше»: прежняя версия этой же реплики. Модель отвечает,
+        // потом её просят поискать, и она отвечает заново — а то, что мелькнуло
+        // в ленте первым, раньше просто исчезало. Оно уже оплачено: читать
+        const SKETCH_HINT = 'Так бывает, когда модель сначала отвечает, а потом её просят поискать.';
+        function postSketchHtml(post) {
+            const sketch = (post.sketch || '').trim();
+            if (!sketch) return '';
+            const size = sketch.length.toLocaleString('ru-RU');
+            return `<details class="post-thinking post-sketch"><summary>🌱 сказано раньше · ${size} знаков</summary>`
+                + `<div class="thinking-hint">${SKETCH_HINT}</div>`
+                + `<div class="thinking-text">${escapeHtml(sketch)}</div></details>`;
+        }
+
         function addPost(post) {
             const postsDiv = document.getElementById('posts');
             // Черновик, чей ход уже закончился, уступает место настоящему посту:
@@ -1582,7 +1602,7 @@ HTML_TEMPLATE = """
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postThinkingHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postThinkingHtml(post)}${postSketchHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
             // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать
@@ -1605,13 +1625,13 @@ HTML_TEMPLATE = """
                 element = document.createElement('div');
                 element.className = `post post-role-${draft.role || 'participant'} streaming`;
                 element.setAttribute('data-stream-id', draft.stream_id);
-                element.innerHTML = `<div class="post-avatar">${postAvatarHtml(draft)}</div><div class="post-content">${postHeaderHtml(draft)}<details class="post-thinking" open><summary></summary><div class="thinking-text"></div></details><div class="post-text"></div></div>`;
+                element.innerHTML = `<div class="post-avatar">${postAvatarHtml(draft)}</div><div class="post-content">${postHeaderHtml(draft)}<details class="post-thinking" open><summary></summary><div class="thinking-text"></div></details><details class="post-thinking post-sketch"><summary></summary><div class="thinking-hint">${SKETCH_HINT}</div><div class="thinking-text"></div></details><div class="post-text"></div></div>`;
                 postsDiv.insertBefore(element, postsDiv.firstChild);
             }
             // Мысли: своим бледным блоком над репликой. Свёрнутыми их сделает
             // зритель сам — а придут они раньше ответа, и без них была бы
             // длинная пауза непонятно чего
-            const thoughts = element.querySelector('.post-thinking');
+            const thoughts = element.querySelector('.post-thinking:not(.post-sketch)');
             if (thoughts) {
                 const thought = draft.thinking || '';
                 thoughts.style.display = thought ? '' : 'none';
@@ -1620,10 +1640,21 @@ HTML_TEMPLATE = """
                 // о сказанном, и подпись должна быть честной
                 thoughts.querySelector('summary').textContent = draft.answer_started ? '💭 мысли' : '💭 размышляет';
             }
+            // Сказанное до новой попытки: текст уже был в ленте и пропадать ему
+            // незачем — сворачивается в блок и остаётся до конца хода
+            const sketch = element.querySelector('.post-sketch');
+            if (sketch) {
+                const said = (draft.sketch || '').trim();
+                sketch.style.display = said ? '' : 'none';
+                sketch.querySelector('.thinking-text').textContent = said;
+                sketch.querySelector('summary').textContent =
+                    `🌱 сказано раньше · ${said.length.toLocaleString('ru-RU')} знаков`;
+            }
             const postText = element.querySelector('.post-text');
-            // Простым текстом, а не HTML: реплика ещё не дописана, и markdown
-            // на середине (незакрытая звёздочка) выглядел бы мусором
-            if (postText) postText.textContent = draft.content || '';
+            // Разметку сервер собирает на каждой порции: жирный текст и списки
+            // появляются на глазах, а не в самом конце хода. Незакрытая
+            // звёздочка так и остаётся звёздочкой — markdown её не съест
+            if (postText) postText.innerHTML = draft.content_html || escapeHtml(draft.content || '');
         }
         
         function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }
