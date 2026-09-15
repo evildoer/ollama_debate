@@ -186,6 +186,23 @@ BUGS = {
          "        result[openai_key] = _within_cloud_limits(openai_key, value, model)",
          "        result[openai_key] = value"),
     ],
+    "поле, которого вендор не знает, снова не убирается": [
+        ("aitheatre/cloud.py",
+         "    named = named_field(text)",
+         '    named = ""'),
+    ],
+    "убранное поле снова уезжает на следующем ходу": [
+        ("aitheatre/cloud.py",
+         "    for field in dropped_params(model):\n        payload.pop(field, None)",
+         "    for field in ():\n        payload.pop(field, None)"),
+    ],
+    "поиск снова требуют после ответа, а не до него": [
+        ("aitheatre/ollama_api.py",
+         "        require_search = force_tool_use or (\n"
+         "            iteration == 0 and settings.SEARCH_BEFORE_REPLY\n"
+         "            and search_count < settings.MIN_SEARCHES and takes_tools_now(model))",
+         "        require_search = force_tool_use"),
+    ],
     "мысли хода снова теряются вместе с черновиком": [
         ("aitheatre/show.py",
          '            thinking=draft.thinking_full() if draft else "",',

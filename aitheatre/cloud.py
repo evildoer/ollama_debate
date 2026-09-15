@@ -433,17 +433,68 @@ def _url(path: str) -> str:
 
 # Что значат коды шлюза — словами, а не номером: по номеру причина не видна,
 # а ошибка из чата идёт прямо в ленту спектакля.
+# Поля тела, которые в схеме OpenAI отвечают за инструменты поиска
+_TOOL_FIELDS = ("tools", "tool_choice", "functions")
+
+# Числа, которые шлюз назвал лишними: он пишет имя поля словами («Unknown
+# parameter: 'repeat_penalty'»), и повторять этот отказ на каждом ходу незачем.
+# Помним по имени модели: за тем же шлюзом у другого вендора те же min_p, top_k
+# и repeat_penalty вполне могут быть поняты
+_DROPPED_PARAMS = {}      # модель -> {имена полей}
+
+# Имя поля из слов самого шлюза: «Unknown parameter: 'repeat_penalty'»,
+# «Unrecognized request argument supplied: min_p». Берём первое названное —
+# в посланиях вроде «Unsupported parameter: 'max_tokens' … Use 'max_completion_tokens'
+# instead» лишним объявлено именно оно
+_NAMED_FIELD_RE = re.compile(
+    r"(?:unknown|unrecognized|unsupported|unexpected|invalid|extra)\b"
+    r"[^'\"]{0,40}?['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
+    re.IGNORECASE)
+
+
+# Сколько раз можно поправить запрос после отказа шлюза. Один круг мало:
+# вендоры называют лишние поля по одному («Unsupported parameter: 'top_k'», потом
+# про temperature), а у «Хаоса» в характере их сразу пять, и у модели вроде
+# gpt-5-nano, которая чисел не понимает вовсе, он высказывается постепенно.
+# Шести кругов хватает, чтобы всё это случилось в одном ходу, а не в каждом:
+# убранный ключ запоминается для модели, и дальше ход идёт без отказов
+_EASE_ROUNDS = 6
+
+
+def dropped_params(model: str) -> set:
+    """Поля, которых эта модель больше не увидит: шлюз назвал их лишними."""
+    return _DROPPED_PARAMS.get(model, set())
+
+
+def named_field(text: str) -> str:
+    """Какое поле шлюз назвал лишним или непонятным — или пустая строка.
+
+    Читаем только его слова: у каждого вендора свои числа, и догадка по имени
+    модели была бы гаданием (так, OpenAI-форма не знает repeat_penalty, а vLLM
+    за тем же шлюзом его прекрасно понимает).
+    """
+    found = _NAMED_FIELD_RE.search(text or "")
+    return found.group(1) if found else ""
+
+
 def _eased_body(model: str, body: dict, error):
     """Тело запроса без того, на что шлюз пожаловался (или None).
 
-    Ответ на 400 шлюз пишет словами, и две причины понятны прямо из них:
+    Ответ на 400 шлюз пишет словами, и три причины понятны прямо из них:
 
     Первая. «Unsupported parameter: 'max_tokens'... Use 'max_completion_tokens'
     instead» — так отвечают новые модели OpenAI (gpt-5, o-серия) на старое имя
     поля. Переименовываем и запоминаем: со следующего хода поле уйдёт правильно
     сразу, и отказ не повторится.
 
-    Вторая. Если запрос с инструментом поиска не проходит, а такой же без него
+    Вторая — та же жалоба, но на поле, которого у вендора нет вовсе: «Unknown
+    parameter: 'repeat_penalty'». Так OpenAI-форма отвечает на числа Ollama
+    (min_p, top_k, repeat_penalty) у тех вендоров, которые их не понимают,
+    а включаются они одной общей настройкой (CLOUD_PASS_OLLAMA_EXTRAS) —
+    то есть выключить их выборочно было нельзя, и ход пропадал на каждом круге.
+    Теперь названное поле убирается из тела и запоминается для этой модели.
+
+    Третья. Если запрос с инструментом поиска не проходит, а такой же без него
     проходит — модель его не принимает. Признаком этого делится вызывающий:
     он видит, что запрос без инструмента удался (см. _MODELS_WITHOUT_TOOLS).
 
@@ -451,22 +502,38 @@ def _eased_body(model: str, body: dict, error):
     в три бесполезных запроса подряд.
     """
     text = str(error)
-    if "max_completion_tokens" in text and "max_tokens" in body:
+    named = named_field(text)
+
+    # max_tokens — не лишнее поле, а другое его имя, и шлюз прямо это пишет
+    if "max_tokens" in body and (named == "max_tokens" or "max_completion_tokens" in text):
         _RENAMED_MAX_TOKENS.add(model)
         print(f"  ℹ️  Облако: {bare_model_name(model)} — поле числа токенов "
               f"называется иначе, шлю как max_completion_tokens")
         eased = {key: value for key, value in body.items() if key != "max_tokens"}
         eased["max_completion_tokens"] = body["max_tokens"]
         return eased
+
+    if named in _TOOL_FIELDS:
+        # Про инструмент шлюз сказал сам — убираем его, не трогая числа
+        return {key: value for key, value in body.items() if key not in _TOOL_FIELDS}
+
+    if named and named in body:
+        _DROPPED_PARAMS.setdefault(model, set()).add(named)
+        print(f"  ℹ️  Облако: {bare_model_name(model)} не знает поля {named} — "
+              f"убираю его из запроса и больше не шлю (в теле останутся те числа, "
+              f"которые она понимает)")
+        return {key: value for key, value in body.items() if key != named}
+
     if "tools" in body or "tool_choice" in body:
-        return {key: value for key, value in body.items()
-                if key not in ("tools", "tool_choice")}
+        return {key: value for key, value in body.items() if key not in _TOOL_FIELDS}
     return None
 
 
 _HTTP_HINTS = {
-    400: "шлюз не понял запрос. Обычно дело в лишнем или неверном поле в теле: "
-         "попробуйте выключить числа характеров и инструменты поиска (CLOUD_SEND_*)",
+    400: "шлюз не понял запрос. Обычно дело в лишнем поле в теле: названное поле "
+         "приложение убирает само и повторяет запрос, а если отказ повторяется — "
+         "выключите числа характеров (CLOUD_SEND_PARAMS) или инструменты поиска "
+         "(CLOUD_SEND_TOOLS)",
     401: "шлюз не принял ключ: проверьте строку CLOUD_API_KEY в файле .env",
     402: "на ключе кончились средства: пополните баланс",
     403: "ключ не даёт доступа к этой модели",
@@ -918,6 +985,10 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     if send_params():
         payload.update(translate_options(options if options is not None else settings.OPTIONS,
                                         model=model))
+    # Поля, на которые этот шлюз уже жаловался, в запрос больше не идут: иначе
+    # каждый ход повторял бы один и тот же отказ, а ключ уходил бы в паузу
+    for field in dropped_params(model):
+        payload.pop(field, None)
 
     uses_tools = send_tools() and model_takes_tools(model)
     if uses_tools:
@@ -937,10 +1008,12 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     body = payload
     answer, error = ask(body)
 
-    # 400 значит «запрос не понят». Причина почти всегда в нашем же поле, и две
-    # из них узнаются по словам самого шлюза — их и лечим (см. _eased_body),
-    # не превращая один отказ в три бесполезных запроса
-    for _ in range(2):
+    # 400 значит «запрос не понят». Причина почти всегда в нашем же поле, и она
+    # узнаётся по словам самого шлюза — такое лечим (см. _eased_body). Кругов
+    # нужно несколько: OpenAI-подобные вендоры называют поля по одному, и ход
+    # с пятью числами характера требует до пяти запросов. Зато каждый убранный
+    # ключ запоминается, и следующие ходы идут без отказов вовсе
+    for _ in range(_EASE_ROUNDS):
         if getattr(error, "code", None) != 400:
             break
         eased = _eased_body(model, body, error)

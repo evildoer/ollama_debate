@@ -2305,6 +2305,110 @@ class TestCloudGateway(unittest.TestCase):
                          "результат обязан ссылаться на вызвавший его вызов")
         self.assertEqual(sent[2]["content"], "Канберра")
 
+    def test_a_number_the_vendor_does_not_know_is_dropped_and_remembered(self):
+        """OpenAI-форма не знает repeat_penalty — и шлюз говорит это сам.
+
+        min_p, top_k и repeat_penalty включаются одной настройкой
+        (CLOUD_PASS_OLLAMA_EXTRAS), то есть выборочно их не выключить: либо поле
+        уходит всем, либо никому. У вендора, который его не понимает, каждый ход
+        падал одинаково — 400, а за серией отказов шёл 429. Теперь названное
+        шлюзом поле убирается из запроса и запоминается для этой модели,
+        а остальные числа остаются.
+        """
+        self.addCleanup(cloud._DROPPED_PARAMS.clear)
+        os.environ["CLOUD_SEND_PARAMS"] = "1"
+        os.environ["CLOUD_PASS_OLLAMA_EXTRAS"] = "1"
+        self.addCleanup(os.environ.pop, "CLOUD_SEND_PARAMS", None)
+        self.addCleanup(os.environ.pop, "CLOUD_PASS_OLLAMA_EXTRAS", None)
+        self.gateway.statuses = [400, 200]
+        self.gateway.texts = [
+            json.dumps({"error": {"message": "Unknown parameter: 'repeat_penalty'.",
+                                   "type": "invalid_request_error"}}),
+            json.dumps({"choices": [{"message": {"content": "Канберра."}}]}),
+        ]
+
+        content, _tools = cloud.chat(
+            self.MODEL, [{"role": "user", "content": "Привет!"}],
+            options={"temperature": 0.5, "top_k": 40, "repeat_penalty": 1.2})
+
+        self.assertEqual(content, "Канберра.", "ход должен состояться, а не пропасть")
+        self.assertEqual(self.gateway.requests[0]["body"]["repeat_penalty"], 1.2)
+        second = self.gateway.requests[1]["body"]
+        self.assertNotIn("repeat_penalty", second, "лишнее поле уходит")
+        self.assertEqual(second["temperature"], 0.5,
+                         "остальные числа трогать нельзя — шлюз на них не жаловался")
+        self.assertEqual(second["top_k"], 40)
+
+        # И запомнили: со следующего хода поле не уходит вовсе, а отказ не повторяется
+        cloud.chat(self.MODEL, [{"role": "user", "content": "Ещё раз"}],
+                   options={"repeat_penalty": 1.2})
+        self.assertNotIn("repeat_penalty", self.gateway.last_request()["body"])
+
+    def test_a_missing_number_is_not_confused_with_a_refused_tool(self):
+        """Причина отказа названа полем — значит, дело в нём, а не в поиске.
+
+        Раньше на любой 400 из тела выбрасывались инструменты: искать причину
+        приходилось человеку, а ход кончался ошибкой в ленте, хотя поиск был ни
+        при чём.
+        """
+        os.environ["CLOUD_SEND_PARAMS"] = "1"
+        os.environ["CLOUD_SEND_TOOLS"] = "1"
+        os.environ["CLOUD_PASS_OLLAMA_EXTRAS"] = "1"
+        for name in ("CLOUD_SEND_PARAMS", "CLOUD_SEND_TOOLS", "CLOUD_PASS_OLLAMA_EXTRAS"):
+            self.addCleanup(os.environ.pop, name, None)
+        self.addCleanup(cloud._DROPPED_PARAMS.clear)
+        self.gateway.statuses = [400, 200]
+        self.gateway.texts = [
+            json.dumps({"error": {"message": "Unknown parameter: 'repeat_penalty'."}}),
+            json.dumps({"choices": [{"message": {"content": "Канберра."}}]}),
+        ]
+
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                     options={"repeat_penalty": 1.2})
+
+        self.assertEqual(content, "Канберра.")
+        self.assertIn("tools", self.gateway.requests[1]["body"],
+                      "инструмент поиска был ни при чём — его нельзя выбрасывать")
+
+    def test_the_search_is_demanded_before_the_first_word(self):
+        """Поиск требуется сразу: первая версия реплики не рождается вовсе.
+
+        Раньше ход шёл так: модель отвечала сама, потом её просили поискать,
+        и она отвечала заново — первый ответ мелькал в ленте и исчезал, а токены
+        за него были оплачены. Теперь инструмент требуется в самом первом запросе
+        хода, и реплика в ленте начинается один раз.
+        """
+        os.environ["CLOUD_SEND_TOOLS"] = "1"
+        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        self.gateway.texts = [
+            json.dumps({"choices": [{"message": {"content": "", "tool_calls": [
+                {"id": "call-1", "type": "function",
+                 "function": {"name": "search_web",
+                              "arguments": "{\"query\": \"столица Австралии\"}"}}]}}]}),
+            # Второй ответ — потоком: именно так видно, сколько раз начиналась
+            # реплика в ленте (порции идут в on_delta)
+            "data: " + json.dumps({"choices": [{"delta": {"content": "Канберра."}}]})
+            + "\n\ndata: [DONE]\n\n",
+        ]
+        pieces = []
+
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="Канберра")):
+            content, count, queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Столица Австралии?"}],
+                participant_name="Проверка",
+                on_delta=lambda piece, replace=False: pieces.append((piece, replace)))
+
+        self.assertEqual(content, "Канберра.")
+        self.assertEqual(count, 1, "поиск должен быть ровно один")
+        self.assertEqual(queries, ["столица Австралии"])
+        first = self.gateway.requests[0]["body"]
+        self.assertEqual(first["tool_choice"], "required",
+                         "поиск надо требовать с первого же запроса")
+        self.assertEqual(first["tools"][0]["function"]["name"], "search_web")
+        # Первой версии реплики не было: черновик начался ровно один раз
+        self.assertEqual(len(pieces), 1, f"реплика выходила в ленту {len(pieces)} раза")
+        self.assertTrue(pieces[0][1], "первая порция начинает реплику заново")
+
     def test_a_model_that_refuses_tools_is_asked_again_without_them(self):
         """400 на инструмент — не приговор модели: говорим с ней без поиска.
 

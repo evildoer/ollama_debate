@@ -24,6 +24,24 @@ from . import settings
 # Кэш для хранения информации о поддержке tools моделями
 MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
 
+
+def takes_tools_now(model: str) -> bool:
+    """Умеет ли модель инструменты — до первого запроса, а не после него.
+
+    Спрашивать надо раньше, потому что от этого зависит сам первый запрос:
+    можно сразу потребовать поиск (см. SEARCH_BEFORE_REPLY), а не ждать ответа,
+    чтобы потом попросить заново. Кэш моделей тот же, поэтому лишнего запроса
+    к Ollama не будет: /api/show спрашивается один раз на модель.
+    """
+    if not settings.ENABLE_SEARCH:
+        return False
+    if cloud.is_cloud_model(model):
+        # Про облачные модели Ollama ничего не знает — там решает настройка
+        return cloud.send_tools() and cloud.model_takes_tools(model)
+    if model not in MODELS_TOOLS_SUPPORT:
+        MODELS_TOOLS_SUPPORT[model] = check_model_tools_support(model)
+    return bool(MODELS_TOOLS_SUPPORT.get(model))
+
 # Кэш поддержки режима размышлений: {"model_name": True/False}.
 # Размышлять умеют не все модели (Ollama сообщает это в capabilities, /api/show):
 # у llama-моделей там только completion, у gemma4/qwen35 есть "thinking".
@@ -898,8 +916,15 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         if show_session is not None and show_session.moderator_finished and content and content.strip():
             return content, search_count, search_queries
         
-        # Если нужен принудительный поиск - передаём tool_choice="any"
-        current_tool_choice = "any" if force_tool_use else None
+        # Если нужен принудительный поиск - передаём tool_choice="any".
+        # И то же самое делаем на самом первом запросе хода: искать надо
+        # до того, как сказано слово, а не после — иначе первая версия реплики
+        # рождается только для того, чтобы быть отброшенной (её токены оплачены,
+        # а в ленте она мелькала и исчезала; см. SEARCH_BEFORE_REPLY)
+        require_search = force_tool_use or (
+            iteration == 0 and settings.SEARCH_BEFORE_REPLY
+            and search_count < settings.MIN_SEARCHES and takes_tools_now(model))
+        current_tool_choice = "any" if require_search else None
         
         content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice,
                                                    options=options, think=think, on_delta=on_delta,
