@@ -28,7 +28,10 @@
   * состав — переименование, пол, подмена модели, откат при ошибке;
   * жребий характеров — судья тянет наравне со всеми, повторы допустимы;
   * аватары — кириллица в имени файла и пол в ключевых словах;
-  * VRAM — оценка контекста ведёт себя монотонно и уважает бюджет.
+  * VRAM — оценка контекста ведёт себя монотонно и уважает бюджет;
+  * страница целиком — скрипт разбирается так же, как в браузере (одна
+    синтаксическая ошибка убивает его целиком, и тогда молчат все кнопки),
+    а питоновский `\n` в шаблоне не рвёт строку JS пополам.
 """
 
 import builtins
@@ -39,6 +42,8 @@ import importlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import symtable
 import tempfile
 import threading
@@ -3989,6 +3994,77 @@ class TestStatusChannel(unittest.TestCase):
         with mock.patch.object(web_app.threading, "Thread") as thread:
             web_app.start_status_pusher()
         thread.assert_not_called()
+
+
+# -------------------------------------------------------- страница целиком
+
+class TestPageScript(unittest.TestCase):
+    """Страница целиком: разметку не исполняет ни один питоновский тест — а браузер исполняет.
+
+    Одна синтаксическая ошибка в скрипте убивает скрипт целиком, поэтому
+    «сломалась одна строка» на странице выглядит как «перестали работать все
+    кнопки»: обработчики в разметке есть, а функций `toggleTheme` и
+    `toggleRoleMarks` уже нет, и в консоли — `is not defined`. Найти это в
+    питоновском файле нечем: для Python шаблон — просто строка.
+
+    Отсюда два сторожа. Первый — настоящий интерпретатор JavaScript (если он в
+    системе есть): он разбирает скрипт страницы так же, как браузер. Второй
+    смотрит на то, чего интерпретатор увидеть уже не может: в шаблон попал
+    питоновский эскейп (`\n`), и Python превратил его в настоящий перевод
+    строки — строка JS порвалась на три, а вместе с ней и весь скрипт. Для
+    строки в JS нужен `\\n` — тогда до браузера доедет тот самый `\n`.
+    """
+
+    # Разметка идёт обычной строкой (`"""`, а не `r"""`), поэтому любой
+    # `\n`, `\t` и `\r` в ней — это эскейп Python. Два слэша подряд (`\\n`)
+    # под проверку не попадают: это уже настоящая строка JS.
+    PYTHON_ESCAPE_RE = re.compile(r"(?<!\\)\\[ntr]")
+
+    @staticmethod
+    def template_source() -> str:
+        """Разметка из `page.py` — ровно так, как она написана на диске."""
+        source = Path(page.__file__).read_text(encoding="utf-8")
+        opening = 'HTML_TEMPLATE = """'
+        start = source.index(opening) + len(opening)
+        return source[start:source.index('"""', start)]
+
+    def script_blocks(self):
+        """Скрипты самой страницы, без внешних подключений (клиент Socket.IO)."""
+        return re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>",
+                          page.HTML_TEMPLATE, re.S)
+
+    def test_python_did_not_eat_backslashes_in_the_page(self):
+        """`\n` внутри шаблона рвёт строку JS — и вместе с ней всю страницу."""
+        region = self.template_source()
+        found = []
+        for match in self.PYTHON_ESCAPE_RE.finditer(region):
+            line = region.count("\n", 0, match.start()) + 1
+            found.append(f"строка {line}: {match.group(0)!r}")
+        self.assertEqual(found, [], (
+            "в шаблоне страницы питоновские эскейпы: они превращаются в настоящие "
+            "переводы строк и ломают скрипт. Для строки в JS нужен `\\\\n`:\n  "
+            + "\n  ".join(found)))
+
+    def test_the_page_script_parses(self):
+        """Скрипт страницы разбирается настоящим интерпретатором JavaScript."""
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node не найден: разбор скрипта не с кем сверить")
+        blocks = self.script_blocks()
+        self.assertTrue(blocks, "на странице не нашлось ни одного своего скрипта")
+        for number, block in enumerate(blocks, 1):
+            with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                            encoding="utf-8") as handle:
+                handle.write(block)
+                path = handle.name
+            try:
+                result = subprocess.run([node, "--check", path],
+                                        capture_output=True, text=True)
+            finally:
+                os.unlink(path)
+            self.assertEqual(result.returncode, 0,
+                             f"скрипт страницы (блок {number}) не разбирается:\n"
+                             f"{(result.stderr or '').strip()}")
 
 
 if __name__ == "__main__":
