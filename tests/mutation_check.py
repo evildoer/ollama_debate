@@ -159,6 +159,21 @@ BUGS = {
          "        if not retry_error:\n            _MODELS_WITHOUT_TOOLS.add(model)",
          "        if not retry_error:\n            pass"),
     ],
+    "поток шлюза снова читается как обычный ответ": [
+        ("aitheatre/cloud.py",
+         "            if streaming:\n                return _read_stream(response, on_delta)",
+         "            if False:\n                return _read_stream(response, on_delta)"),
+    ],
+    "части вызова инструмента снова читаются как готовый вызов": [
+        ("aitheatre/cloud.py",
+         '        if function.get("name"):\n            call["name"] += str(function["name"])',
+         '        if function.get("name"):\n            call["name"] = str(function["name"])'),
+    ],
+    "черновик реплики снова не закрывается, когда ход сорвался": [
+        ("aitheatre/show.py",
+         "            if draft is not None:\n                draft.finish()",
+         "            if draft is not None and draft.finished:\n                draft.finish()"),
+    ],
     "молчащий шлюз снова отвечает сырым текстом ошибки": [
         ("aitheatre/cloud.py",
          "        except TimeoutError:\n"

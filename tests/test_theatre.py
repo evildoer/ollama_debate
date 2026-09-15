@@ -582,6 +582,95 @@ class TestCastEditor(unittest.TestCase):
         self.assertEqual(self.session.posts[0]["display_name"], "Старое Имя")
 
 
+# ---------------------------------------------------------------- живая реплика
+
+class TestStreamingReply(unittest.TestCase):
+    """Черновик реплики: то, что модель говорит прямо сейчас.
+
+    Черновик — не пост. Он не попадает в ленту вместе с постами и не остаётся
+    в памяти спектакля: иначе следующая модель прочитала бы полреплики как уже
+    сказанное. И он обязан закрыться, чем бы ход ни кончился.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.drafts = []
+        self.saved_interval = show._StreamingReply.INTERVAL
+        # В тесте ждать нечего: порции должны доходить целиком
+        show._StreamingReply.INTERVAL = 0
+        self.addCleanup(setattr, show._StreamingReply, "INTERVAL", self.saved_interval)
+
+        def answer(model, messages, participant_name, **kwargs):
+            feed = kwargs.get("on_delta")
+            if feed is not None:
+                feed("Первая половина.", True)
+                feed(" Вторая.", False)
+            return f"Реплика от {participant_name}.", 0, []
+
+        for name, value in (
+            ("check_models_available",
+             mock.Mock(return_value={"ok": True, "missing": [], "error": None})),
+            ("unload_model", mock.Mock()),
+            ("ask_model", mock.Mock(side_effect=answer)),
+        ):
+            patcher = mock.patch.object(ollama_api, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _participant() -> dict:
+        """Свой участник, а не из файла настроек: тест не должен зависеть от состава."""
+        return {"display_name": "Проверка", "model": "fake-model", "gender": "male"}
+
+    def test_the_growing_reply_stays_out_of_the_feed(self):
+        participant = self._participant()
+        self.session.handle_ai_turn(participant, 1, on_draft=self.drafts.append)
+
+        grown = [d for d in self.drafts if d.get("content")]
+        self.assertTrue(grown, "черновик не показывался")
+        self.assertEqual(grown[-1]["content"], "Первая половина. Вторая.")
+        self.assertEqual(grown[-1]["display_name"], participant["display_name"])
+        self.assertEqual(grown[-1]["role_icon"], "🎭", "вид у черновика как у настоящего поста")
+        self.assertTrue(any(d.get("done") for d in self.drafts),
+                        "ход кончился — черновик должен уступить место посту")
+        # В ленте только настоящий пост: полреплики в историю не попадает
+        self.assertEqual(len(self.session.posts), 1)
+        self.assertIn(f"Реплика от {participant['display_name']}.", self.session.posts[0]["content"])
+
+    def test_a_draft_is_closed_even_when_the_turn_fails(self):
+        """Ход сорвался — черновик всё равно должен уйти из ленты.
+
+        Иначе недописанная реплика так и осталась бы висеть над настоящими:
+        модель уже замолчала, а текст на экране говорит, что она ещё говорит.
+        """
+        def explode(model, messages, participant_name, **kwargs):
+            kwargs["on_delta"]("Начал говорить", True)
+            raise RuntimeError("шлюз упал")
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=explode)):
+            with self.assertRaises(RuntimeError):
+                self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+
+        self.assertTrue(any(d.get("done") for d in self.drafts),
+                        "сорванный ход обязан закрыть черновик")
+
+    def test_pieces_do_not_flood_the_feed(self):
+        """Часть шлюзов печатает по букве: на таком потоке лента бы захлебнулась."""
+        show._StreamingReply.INTERVAL = 5      # пауза больше любой порции
+        sent = []
+        reply = show._StreamingReply(self._participant(), 1, sent.append)
+
+        reply.feed("Реплика пишется", True)
+        reply.feed(" и ещё немного")
+        reply.feed(" и вот так")
+
+        self.assertEqual(len(sent), 1, "частые порции — одна отправка, а не три")
+        self.assertEqual(sent[0]["content"], "Реплика пишется")
+        reply.finish()
+        self.assertTrue(sent[-1].get("done"))
+
+
 # ---------------------------------------------------------------- сцена
 
 class TestSceneEditing(unittest.TestCase):
@@ -1497,13 +1586,14 @@ class FakeGateway:
     """
 
     def __init__(self, models=("qwen/qwen3.7-flash",), content="Канберра.",
-                 status=200, body_text=None, statuses=()):
+                 status=200, body_text=None, statuses=(), stream_text=None):
         self.requests = []        # что до нас донеслось: метод, путь, ключ, тело
         self.models = list(models)
         self.content = content
         self.status = status
         self.statuses = list(statuses)   # очередь кодов ответа: для повторов после 429
         self.body_text = body_text    # сырой ответ вместо обычного: ошибки и мусор
+        self.stream_text = stream_text    # поток «data: …» вместо обычного ответа
 
         gateway = self
 
@@ -1554,6 +1644,8 @@ class FakeGateway:
                 break    # сокет закрыт — просили остановиться
 
     def answer(self, path: str) -> bytes:
+        if self.stream_text is not None:
+            return self.stream_text.encode("utf-8")
         if self.body_text is not None:
             return self.body_text.encode("utf-8")
         if path.endswith("/models"):
@@ -1677,6 +1769,83 @@ class TestCloudGateway(unittest.TestCase):
         self.assertNotIn("min_p", sent, "в схеме OpenAI такого поля нет")
         self.assertEqual(sent["tools"][0]["function"]["name"], "search_web")
         self.assertEqual(sent["messages"][0]["name"], "иван")
+
+    @staticmethod
+    def _sse(*chunks) -> str:
+        """Поток шлюза: куски строками «data: {…}», в конце — «data: [DONE]»."""
+        lines = [f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks]
+        return "\n\n".join(lines) + "\n\ndata: [DONE]\n\n"
+
+    @staticmethod
+    def _piece(text: str) -> dict:
+        """Одна порция текста в потоке: так её отдают шлюзы OpenAI."""
+        return {"choices": [{"delta": {"content": text}}]}
+
+    def test_the_reply_grows_in_pieces_while_the_model_speaks(self):
+        """Ответ умеет приходить по кускам, а собираться в тот же целый текст."""
+        self.gateway.stream_text = self._sse(self._piece("Кан"), self._piece("бер"),
+                                             self._piece("ра."))
+        pieces = []
+        content, tools = cloud.chat(
+            self.MODEL, [{"role": "user", "content": "Привет!"}],
+            on_delta=lambda piece, replace: pieces.append((piece, replace)))
+
+        self.assertTrue(self.gateway.last_request()["body"]["stream"],
+                        "поток надо попросить у шлюза")
+        self.assertEqual(content, "Канберра.", "целый текст собирается из кусков")
+        self.assertEqual(pieces, [("Кан", True), ("бер", False), ("ра.", False)],
+                         "первый кусок начинает ответ заново, остальные — продолжают его")
+        self.assertEqual(tools, [])
+
+    def test_a_tool_call_is_glued_from_the_stream(self):
+        """Вызов инструмента в потоке разрезан на части — их надо склеить.
+
+        Имя и аргументы приходят фрагментами строки: прочитать первый фрагмент
+        как готовый вызов — значит потерять поиск (у инструмента осталась бы
+        половина имени, а аргументы вообще не разобрались бы).
+        """
+        self.gateway.stream_text = self._sse(
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_7", "type": "function",
+                 "function": {"name": "search_", "arguments": '{"query": "сто'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"name": "web",
+                                          "arguments": 'лица"}'}}]}}]},
+        )
+
+        # Поток просим только тогда, когда есть кому его показывать: без
+        # получателя порций ответ читался бы целиком, и разбирать его как поток
+        # было бы незачем
+        content, tools = cloud.chat(self.MODEL, [{"role": "user", "content": "?"}],
+                                    on_delta=lambda piece, replace: None)
+
+        self.assertEqual(content, "")
+        self.assertEqual(tools[0]["function"]["name"], "search_web")
+        self.assertEqual(tools[0]["function"]["arguments"], {"query": "столица"})
+        self.assertEqual(tools[0]["id"], "call_7")
+
+    def test_a_gateway_that_ignores_the_stream_still_answers(self):
+        """Просить поток — не повод потерять реплику: годится и обычный ответ."""
+        self.gateway.body_text = json.dumps(
+            {"choices": [{"message": {"content": "Канберра."}}]})
+
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                     on_delta=lambda piece, replace: None)
+
+        self.assertEqual(content, "Канберра.")
+
+    def test_streaming_can_be_switched_off(self):
+        """Выключатель на месте: без него ответ приходит целиком, как раньше."""
+        os.environ["CLOUD_STREAM"] = "0"
+        self.addCleanup(os.environ.pop, "CLOUD_STREAM", None)
+
+        pieces = []
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                     on_delta=lambda piece, replace: pieces.append(piece))
+
+        self.assertFalse(self.gateway.last_request()["body"]["stream"])
+        self.assertEqual(pieces, [], "поток выключен — порций быть не должно")
+        self.assertEqual(content, "Канберра.")
 
     def test_a_crowded_gateway_is_asked_again_after_a_pause(self):
         """429 — просьба сбавить темп: повторяем, а не считаем ход сломанным."""
