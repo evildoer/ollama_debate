@@ -62,12 +62,22 @@ _MODELS_CACHE = {"at": 0.0, "names": [], "error": None}
 # Имена настроек облака, которые приложение читает из окружения и из .env.
 # Список нужен не для чтения (читаем по имени), а чтобы узнавать опечатки
 # и склейки: строка в .env, которая упоминает настройку, но не совпадает с её
-# именем ровно, — почти всегда ошибка копирования, и молчать про неё нельзя
+# именем ровно, — почти всегда ошибка копирования, и молчать про неё нельзя.
+#
+# Поэтому список должен покрывать ВСЁ, что читается из .env, включая настройки,
+# которые читаются не здесь (CLOUD_NUM_CTX — в settings.context_budget): иначе
+# человек с настоящей строкой в .env читал бы «строка не знакома приложению —
+# настройка НЕ применена», хотя она применена. Ровно это и случилось со
+# CLOUD_STREAM, CLOUD_SHOW_THINKING, CLOUD_LIMIT_PARAMS и CLOUD_TURN_LIMIT:
+# ложные предупреждения на каждой строке, в которых настоящие опечатки тонули.
+# Что список не отстал от кода — отдельная проверка в tests/test_theatre.py
 CLOUD_ENV_NAMES = tuple(dict.fromkeys(
     name for name in (
         "CLOUD_API_KEY", "CLOUD_KEY_ENV", "CLOUD_BASE_URL", "CLOUD_TIMEOUT",
         "CLOUD_SEND_PARAMS", "CLOUD_SEND_TOOLS", "CLOUD_SEND_MESSAGE_NAMES",
-        "CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS",
+        "CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS", "CLOUD_NUM_CTX",
+        "CLOUD_STREAM", "CLOUD_SHOW_THINKING", "CLOUD_LIMIT_PARAMS",
+        "CLOUD_TURN_LIMIT",
         settings.CLOUD_KEY_ENV,      # имя ключа, заданное в настройках
     ) if name
 ))

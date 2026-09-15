@@ -1619,6 +1619,118 @@ class TestTokenHelpers(unittest.TestCase):
         self.assertEqual(text.trim_history_by_tokens(messages, 10), messages)
 
 
+class TestCloudContextWindow(unittest.TestCase):
+    """Своё окно контекста у облачного участника.
+
+    Историю сцены приложение режет под окно той модели, которая говорит.
+    Мерилось оно олламовским: num_ctx 16384 минус 8192 на ответ — около
+    7 тысяч токенов, и в логе это было видно как «доступно: 6935». Облачный
+    участник из-за этого забывал начало обсуждения, хотя шлюз принял бы
+    в разы больше; сцену теперь мерят по CLOUD_NUM_CTX.
+    """
+
+    REEL = "реплика сцены "
+
+    def _long_history(self, reels=900, count=2):
+        return [{"role": "user", "content": self.REEL * reels}
+                for _ in range(count)]
+
+    def _ollama_fit(self):
+        """Сколько истории влезало в старое, олламовское окно."""
+        return (settings.OPTIONS["num_ctx"] - settings.OPTIONS["num_predict"]
+                - settings.CONTEXT_SAFETY_MARGIN - 100)
+
+    def test_cloud_gets_its_own_window(self):
+        ctx, _predict = settings.context_budget("cloud:qwen/qwen3.8-flash")
+        self.assertEqual(ctx, settings.CLOUD_NUM_CTX)
+        self.assertGreater(ctx, settings.OPTIONS["num_ctx"],
+                           "облачное окно должно быть шире олламовского")
+        self.assertEqual(settings.context_budget("qwen3:8b"),
+                         (settings.OPTIONS["num_ctx"], settings.OPTIONS["num_predict"]),
+                         "у местных моделей остаётся своё окно")
+
+    def test_cloud_history_is_not_cut_by_the_ollama_measure(self):
+        messages = self._long_history()
+        total = sum(text.estimate_tokens(m["content"]) for m in messages)
+        self.assertGreater(total, self._ollama_fit(),
+                           "история должна быть больше старого окна — иначе проверять нечего")
+        self.assertEqual(len(text.trim_history_by_tokens(
+            messages, 100, model="cloud:qwen/qwen3.8-flash")), len(messages),
+            "облачный участник помнит всю сцену")
+        self.assertLess(len(text.trim_history_by_tokens(messages, 100, model="qwen3:8b")),
+                        len(messages), "местная модель по-прежнему живёт в своём окне")
+
+    def test_cloud_speaker_in_the_show_keeps_the_scene(self):
+        session = make_session()
+        strip_session_patch(self, session)
+        person = non_judge_ai(session)
+        session.conversation_history = [
+            {"display_name": "Первый", "content": "ПЕРВАЯ-РЕПЛИКА " + self.REEL * 900,
+             "is_moderator": False, "is_judge": False, "round": 1},
+            {"display_name": "Второй", "content": "ВТОРАЯ-РЕПЛИКА " + self.REEL * 900,
+             "is_moderator": False, "is_judge": False, "round": 1},
+        ]
+        person["model"] = "cloud:qwen/qwen3.8-flash"
+        cloud_scene = " ".join(m["content"]
+                               for m in session.build_messages_for_ai(person, 1))
+        self.assertIn("ПЕРВАЯ-РЕПЛИКА", cloud_scene,
+                      "начало сцены должно доехать до облачной модели")
+        person["model"] = "qwen3:8b"
+        local_scene = " ".join(m["content"]
+                               for m in session.build_messages_for_ai(person, 1))
+        self.assertNotIn("ПЕРВАЯ-РЕПЛИКА", local_scene,
+                         "та же сцена в олламовское окно не влезает")
+
+    def test_zero_window_means_the_whole_scene(self):
+        with mock.patch.object(settings, "CLOUD_NUM_CTX", 0):
+            messages = self._long_history(reels=900, count=40)
+            self.assertEqual(text.trim_history_by_tokens(messages, 100, model="cloud:x/y"),
+                             messages, "CLOUD_NUM_CTX = 0 — истории не режут вовсе")
+
+    def test_window_smaller_than_the_answer_reserve_keeps_the_scene(self):
+        with mock.patch.object(settings, "CLOUD_NUM_CTX", 4096):
+            messages = self._long_history(reels=40, count=1)
+            self.assertEqual(len(text.trim_history_by_tokens(messages, 10, model="cloud:x/y")),
+                             len(messages),
+                             "узкое окно не должно отнимать историю целиком")
+
+    def test_window_can_be_set_in_dotenv(self):
+        with mock.patch.dict(os.environ, {"CLOUD_NUM_CTX": "8192"}):
+            self.assertEqual(settings.context_budget("cloud:qwen/qwen3.8-flash")[0], 8192,
+                             "настройку из .env должно быть слышно")
+        with mock.patch.dict(os.environ, {"CLOUD_NUM_CTX": "побольше"}):
+            self.assertEqual(settings.context_budget("cloud:qwen/qwen3.8-flash")[0],
+                             settings.CLOUD_NUM_CTX,
+                             "непонятное значение — берём из settings, а не падаем")
+
+    def test_every_cloud_setting_read_from_env_is_a_known_name(self):
+        """Список имён настроек облака не должен отставать от кода.
+
+        Строка, которой нет в CLOUD_ENV_NAMES, считается в .env незнакомой,
+        и человек с рабочей настройкой читает «приложение её не применило».
+        Так и вышло с CLOUD_STREAM, CLOUD_SHOW_THINKING, CLOUD_LIMIT_PARAMS
+        и CLOUD_TURN_LIMIT: четыре ложных предупреждения на старте.
+        """
+        sources = {cloud.__file__: cloud.CLOUD_ENV_NAMES,
+                   settings.__file__: cloud.CLOUD_ENV_NAMES}
+        missing = set()
+        for filename, known in sources.items():
+            source = Path(filename).read_text(encoding="utf-8")
+            read = re.findall(r'_(?:env_flag|env_int|env_number_list)\(' +
+                              r'"(CLOUD_[A-Z0-9_]+)"', source)
+            missing |= set(read) - set(known)
+        self.assertEqual(missing, set(),
+                         f"про эти строки в .env приложение скажет «не знакома»: {sorted(missing)}")
+
+    def test_the_log_names_whose_window_is_used(self):
+        with mock.patch("builtins.print") as fake_print:
+            text.trim_history_by_tokens([{"role": "user", "content": "привет"}], 10,
+                                        model="cloud:qwen/qwen3.8-flash")
+        printed = " ".join(str(call.args[0]) for call in fake_print.call_args_list if call.args)
+        self.assertIn("из окна облака", printed,
+                      "по строке в логе должно быть видно, чьё это окно")
+
+
 # ---------------------------------------------------------------- посты
 
 class TestPosts(unittest.TestCase):

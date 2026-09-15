@@ -500,6 +500,35 @@ BUGS = {
         ("aitheatre/settings.py",
          '"min_p": 0.4, "top_k": 30', '"minp": 0.4, "top_k": 30'),
     ],
+    "историю облачного участника снова режут олламовской меркой": [
+        ("aitheatre/text.py",
+         "    num_ctx, num_predict = settings.context_budget(model)",
+         '    num_ctx, num_predict = settings.context_budget("")'),
+    ],
+    "строку CLOUD_NUM_CTX в .env снова не читают": [
+        ("aitheatre/settings.py",
+         '        window = _env_int("CLOUD_NUM_CTX", CLOUD_NUM_CTX)',
+         "        window = int(CLOUD_NUM_CTX)"),
+    ],
+    "настоящую настройку облака снова объявляют незнакомой строкой": [
+        ("aitheatre/cloud.py",
+         '"CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS", "CLOUD_NUM_CTX",',
+         '"CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS",'),
+    ],
+    "запас на ответ снова съедает узкое окно": [
+        ("aitheatre/settings.py",
+         "        return window, min(reserve, max(0, window - CONTEXT_SAFETY_MARGIN) // 2)",
+         "        return window, reserve"),
+    ],
+    "говорящую модель снова не передают в обрезку истории": [
+        ("aitheatre/show.py",
+         "        trimmed = text.trim_history_by_tokens(\n"
+         "            history_messages, text.estimate_tokens(system_prompt),\n"
+         "            model=participant.get(\"model\", \"\"))",
+         "        trimmed = text.trim_history_by_tokens(\n"
+         "            history_messages, text.estimate_tokens(system_prompt),\n"
+         '            model="")'),
+    ],
 }
 
 

@@ -98,34 +98,51 @@ def estimate_tokens(text: str) -> int:
         cyrillic = sum(1 for ch in text if "а" <= ch.lower() <= "я" or ch in "ёЁ")
         return max(1, cyrillic // 2 + (len(text) - cyrillic) // 4)
 
-def trim_history_by_tokens(messages: list, system_prompt_tokens: int) -> list:
+def trim_history_by_tokens(messages: list, system_prompt_tokens: int, model: str = "") -> list:
     """
     Обрезает историю сообщений на основе подсчёта токенов.
     Возвращает обрезанный список сообщений.
+
+    Окно берётся у той модели, которая будет говорить (см.
+    settings.context_budget): у облачного участника оно своё, у местного —
+    из OPTIONS. Иначе история любой сцены мерилась бы олламовскими 7 тысячами
+    токенов, и облачные участники забывали бы начало разговора.
     """
-    # Вычисляем доступное пространство для истории
-    available_tokens = max(
-        0,
-        settings.OPTIONS["num_ctx"] - settings.OPTIONS["num_predict"] - settings.CONTEXT_SAFETY_MARGIN - system_prompt_tokens
-    )
-    
+    num_ctx, num_predict = settings.context_budget(model)
+    # В консоли видно, чьё это окно: «доступно: 24076 из окна облака 32768».
+    # Без этой подписи по строке в логе невозможно понять, почему история
+    # обрезается — а именно на это и уходило время при разборе облака
+    window_note = (f" из окна облака {num_ctx}"
+                   if str(model or "").startswith(settings.CLOUD_MODEL_PREFIX) else "")
+
     # Подсчитываем токены в каждом сообщении
     messages_with_tokens = []
     for msg in messages:
         content = msg.get("content", "")
         tokens = estimate_tokens(content)
         messages_with_tokens.append((msg, tokens))
-    
+
     # Подсчитываем общие токены
     total_tokens = sum(tokens for _, tokens in messages_with_tokens)
-    
+
+    # Окно не ограничено (CLOUD_NUM_CTX = 0): история остаётся целой
+    if num_ctx <= 0:
+        print(f"  📊 История: {total_tokens} токенов (окно облака не ограничено) ✅")
+        return messages
+
+    # Вычисляем доступное пространство для истории
+    available_tokens = max(
+        0,
+        num_ctx - num_predict - settings.CONTEXT_SAFETY_MARGIN - system_prompt_tokens
+    )
+
     # Если вписываемся - возвращаем всё
     if total_tokens <= available_tokens:
-        print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}) ✅")
+        print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}{window_note}) ✅")
         return messages
-    
+
     # Обрезаем старые сообщения, пока не влезем
-    print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}) ⚠️ Обрезка...")
+    print(f"  📊 История: {total_tokens} токенов (доступно: {available_tokens}{window_note}) ⚠️ Обрезка...")
     
     trimmed_messages = []
     current_tokens = 0

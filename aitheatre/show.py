@@ -672,7 +672,9 @@ class DebateSession:
             history = self._get_history_for(participant, mode="participants_only",
                                             round_num=round_num)
             history_messages = self._format_history(name, history)
-            trimmed = text.trim_history_by_tokens(history_messages, text.estimate_tokens(system_prompt))
+            trimmed = text.trim_history_by_tokens(
+                history_messages, text.estimate_tokens(system_prompt),
+                model=participant.get("model", ""))
             messages.extend(trimmed)
 
             if trimmed:
@@ -699,7 +701,11 @@ class DebateSession:
         # ---- Участник ----
         history = self._get_history_for(participant, mode="dialog")
         history_messages = self._format_history(name, history)
-        trimmed = text.trim_history_by_tokens(history_messages, text.estimate_tokens(system_prompt))
+        # Окно — той модели, которая будет говорить: у облачного оно своё,
+        # иначе история сцены режется по олламовским 7 тысячам токенов
+        trimmed = text.trim_history_by_tokens(
+            history_messages, text.estimate_tokens(system_prompt),
+            model=participant.get("model", ""))
         messages.extend(trimmed)
 
         participant_posts = [
