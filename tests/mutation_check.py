@@ -134,13 +134,41 @@ BUGS = {
     ],
     "ключ шлюза уехал в текст ошибки, а тот — в ленту": [
         ("aitheatre/cloud.py",
-         "            return None, hide_key(_error_text(e.code, e.reason, detail))",
-         "            return None, _error_text(e.code, e.reason, detail)"),
+         "            return None, GatewayError(hide_key(_error_text(e.code, e.reason, detail)), e.code)",
+         "            return None, GatewayError(_error_text(e.code, e.reason, detail), e.code)"),
     ],
     "русское имя отправителя снова уезжает на шлюз": [
         ("aitheatre/cloud.py",
-         '"messages": list(messages or []) if send_message_names() else plain_messages(messages),',
-         '"messages": list(messages or []),'),
+         '"messages": openai_messages(messages, keep_names=send_message_names()),',
+         '"messages": openai_messages(messages, keep_names=True),'),
+    ],
+    "облачный круг поиска снова без идентификаторов вызовов": [
+        ("aitheatre/cloud.py",
+         '            if calls:\n'
+         '                item["tool_calls"] = calls',
+         '            if False:\n'
+         '                item["tool_calls"] = calls'),
+    ],
+    "подпись перед именем настройки в .env снова гасит её молча": [
+        ("aitheatre/cloud.py",
+         "    for name in CLOUD_ENV_NAMES:\n        if re.search(",
+         "    for name in ():\n        if re.search("),
+    ],
+    "отказ модели от инструмента поиска снова не запоминается": [
+        ("aitheatre/cloud.py",
+         "        if not retry_error:\n            _MODELS_WITHOUT_TOOLS.add(model)",
+         "        if not retry_error:\n            pass"),
+    ],
+    "молчащий шлюз снова отвечает сырым текстом ошибки": [
+        ("aitheatre/cloud.py",
+         "        except TimeoutError:\n"
+         "            # Своё сообщение вместо «The read operation timed out»: по сырому\n"
+         "            # тексту нельзя понять ни сколько ждали, ни что с этим делать\n"
+         "            return None, GatewayError(\n"
+         '                f"модель не ответила за {seconds} с: шлюз не прислал данные. "\n'
+         '                f"«Думающим» и большим моделям нужно больше времени — "\n'
+         '                f"увеличьте CLOUD_TIMEOUT в .env")\n',
+         ""),
     ],
     "числа характеров снова уезжают на шлюз": [
         ("aitheatre/cloud.py",
@@ -154,11 +182,11 @@ BUGS = {
     ],
     "остальные 4xx повторяются и продлевают паузу по ключу": [
         ("aitheatre/cloud.py",
-         "            return None, hide_key(_error_text(e.code, e.reason, detail))",
+         "            return None, GatewayError(hide_key(_error_text(e.code, e.reason, detail)), e.code)",
          "            if attempt + 1 < attempts:\n"
          "                time.sleep(0)\n"
          "                continue\n"
-         "            return None, hide_key(_error_text(e.code, e.reason, detail))"),
+         "            return None, GatewayError(hide_key(_error_text(e.code, e.reason, detail)), e.code)"),
     ],
     "у шлюза снова требуют поиск, которого он не получал": [
         ("aitheatre/ollama_api.py",

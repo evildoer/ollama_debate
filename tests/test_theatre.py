@@ -67,6 +67,18 @@ def app_module_of(name):
     raise AssertionError(f"нет такого имени приложения: {name}")
 
 
+def setUpModule():
+    """Набор не должен зависеть от вашего .env.
+
+    Настройки облака приложение поднимает из .env при импорте, поэтому прогон
+    на машине, где включены облачные переключатели, вёл бы себя иначе, чем
+    на чистой. Убираем их из окружения — каждая проверка сама решает, что ей
+    нужно, а не наследует чужие настройки.
+    """
+    for name in cloud.CLOUD_ENV_NAMES + (settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV"):
+        os.environ.pop(name, None)
+
+
 def referenced_globals(source, filename):
     """Имена, которые модуль ищет в своих глобалиях, а не заводит сам.
 
@@ -1579,6 +1591,9 @@ class TestCloudGateway(unittest.TestCase):
         for name in ("CLOUD_API_KEY", settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV"):
             os.environ.pop(name, None)
         self.addCleanup(self._clear_cache)
+        # Отказ от инструмента поиска — тоже память процесса: без этого одна
+        # проверка влияла бы на следующую
+        self.addCleanup(cloud._MODELS_WITHOUT_TOOLS.clear)
         # Никаких зависимостей от запущенной Ollama: список местных моделей,
         # проверка «умеет ли модель размышлять» (у каждой модели это /api/show!)
         # и опрос загруженных моделей подменяются на мгновенные заглушки
@@ -1676,6 +1691,118 @@ class TestCloudGateway(unittest.TestCase):
         # у Ollama про облачную модель нельзя, поэтому её ставит сам облачный путь —
         # и только тогда, когда инструмент правда отправляется
         self.assertEqual(ollama_api.MODELS_TOOLS_SUPPORT[self.MODEL], cloud.send_tools())
+
+    def test_a_label_in_front_of_the_name_still_switches_it_on(self):
+        """Подпись перед именем настройки — ошибка копирования, а не «выключено».
+
+        Из образца .env настройку копировали строкой «Включить: CLOUD_SEND_TOOLS=1».
+        Убрав решётку, человек получал настройку с именем
+        «Включить: CLOUD_SEND_TOOLS» — приложение читало её как чужую строку
+        и молча ничего не включало. Потом причину искали в шлюзе, а её там не было.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / ".env").write_text(
+                "CLOUD_API_KEY=test-key\n"
+                "Включить: CLOUD_SEND_PARAMS=1\n"
+                "Включить: CLOUD_SEND_TOOLS=1\n",
+                encoding="utf-8")
+            env = mock.patch.dict(os.environ)
+            env.start()
+            self.addCleanup(env.stop)
+            for name in cloud.CLOUD_ENV_NAMES:
+                os.environ.pop(name, None)
+            with mock.patch.object(settings, "PROJECT_ROOT", Path(folder)):
+                cloud._load_dotenv()
+
+        self.assertEqual(os.environ.get("CLOUD_SEND_PARAMS"), "1")
+        self.assertEqual(os.environ.get("CLOUD_SEND_TOOLS"), "1")
+        self.assertTrue(cloud.send_tools(), "поиск должен оказаться включённым")
+
+    def test_an_unknown_cloud_line_is_not_applied_silently(self):
+        """Опечатку в имени (CLOUD_SEND_TOOL) нельзя принимать за настройку."""
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / ".env").write_text("CLOUD_SEND_TOOL=1\n", encoding="utf-8")
+            env = mock.patch.dict(os.environ)
+            env.start()
+            self.addCleanup(env.stop)
+            os.environ.pop("CLOUD_SEND_TOOL", None)
+            with mock.patch.object(settings, "PROJECT_ROOT", Path(folder)):
+                cloud._load_dotenv()
+
+        self.assertNotIn("CLOUD_SEND_TOOL", os.environ,
+                         "непонятную строку применять нельзя: о ней надо сказать, а не угадывать")
+
+    def test_the_search_round_trip_goes_in_the_openai_shape(self):
+        """Круг поиска держится на идентификаторах: без них шлюз не поймёт ответ.
+
+        У Ollama вызов инструмента и его результат связаны именем, у OpenAI —
+        полем tool_calls с id в сообщении ассистента и полем tool_call_id
+        в ответе инструмента.
+        """
+        os.environ["CLOUD_SEND_TOOLS"] = "1"
+        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+
+        cloud.chat(self.MODEL, [
+            {"role": "user", "content": "Столица Австралии?"},
+            {"role": "assistant", "content": "", "name": "иван",
+             "tool_calls": [{"function": {"name": "search_web",
+                                          "arguments": {"query": "столица Австралии"}}}]},
+            {"role": "tool", "tool_name": "search_web", "name": "search_web",
+             "content": "Канберра"},
+        ])
+
+        sent = self.gateway.last_request()["body"]["messages"]
+        call = sent[1]["tool_calls"][0]
+        self.assertEqual(call["type"], "function")
+        self.assertEqual(call["function"]["name"], "search_web")
+        self.assertIsInstance(call["function"]["arguments"], str,
+                              "у OpenAI аргументы — строка JSON, а не словарь")
+        self.assertEqual(json.loads(call["function"]["arguments"]),
+                         {"query": "столица Австралии"})
+        self.assertEqual(sent[2]["role"], "tool")
+        self.assertEqual(sent[2]["tool_call_id"], call["id"],
+                         "результат обязан ссылаться на вызвавший его вызов")
+        self.assertEqual(sent[2]["content"], "Канберра")
+
+    def test_a_model_that_refuses_tools_is_asked_again_without_them(self):
+        """400 на инструмент — не приговор модели: говорим с ней без поиска.
+
+        Иначе каждый ход возвращал бы ошибку, а серия 400 уводит ключ в паузу.
+        """
+        os.environ["CLOUD_SEND_TOOLS"] = "1"
+        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        self.gateway.statuses = [400, 200]
+
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+
+        self.assertEqual(content, "Канберра.", "разговор должен состояться")
+        self.assertEqual(len(self.gateway.requests), 2)
+        self.assertNotIn("tools", self.gateway.requests[1]["body"])
+        self.assertFalse(cloud.model_takes_tools(self.MODEL), "отказ надо запомнить")
+        # И в общую метку это тоже попадает: иначе ход снова потребует поиск
+        ollama_api.ask_model_with_tools(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertFalse(ollama_api.MODELS_TOOLS_SUPPORT[self.MODEL])
+
+    def test_a_silent_gateway_explains_itself_in_words(self):
+        """«The read operation timed out» ни о чём не говорит — пишем словами.
+
+        Ждать по-настоящему нечего: молчание шлюза изображает открыватель,
+        который сразу говорит «не дождался». Проверяем не секунды, а текст:
+        по нему человек решает, что крутить.
+        """
+        def silent(*_args, **_kwargs):
+            raise TimeoutError("The read operation timed out")
+
+        settings.CLOUD_TIMEOUT = 3
+        self.addCleanup(setattr, settings, "CLOUD_TIMEOUT", 180)
+        opener = mock.Mock(open=mock.Mock(side_effect=silent))
+        with mock.patch.object(cloud.urllib.request, "build_opener",
+                               mock.Mock(return_value=opener)):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+
+        self.assertIn("не ответила за 3 с", content)
+        self.assertIn("CLOUD_TIMEOUT", content, "подсказка обязана называть рычаг")
+        self.assertNotIn("timed out", content)
 
     def test_a_key_with_odd_symbols_is_explained_in_words(self):
         """Заголовки HTTP бывают только латинскими: кириллица в ключе падала бы кодеком."""

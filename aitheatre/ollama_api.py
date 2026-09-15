@@ -768,7 +768,7 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         # (он смотрит в тот же кэш). Но только когда инструмент правда отправляется:
         # иначе мы бы требовали поиск у шлюза, которого он не получал, — и получали
         # ошибку на каждом ходу вместо обычной реплики
-        MODELS_TOOLS_SUPPORT[model] = cloud.send_tools()
+        MODELS_TOOLS_SUPPORT[model] = cloud.send_tools() and cloud.model_takes_tools(model)
         return cloud.chat(model, messages, options=options, tool_choice=tool_choice)
 
     # Проверяем кэш поддержки tools
