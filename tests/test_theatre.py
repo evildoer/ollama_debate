@@ -1415,6 +1415,9 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("function postHeaderHtml(post)", self.page)
         self.assertIn("element.innerHTML = `<div class=\"post-avatar\">${postAvatarHtml(draft)}",
                       self.page)
+        # И та же полоса роли: без класса роли черновик терял бы цвет на ходу
+        self.assertIn("element.className = `post post-role-${draft.role || 'participant'} streaming`",
+                      self.page)
         # Черновик идёт простым текстом: markdown посередине реплики — мусор
         self.assertIn("postText.textContent = draft.content", self.page)
 

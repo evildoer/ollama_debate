@@ -295,8 +295,13 @@ BUGS = {
     ],
     "пост не получает класс роли (полосы пропадают)": [
         ("aitheatre/page.py",
-         "postDiv.className = `post post-role-${role}`",
+         "postDiv.className = `post post-role-${post.role || 'participant'}`",
          "postDiv.className = `post`"),
+    ],
+    "растущая реплика делается другим человеком, а не копией поста": [
+        ("aitheatre/page.py",
+         "element.className = `post post-role-${draft.role || 'participant'} streaming`;",
+         "element.className = `post streaming`;"),
     ],
     "у роли нет своего цвета на тёмной сцене": [
         ("aitheatre/page.py",
