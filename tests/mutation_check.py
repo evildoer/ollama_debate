@@ -223,6 +223,16 @@ BUGS = {
          "            and search_count < settings.MIN_SEARCHES and takes_tools_now(model))",
          "        require_search = force_tool_use"),
     ],
+    "поиск снова просят у модели, которая инструмент не принимает": [
+        ("aitheatre/ollama_api.py",
+         "                    and takes_tools_now(model)):",
+         "                    and MODELS_TOOLS_SUPPORT.get(model, False)):"),
+    ],
+    "текст ошибки снова считают сказанной репликой": [
+        ("aitheatre/ollama_api.py",
+         "        if not tool_calls and is_answer(content):",
+         "        if not tool_calls and content and content.strip():"),
+    ],
     "мысли хода снова теряются вместе с черновиком": [
         ("aitheatre/show.py",
          '            thinking=draft.thinking_full() if draft else "",',

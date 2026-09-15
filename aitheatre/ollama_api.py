@@ -24,6 +24,19 @@ from . import settings
 # Кэш для хранения информации о поддержке tools моделями
 MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
 
+# Ответы, которые репликой не считаются: ошибка запроса и «модель промолчала».
+# Различать нужно затем, чтобы не гнать модель за поиском после неудачного хода:
+# она не ответила не потому, что мало знает, а «поиск» после ошибки стоит ещё
+# одного хода ожидания — у «думающих» моделей это ещё один оборванный ход.
+_NOT_ANSWERS = ("[ОШИБКА:", "[Модель не дала ответ]")
+
+
+def is_answer(text: str) -> bool:
+    """Реплика ли это: не пусто, не ошибка и не молчание модели."""
+    if not text or not text.strip():
+        return False
+    return not text.lstrip().startswith(_NOT_ANSWERS)
+
 
 def takes_tools_now(model: str) -> bool:
     """Умеет ли модель инструменты — до первого запроса, а не после него.
@@ -936,9 +949,15 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             force_tool_use = False
             forced_attempts += 1
         
-        if not tool_calls and content and content.strip():
-            # Принудительный поиск только если модель поддерживает tools
-            if search_count < settings.MIN_SEARCHES and forced_attempts < max_forced_attempts and MODELS_TOOLS_SUPPORT.get(model, False):
+        if not tool_calls and is_answer(content):
+            # Принудительный поиск — только у тех, кто правда принимает инструмент,
+            # и спрашиваем об этом заново, а не по кэшу: облачная модель могла
+            # отказаться от инструмента на этом самом ходу, и требовать у неё
+            # поиск — значит гонять её впустую (в логе это выглядело так: шлюз
+            # сказал «не принимаю инструмент», а приложение тут же попросило поиск,
+            # и «думающая» модель ушла в новый оборванный ход ожидания)
+            if (search_count < settings.MIN_SEARCHES and forced_attempts < max_forced_attempts
+                    and takes_tools_now(model)):
                 print(f"  🔍 Принудительный поиск (попытка {forced_attempts + 1}/{max_forced_attempts})...")
                 messages.append({"role": "assistant", "content": content, "name": participant_name_normalized})
                 messages.append({
@@ -948,8 +967,7 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                 })
                 force_tool_use = True  # В следующий раз требуем инструмент через API
                 continue
-            else:
-                return content, search_count, search_queries
+            return content, search_count, search_queries
         
         if not tool_calls:
             break

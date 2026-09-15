@@ -2539,6 +2539,55 @@ class TestCloudGateway(unittest.TestCase):
         ollama_api.ask_model_with_tools(self.MODEL, [{"role": "user", "content": "Привет!"}])
         self.assertFalse(ollama_api.MODELS_TOOLS_SUPPORT[self.MODEL])
 
+    def test_a_model_that_refuses_tools_is_not_sent_hunting_for_a_search(self):
+        """После «инструмент не принят» ход кончается, а не просит поиск заново.
+
+        В логе это выглядело так: шлюз сказал «не принимаю инструмент», приложение
+        это запомнило — и тут же напечатало «Принудительный поиск». То есть
+        у «думающей» модели отнимался ещё один ход целиком, и он снова упирался
+        в CLOUD_TURN_LIMIT: вместо готовой реплики — ещё две минуты ожидания.
+        Спрашивать поиск у той, кто инструмент не берёт, не за что — он не сработает.
+        """
+        os.environ["CLOUD_SEND_TOOLS"] = "1"
+        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        # Отказ от инструмента и реплика приходят в одном ходу — именно так это
+        # и было в логе: шлюз ругается на tools, а следом отдаёт обычный ответ
+        self.gateway.statuses = [400, 200]
+
+        content, count, _queries = ollama_api.ask_model(
+            self.MODEL, [{"role": "user", "content": "Привет!"}],
+            participant_name="Проверка")
+
+        self.assertEqual(content, "Канберра.")
+        self.assertEqual(count, 0, "поиска не было и требовать его не за что")
+        self.assertEqual(len(self.gateway.requests), 2,
+                         "после отказа модель послали искать — а инструмент она не берёт")
+        self.assertFalse(cloud.model_takes_tools(self.MODEL), "отказ надо было запомнить")
+
+    def test_an_error_is_not_taken_for_an_answer(self):
+        """Текст ошибки — не реплика: поиск за ним не просят.
+
+        Раньше «[ОШИБКА: …]» считалась сказанным словом, и после оборванного хода
+        приложение просило у модели поиск — то есть ещё один ход ожидания вместо
+        честно показанной ошибки.
+        """
+        os.environ["CLOUD_SEND_TOOLS"] = "1"
+        self.addCleanup(os.environ.pop, "CLOUD_SEND_TOOLS", None)
+        calls = []
+
+        def failing(*_args, **kwargs):
+            calls.append(kwargs.get("tool_choice"))
+            return "[ОШИБКА: ход длился дольше 120 с и оборван]", []
+
+        with mock.patch.object(cloud, "chat", side_effect=failing):
+            content, count, _queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Привет!"}],
+                participant_name="Проверка")
+
+        self.assertIn("[ОШИБКА:", content)
+        self.assertEqual(count, 0, "ошибка не повод искать")
+        self.assertEqual(len(calls), 1, f"после ошибки сделано ещё {len(calls) - 1} запрос(а)")
+
     def test_a_silent_gateway_explains_itself_in_words(self):
         """«The read operation timed out» ни о чём не говорит — пишем словами.
 
