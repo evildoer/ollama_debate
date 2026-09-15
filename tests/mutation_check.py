@@ -169,6 +169,26 @@ BUGS = {
          '        if function.get("name"):\n            call["name"] += str(function["name"])',
          '        if function.get("name"):\n            call["name"] = str(function["name"])'),
     ],
+    "новые модели OpenAI снова получают старое имя поля": [
+        ("aitheatre/cloud.py",
+         '    if "max_completion_tokens" in text and "max_tokens" in body:',
+         "    if False:"),
+    ],
+    "размышления модели снова читаются как обычный текст": [
+        ("aitheatre/cloud.py",
+         "    for key in _THINKING_KEYS:",
+         "    for key in ():"),
+    ],
+    "мысли в ленте снова уезжают целиком": [
+        ("aitheatre/show.py",
+         "        if len(text) <= self.THOUGHT_SHOWN:",
+         "        if True:"),
+    ],
+    "блок мыслей снова показывает саму реплику": [
+        ("aitheatre/show.py",
+         '                        "thinking": self.thought_tail(),',
+         '                        "thinking": self.text,'),
+    ],
     "черновик реплики снова не закрывается, когда ход сорвался": [
         ("aitheatre/show.py",
          "            if draft is not None:\n                draft.finish()",

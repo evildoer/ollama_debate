@@ -97,6 +97,15 @@ HTML_TEMPLATE = """
            в конце строки и говорит, что реплика не кончилась */
         .post.streaming .post-text::after { content: '▍'; margin-left: 2px; animation: streamCaret 1s steps(2, start) infinite; }
         @keyframes streamCaret { to { visibility: hidden; } }
+        /* Мысли модели: то, что она говорит сама с собой, пока не сказала вслух.
+           Мелче и бледнее реплики: это не сказанное, а процесс. Свёрткой можно
+           убрать их с глаз — но по умолчанию они видны, они уже оплачены */
+        .post-thinking { margin: 0 0 18px 0; padding: 10px 16px; border-left: 2px solid #cccccc; background: #fafafa; font-size: 15px; line-height: 1.6; color: #666666; font-style: italic; }
+        .post-thinking summary { cursor: pointer; font-style: normal; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: #888888; }
+        .post-thinking[open] summary { margin-bottom: 8px; }
+        .post-thinking .thinking-text { white-space: pre-wrap; }
+        body.dark .post-thinking { background: #141414; border-left-color: #4a4a4a; color: #a3a3a3; }
+        body.dark .post-thinking summary { color: #8c8c8c; }
         /* Формулы: LaTeX от сервера, MathML от браузера */
         .post-text .math { font-size: 1.05em; }
         .post-text .math-block { display: block; margin: 14px 0; text-align: center; }
@@ -1484,8 +1493,20 @@ HTML_TEMPLATE = """
                 element = document.createElement('div');
                 element.className = `post post-role-${draft.role || 'participant'} streaming`;
                 element.setAttribute('data-stream-id', draft.stream_id);
-                element.innerHTML = `<div class="post-avatar">${postAvatarHtml(draft)}</div><div class="post-content">${postHeaderHtml(draft)}<div class="post-text"></div></div>`;
+                element.innerHTML = `<div class="post-avatar">${postAvatarHtml(draft)}</div><div class="post-content">${postHeaderHtml(draft)}<details class="post-thinking" open><summary></summary><div class="thinking-text"></div></details><div class="post-text"></div></div>`;
                 postsDiv.insertBefore(element, postsDiv.firstChild);
+            }
+            // Мысли: своим бледным блоком над репликой. Свёрнутыми их сделает
+            // зритель сам — а придут они раньше ответа, и без них была бы
+            // длинная пауза непонятно чего
+            const thoughts = element.querySelector('.post-thinking');
+            if (thoughts) {
+                const thought = draft.thinking || '';
+                thoughts.style.display = thought ? '' : 'none';
+                thoughts.querySelector('.thinking-text').textContent = thought;
+                // «размышляет» — пока не сказано ни слова; дальше это уже мысли
+                // о сказанном, и подпись должна быть честной
+                thoughts.querySelector('summary').textContent = draft.answer_started ? '💭 мысли' : '💭 размышляет';
             }
             const postText = element.querySelector('.post-text');
             // Простым текстом, а не HTML: реплика ещё не дописана, и markdown

@@ -748,7 +748,7 @@ def _merge_options(participant: dict) -> dict:
     return opts
 
 
-def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None, think=None, on_delta=None) -> tuple:
+def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None, think=None, on_delta=None, on_thought=None) -> tuple:
     """
     Отправляет запрос к модели. Автоматически определяет поддержку tools.
     
@@ -769,9 +769,10 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         # иначе мы бы требовали поиск у шлюза, которого он не получал, — и получали
         # ошибку на каждом ходу вместо обычной реплики
         MODELS_TOOLS_SUPPORT[model] = cloud.send_tools() and cloud.model_takes_tools(model)
-        # on_delta живёт только здесь: к Ollama он не относится (см. ask_model)
+        # on_delta и on_thought живут только здесь: к Ollama они не относятся
+        # (см. ask_model)
         return cloud.chat(model, messages, options=options, tool_choice=tool_choice,
-                          on_delta=on_delta)
+                          on_delta=on_delta, on_thought=on_thought)
 
     # Проверяем кэш поддержки tools
     if model not in MODELS_TOOLS_SUPPORT:
@@ -865,7 +866,7 @@ def search_web(query: str, max_results: int = 5) -> str:
     return output.strip()
 
 def ask_model(model: str, messages: list, participant_name: str, options: dict = None,
-              think=None, show_session=None, on_delta=None) -> tuple:
+              think=None, show_session=None, on_delta=None, on_thought=None) -> tuple:
     """
     Один ход модели: запрос к Ollama плюс поиск в интернете, если модель умеет
     вызывать инструменты.
@@ -875,9 +876,10 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
     видел «Ищет: ...». Передаётся параметром, а не импортируется из show.py:
     иначе модуль общения с Ollama пришлось бы замкнуть сам на себя.
 
-    on_delta — получатель ответа по кускам (только облачные модели, только
-    когда включён CLOUD_STREAM): лента показывает реплику, пока она пишется.
-    На готовый ответ это не влияет — возвращается всё равно целый текст.
+    on_delta и on_thought — получатели ответа по кускам (только облачные модели,
+    только когда включён CLOUD_STREAM): лента показывает реплику, пока она
+    пишется, и размышления модели — пока они думаются. На готовый ответ это
+    не влияет — возвращается всё равно целый текст.
     """
     search_queries = []
     search_count = 0
@@ -900,7 +902,8 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         current_tool_choice = "any" if force_tool_use else None
         
         content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice,
-                                                   options=options, think=think, on_delta=on_delta)
+                                                   options=options, think=think, on_delta=on_delta,
+                                                   on_thought=on_thought)
         tool_calls = tool_calls or []
         
         # Сбрасываем флаг после использования
@@ -1007,7 +1010,7 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             # но пустой ответ бывает и по своим причинам)
             content, _tool_calls = ask_model_with_tools(model, messages, tool_choice=None,
                                                         options=options, think=False,
-                                                        on_delta=on_delta)
+                                                        on_delta=on_delta, on_thought=on_thought)
             if content and content.strip():
                 return content, search_count, search_queries
         except Exception as e:

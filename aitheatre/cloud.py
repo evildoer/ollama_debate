@@ -183,6 +183,15 @@ def stream_replies() -> bool:
     return _env_flag("CLOUD_STREAM", settings.CLOUD_STREAM)
 
 
+def show_thinking() -> bool:
+    """Показывать ли размышления модели — то, что она говорит сама с собой.
+
+    Размышлений бывает больше самого ответа (у gpt-5-nano — 65 порций против 6),
+    и они уже оплачены: это те же выходные токены. Поэтому по умолчанию видны.
+    """
+    return _env_flag("CLOUD_SHOW_THINKING", settings.CLOUD_SHOW_THINKING)
+
+
 def _env_int(name: str, default: int) -> int:
     """Целое из .env: пусто или мусор — берём значение из settings."""
     try:
@@ -409,6 +418,37 @@ def _url(path: str) -> str:
 
 # Что значат коды шлюза — словами, а не номером: по номеру причина не видна,
 # а ошибка из чата идёт прямо в ленту спектакля.
+def _eased_body(model: str, body: dict, error):
+    """Тело запроса без того, на что шлюз пожаловался (или None).
+
+    Ответ на 400 шлюз пишет словами, и две причины понятны прямо из них:
+
+    Первая. «Unsupported parameter: 'max_tokens'... Use 'max_completion_tokens'
+    instead» — так отвечают новые модели OpenAI (gpt-5, o-серия) на старое имя
+    поля. Переименовываем и запоминаем: со следующего хода поле уйдёт правильно
+    сразу, и отказ не повторится.
+
+    Вторая. Если запрос с инструментом поиска не проходит, а такой же без него
+    проходит — модель его не принимает. Признаком этого делится вызывающий:
+    он видит, что запрос без инструмента удался (см. _MODELS_WITHOUT_TOOLS).
+
+    None — сказать нечего: тогда ошибка показывается как есть, а не превращается
+    в три бесполезных запроса подряд.
+    """
+    text = str(error)
+    if "max_completion_tokens" in text and "max_tokens" in body:
+        _RENAMED_MAX_TOKENS.add(model)
+        print(f"  ℹ️  Облако: {bare_model_name(model)} — поле числа токенов "
+              f"называется иначе, шлю как max_completion_tokens")
+        eased = {key: value for key, value in body.items() if key != "max_tokens"}
+        eased["max_completion_tokens"] = body["max_tokens"]
+        return eased
+    if "tools" in body or "tool_choice" in body:
+        return {key: value for key, value in body.items()
+                if key not in ("tools", "tool_choice")}
+    return None
+
+
 _HTTP_HINTS = {
     400: "шлюз не понял запрос. Обычно дело в лишнем или неверном поле в теле: "
          "попробуйте выключить числа характеров и инструменты поиска (CLOUD_SEND_*)",
@@ -542,7 +582,23 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
 
 # ── ПЕРЕВОД ЧИСЕЛ УЧАСТНИКА ─────────────────────────────────────────────────
 
-def translate_options(options: dict) -> dict:
+# Модели, которым поле числа токенов надо называть max_completion_tokens. Узнаём
+# это из отказа шлюза (см. _eased_body): угадывать по имени модели — гадание,
+# а шлюз говорит прямо
+_RENAMED_MAX_TOKENS = set()
+
+
+def max_tokens_field(model: str = "") -> str:
+    """Как называется поле числа токенов у этого шлюза и этой модели.
+
+    Обычно max_tokens. Но новые модели OpenAI его отвергают и просят
+    max_completion_tokens — а серия таких отказов уводит ключ в паузу
+    и превращается в 429, поэтому такое запоминаем на первый же раз.
+    """
+    return "max_completion_tokens" if model in _RENAMED_MAX_TOKENS else "max_tokens"
+
+
+def translate_options(options: dict, model: str = "") -> dict:
     """Числа участника из вида Ollama в вид OpenAI.
 
     Пустые значения не отправляются совсем: у облачной модели своё значение
@@ -554,6 +610,8 @@ def translate_options(options: dict) -> dict:
         value = source.get(ollama_key)
         if value is None:
             continue
+        if openai_key == "max_tokens":
+            openai_key = max_tokens_field(model)
         result[openai_key] = value
 
     if pass_extras():
@@ -613,12 +671,37 @@ def _tool_schema() -> list:
     }]
 
 
+# В каком поле шлюз отдаёт размышления. У proxyapi это «reasoning» (проверено
+# на gpt-5-nano и qwen3-next-thinking), у DeepSeek и vLLM — «reasoning_content»,
+# у части движков — «thinking». Читаем все: имя поля — не принцип, а чей-то выбор.
+# И к тому же «reasoning_details» — те же размышления, но разложенные по частям
+_THINKING_KEYS = ("reasoning", "reasoning_content", "thinking", "reasoning_details")
+
+
 def _delta_text(delta: dict) -> str:
     """Кусок текста из потока: у части шлюзов он приходит списком частей."""
-    piece = (delta or {}).get("content")
+    return _text_of((delta or {}).get("content"))
+
+
+def _text_of(piece) -> str:
+    """Текст из значения: или строкой, или списком частей с полем «text»."""
     if isinstance(piece, list):
         return "".join(str(part.get("text", "")) for part in piece if isinstance(part, dict))
     return "" if piece is None else str(piece)
+
+
+def thinking_text(delta: dict) -> str:
+    """Размышления модели из куска ответа — то, что она говорит сама с собой.
+
+    Это не реплика: в ленте им отведено своё место, а в историю и в промпт они
+    не попадают — иначе следующая модель прочитала бы чужой черновик мыслей как
+    сказанное вслух.
+    """
+    for key in _THINKING_KEYS:
+        text = _text_of((delta or {}).get(key))
+        if text:
+            return text
+    return ""
 
 
 def _message_answer(result: dict) -> dict:
@@ -633,6 +716,7 @@ def _message_answer(result: dict) -> dict:
         content = "".join(str(part.get("text", "")) for part in content
                           if isinstance(part, dict))
     return {"content": content, "tool_calls": message.get("tool_calls") or [],
+            "thinking": thinking_text(message),
             "usage": (result or {}).get("usage") or {}}
 
 
@@ -683,21 +767,23 @@ def _glued_calls(calls: dict) -> list:
     return result
 
 
-def _read_stream(response, on_delta) -> dict:
+def _read_stream(response, on_delta, on_thought=None) -> dict:
     """Читает поток шлюза и отдаёт ответ в том же виде, что и обычный.
 
     Строка потока — «data: {кусок}», конец — «data: [DONE]». Кусок текста
-    сразу уходит в on_delta: из этих кусков лента и печатает реплику на глазах.
-    Второй аргумент on_delta — «начался новый ответ»: за один ход бывает
-    несколько запросов (модель ответила без поиска, а после поиска отвечает
-    заново), и тогда прежний текст больше не в счёт.
+    сразу уходит в on_delta, а размышления — в on_thought: из этих кусков лента
+    и печатает реплику на глазах. Второй аргумент у обоих — «начался новый
+    ответ»: за один ход бывает несколько запросов (модель ответила без поиска,
+    а после поиска отвечает заново), и тогда прежний текст больше не в счёт.
 
     Шлюз может и проигнорировать поток, ответив обычным JSON: разберём и его.
     Просить поток — не повод потерять реплику.
     """
     parts = []
+    thoughts = []
     calls = {}
     usage = {}
+    wants_thinking = on_thought is not None and show_thinking()
     whole = ""      # всё, что не похоже на поток: разберём целиком в конце
 
     for raw in response:
@@ -717,6 +803,11 @@ def _read_stream(response, on_delta) -> dict:
         usage = chunk.get("usage") or usage
         for choice in (chunk.get("choices") or []):
             delta = choice.get("delta") or choice.get("message") or {}
+            if wants_thinking:
+                thought = thinking_text(delta)
+                if thought:
+                    on_thought(thought, not thoughts)
+                    thoughts.append(thought)
             piece = _delta_text(delta)
             if piece:
                 on_delta(piece, not parts)
@@ -729,11 +820,12 @@ def _read_stream(response, on_delta) -> dict:
         except ValueError:
             return {"error": f"шлюз ответил не данными, а текстом: {whole[:200]}"}
 
-    return {"content": "".join(parts), "tool_calls": _glued_calls(calls), "usage": usage}
+    return {"content": "".join(parts), "tool_calls": _glued_calls(calls),
+            "thinking": "".join(thoughts), "usage": usage}
 
 
 def chat(model: str, messages: list, options: dict = None, tool_choice: str = None,
-         on_delta=None) -> tuple:
+         on_delta=None, on_thought=None) -> tuple:
     """Один ход облачной модели. Возвращает (текст, вызовы инструментов).
 
     Форма ответа — та же, что у Ollama-пути, поэтому весь остальной код
@@ -741,22 +833,24 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     приходит текстом в первом элементе: так же ведёт себя и Ollama-путь.
 
     on_delta — «получатель» ответа по кускам: пока модель говорит, ему достаётся
-    очередная порция текста. Без него (или когда CLOUD_STREAM выключен) ответ
-    приходит целиком, как раньше.
+    очередная порция текста, а on_thought — порция размышлений (шлюз отдаёт их
+    отдельным полем, см. thinking_text). Без них (или когда CLOUD_STREAM выключен)
+    ответ приходит целиком, как раньше.
     """
     # Тело запроса нарочно простое: модель, сообщения и stream. Всё остальное
     # (числа характеров, инструмент поиска, имена отправителей) добавляется только
     # если его включили в настройках — см. CLOUD_SEND_* в settings.py. Так облачный
     # участник сначала просто говорит, а лишние поводы для «400 Bad Request»,
     # от которых ключ уходит в паузу и отвечает 429, остаются за дверью
-    streaming = stream_replies() and on_delta is not None
+    streaming = stream_replies() and (on_delta is not None or on_thought is not None)
     payload = {
         "model": bare_model_name(model),
         "messages": openai_messages(messages, keep_names=send_message_names()),
         "stream": bool(streaming),
     }
     if send_params():
-        payload.update(translate_options(options if options is not None else settings.OPTIONS))
+        payload.update(translate_options(options if options is not None else settings.OPTIONS,
+                                        model=model))
 
     uses_tools = send_tools() and model_takes_tools(model)
     if uses_tools:
@@ -769,25 +863,31 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         """Один запрос — с потоком или без: разбор ответа выбирается здесь."""
         def read(response):
             if streaming:
-                return _read_stream(response, on_delta)
+                return _read_stream(response, on_delta, on_thought)
             return _read_answer(response)
         return _request("chat/completions", payload=body, method="POST", read=read)
 
-    answer, error = ask(payload)
+    body = payload
+    answer, error = ask(body)
 
-    # 400 значит «запрос не понят». Если тот же запрос проходит без инструмента,
-    # значит дело было в нём — запоминаем это про модель и больше не предлагаем.
-    # Проверяем именно так, а не догадываемся: 400 по другой причине этот путь
-    # не «вылечит», и модель не будет помечена зря
-    if getattr(error, "code", None) == 400 and uses_tools:
-        without_tools = {key: value for key, value in payload.items()
-                         if key not in ("tools", "tool_choice")}
-        retry_answer, retry_error = ask(without_tools)
-        if not retry_error:
-            _MODELS_WITHOUT_TOOLS.add(model)
-            print(f"  ℹ️  Облако: {bare_model_name(model)} не приняла инструмент поиска — "
-                  f"дальше говорю с ней без него")
-            answer, error = retry_answer, retry_error
+    # 400 значит «запрос не понят». Причина почти всегда в нашем же поле, и две
+    # из них узнаются по словам самого шлюза — их и лечим (см. _eased_body),
+    # не превращая один отказ в три бесполезных запроса
+    for _ in range(2):
+        if getattr(error, "code", None) != 400:
+            break
+        eased = _eased_body(model, body, error)
+        if eased is None:
+            break
+        body = eased
+        answer, error = ask(body)
+
+    # Метку «инструмент не принят» ставим только тогда, когда запрос без него
+    # правда прошёл: иначе по 400 другой причины модель была бы помечена зря
+    if not error and uses_tools and "tools" not in body:
+        _MODELS_WITHOUT_TOOLS.add(model)
+        print(f"  ℹ️  Облако: {bare_model_name(model)} не приняла инструмент поиска — "
+              f"дальше говорю с ней без него")
 
     if error:
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {error}")

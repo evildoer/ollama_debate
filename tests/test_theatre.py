@@ -655,6 +655,43 @@ class TestStreamingReply(unittest.TestCase):
         self.assertTrue(any(d.get("done") for d in self.drafts),
                         "сорванный ход обязан закрыть черновик")
 
+    def test_the_thoughts_arrive_before_the_reply(self):
+        """Мысли видно, пока модель думает, и в реплику они не попадают."""
+        def answer(model, messages, participant_name, **kwargs):
+            kwargs["on_thought"]("Думаю о теме...", True)
+            kwargs["on_thought"](" и вот что решил.", False)
+            kwargs["on_delta"]("Вот ответ.", True)
+            return "Вот ответ.", 0, []
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+
+        thought_drafts = [d for d in self.drafts if d.get("thinking")]
+        self.assertTrue(thought_drafts, "мысли не показывались")
+        self.assertEqual(thought_drafts[0]["thinking"], "Думаю о теме...")
+        self.assertFalse(thought_drafts[0]["answer_started"], "пока это только мысли")
+        self.assertEqual(thought_drafts[-1]["thinking"], "Думаю о теме... и вот что решил.")
+        self.assertTrue(thought_drafts[-1]["answer_started"],
+                        "сказано слово — подпись должна стать честной")
+        self.assertEqual(self.session.posts[0]["content"], "Вот ответ.")
+        self.assertNotIn("Думаю", self.session.posts[0]["content"],
+                         "в реплику мыслм не попадают")
+        self.assertNotIn("Думаю", self.session.conversation_history[0]["content"])
+
+    def test_only_the_tail_of_the_thoughts_is_shown(self):
+        """Тысяча знаков размышлений в ленте не нужна — только хвост."""
+        reply = show._StreamingReply(self._participant(), 1, lambda draft: None)
+        reply.think("начало " + "а" * 3000 + " самый конец мысли", True)
+
+        tail = reply.thought_tail()
+        self.assertLessEqual(len(tail), show._StreamingReply.THOUGHT_SHOWN + 1)
+        self.assertTrue(tail.startswith("…"), "обрезанное должно быть видно")
+        self.assertIn("конец мысли", tail, "хвост — это то, что рядом с ответом")
+
+        brief = show._StreamingReply(self._participant(), 1, lambda draft: None)
+        brief.think("короткая мысль", True)
+        self.assertEqual(brief.thought_tail(), "короткая мысль")
+
     def test_pieces_do_not_flood_the_feed(self):
         """Часть шлюзов печатает по букве: на таком потоке лента бы захлебнулась."""
         show._StreamingReply.INTERVAL = 5      # пауза больше любой порции
@@ -1418,6 +1455,14 @@ class TestRoleMarks(unittest.TestCase):
         # И та же полоса роли: без класса роли черновик терял бы цвет на ходу
         self.assertIn("element.className = `post post-role-${draft.role || 'participant'} streaming`",
                       self.page)
+
+    def test_the_thoughts_have_their_own_dim_block(self):
+        """Мысли — не реплика: у них свой бледный блок над ответом."""
+        self.assertIn(".post-thinking { margin: 0 0 18px 0;", self.page)
+        self.assertIn("body.dark .post-thinking {", self.page)
+        self.assertIn("thoughts.querySelector('.thinking-text').textContent = thought;",
+                      self.page)
+        self.assertIn("draft.answer_started ? '💭 мысли' : '💭 размышляет'", self.page)
         # Черновик идёт простым текстом: markdown посередине реплики — мусор
         self.assertIn("postText.textContent = draft.content", self.page)
 
@@ -1589,7 +1634,7 @@ class FakeGateway:
     """
 
     def __init__(self, models=("qwen/qwen3.7-flash",), content="Канберра.",
-                 status=200, body_text=None, statuses=(), stream_text=None):
+                 status=200, body_text=None, statuses=(), stream_text=None, texts=()):
         self.requests = []        # что до нас донеслось: метод, путь, ключ, тело
         self.models = list(models)
         self.content = content
@@ -1597,6 +1642,7 @@ class FakeGateway:
         self.statuses = list(statuses)   # очередь кодов ответа: для повторов после 429
         self.body_text = body_text    # сырой ответ вместо обычного: ошибки и мусор
         self.stream_text = stream_text    # поток «data: …» вместо обычного ответа
+        self.texts = list(texts)          # очередь тел ответа (первое может быть отказом)
 
         gateway = self
 
@@ -1647,6 +1693,10 @@ class FakeGateway:
                 break    # сокет закрыт — просили остановиться
 
     def answer(self, path: str) -> bytes:
+        if self.texts:
+            # Очередь тел ответа: нужна там, где первый ответ — отказ, а второй
+            # должен быть настоящим (иначе повторить запрос нечего)
+            return self.texts.pop(0).encode("utf-8")
         if self.stream_text is not None:
             return self.stream_text.encode("utf-8")
         if self.body_text is not None:
@@ -1849,6 +1899,81 @@ class TestCloudGateway(unittest.TestCase):
         self.assertFalse(self.gateway.last_request()["body"]["stream"])
         self.assertEqual(pieces, [], "поток выключен — порций быть не должно")
         self.assertEqual(content, "Канберра.")
+
+    def test_the_thinking_comes_in_its_own_channel(self):
+        """Размышления — не реплика: у них свой получатель.
+
+        Шлюз отдаёт их отдельным полем (у proxyapi — «reasoning»), и лента рисует
+        их своим бледным блоком над ответом. В реплику они не попадают.
+        """
+        self.gateway.stream_text = self._sse(
+            {"choices": [{"delta": {"reasoning": "Сначала подумаю"}}]},
+            {"choices": [{"delta": {"reasoning": ", а потом скажу."}}]},
+            self._piece("Сказал."))
+        reply, thoughts = [], []
+
+        content, _tools = cloud.chat(
+            self.MODEL, [{"role": "user", "content": "Привет!"}],
+            on_delta=lambda piece, replace: reply.append((piece, replace)),
+            on_thought=lambda piece, replace: thoughts.append((piece, replace)))
+
+        self.assertEqual(content, "Сказал.", "в реплике только сказанное")
+        self.assertEqual(reply, [("Сказал.", True)],
+                         "мыслм не считаются началом реплики")
+        self.assertEqual(thoughts, [("Сначала подумаю", True), (", а потом скажу.", False)],
+                         "первая порция мыслей начинает их заново, остальные — продолжают")
+
+    def test_the_thinking_under_another_name_is_understood(self):
+        """У DeepSeek и vLLM то же поле зовётся иначе — читаем и его."""
+        self.gateway.stream_text = self._sse(
+            {"choices": [{"delta": {"reasoning_content": "Думаю по-другому"}}]})
+        thoughts = []
+        cloud.chat(self.MODEL, [{"role": "user", "content": "?"}],
+                   on_delta=lambda piece, replace: None,
+                   on_thought=lambda piece, replace: thoughts.append(piece))
+        self.assertEqual(thoughts, ["Думаю по-другому"])
+
+    def test_the_thinking_is_not_shown_when_switched_off(self):
+        """Выключатель на месте: тогда лента показывает только сказанное."""
+        os.environ["CLOUD_SHOW_THINKING"] = "0"
+        self.addCleanup(os.environ.pop, "CLOUD_SHOW_THINKING", None)
+        self.gateway.stream_text = self._sse(
+            {"choices": [{"delta": {"reasoning": "Мысль"}}]}, self._piece("Ответ."))
+        thoughts = []
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "?"}],
+                                     on_delta=lambda piece, replace: None,
+                                     on_thought=lambda piece, replace: thoughts.append(piece))
+        self.assertEqual(thoughts, [])
+        self.assertEqual(content, "Ответ.")
+
+    def test_a_new_openai_model_gets_the_token_field_it_asks_for(self):
+        """Новые модели OpenAI отвергают max_tokens и просят max_completion_tokens.
+
+        Об этом шлюз пишет сам, поэтому поле переименовывается по его же словам
+        и запоминается. Иначе ход пропадал бы на каждом круге, а серия отказов
+        уводила бы ключ в паузу, и всё превращалось бы в 429.
+        """
+        self.addCleanup(cloud._RENAMED_MAX_TOKENS.discard, self.MODEL)
+        # Отказ возникает именно из-за числа характера: без него поля в теле нет
+        os.environ["CLOUD_SEND_PARAMS"] = "1"
+        self.addCleanup(os.environ.pop, "CLOUD_SEND_PARAMS", None)
+        self.gateway.statuses = [400, 200]
+        self.gateway.texts = [
+            json.dumps({"error": {"message": "Unsupported parameter: 'max_tokens' is not "
+                                                "supported with this model. Use "
+                                                "'max_completion_tokens' instead."}}),
+            json.dumps({"choices": [{"message": {"content": "Канберра."}}]}),
+        ]
+
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                     options={"num_predict": 500})
+
+        self.assertEqual(content, "Канберра.", "ход должен состояться, а не пропасть")
+        self.assertEqual(self.gateway.requests[0]["body"]["max_tokens"], 500)
+        self.assertNotIn("max_tokens", self.gateway.requests[1]["body"])
+        self.assertEqual(self.gateway.requests[1]["body"]["max_completion_tokens"], 500)
+        self.assertEqual(cloud.max_tokens_field(self.MODEL), "max_completion_tokens",
+                         "запомнили — чтобы отказ не повторился на следующем ходу")
 
     def test_a_crowded_gateway_is_asked_again_after_a_pause(self):
         """429 — просьба сбавить темп: повторяем, а не считаем ход сломанным."""

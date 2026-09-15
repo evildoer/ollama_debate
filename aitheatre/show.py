@@ -112,12 +112,16 @@ class _StreamingReply:
     а часть шлюзов печатает по букве — на таком потоке лента захлебнулась бы.
     """
 
-    INTERVAL = 0.12
+    INTERVAL = 0.12          # как часто отправлять набранное, в секундах
+    THOUGHT_LIMIT = 4000     # сколько знаков размышлений держим в памяти
+    THOUGHT_SHOWN = 600      # сколько из них видно в ленте
 
     def __init__(self, participant: dict, round_num: int, publisher):
         self.publisher = publisher
         self.stream_id = f"stream-{uuid.uuid4().hex[:8]}"
         self.text = ""
+        self.thoughts = ""
+        self.answer_started = False
         self.sent_at = 0.0
         self.started = False
         self.finished = False
@@ -137,7 +141,7 @@ class _StreamingReply:
         )
 
     def feed(self, piece: str, replace: bool = False):
-        """Очередная порция текста. replace — прежний текст больше не в счёт.
+        """Очередная порция ответа. replace — прежний текст больше не в счёт.
 
         replace приходит на первый кусок каждого запроса: за один ход модель
         может говорить дважды (сказала без поиска, а после поиска — заново),
@@ -145,10 +149,36 @@ class _StreamingReply:
         """
         if replace:
             self.text = ""
+            self.answer_started = True
         self.text += piece
+        self.send_soon(force=replace)
+
+    def think(self, piece: str, replace: bool = False):
+        """Порция размышлений: модель говорит сама с собой, пока не сказала вслух.
+
+        Размышлений бывает больше самого ответа (у gpt-5-nano — 65 порций против
+        6), и в ленте они не нужны целиком: интересны последние — те, что рядом
+        с ответом. Поэтому храним и показываем только хвост.
+        """
+        if replace:
+            self.thoughts = ""
+        self.thoughts = (self.thoughts + piece)[-self.THOUGHT_LIMIT:]
+        self.send_soon(force=replace)
+
+    def send_soon(self, force: bool = False):
+        """Отправить набранное, если оно того ждёт: не чаще INTERVAL."""
         now = time.monotonic()
-        if replace or now - self.sent_at >= self.INTERVAL:
+        if force or now - self.sent_at >= self.INTERVAL:
             self.send(now)
+
+    def thought_tail(self) -> str:
+        """Хвост размышлений для ленты — без половины слова на конце обрезки."""
+        text = self.thoughts
+        if len(text) <= self.THOUGHT_SHOWN:
+            return text
+        cut = text[-self.THOUGHT_SHOWN:]
+        space = cut.find(" ")
+        return "…" + (cut[space + 1:] if space > 0 else cut)
 
     def send(self, now: float = None):
         self.started = True
@@ -156,6 +186,8 @@ class _StreamingReply:
         self.publisher({**self.identity,
                         "stream_id": self.stream_id,
                         "content": self.text,
+                        "thinking": self.thought_tail(),
+                        "answer_started": self.answer_started,
                         # Черновик идёт простым текстом: markdown в нём ещё не
                         # сложился (незакрытая звёздочка — обычное дело), а число
                         # на каждой порции ничего не стоит
@@ -663,6 +695,7 @@ class DebateSession:
                 options=ollama_api._merge_options(participant),
                 think=ollama_api.resolve_think(participant),
                 on_delta=draft.feed if draft else None,
+                on_thought=draft.think if draft else None,
             )
         finally:
             # Черновик закрываем при любом выходе, в том числе при ошибке: иначе
