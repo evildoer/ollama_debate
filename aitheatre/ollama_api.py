@@ -20,6 +20,7 @@ from . import cloud
 from . import deps
 from . import search
 from . import settings
+from . import tooltext
 
 # Кэш для хранения информации о поддержке tools моделями
 MODELS_TOOLS_SUPPORT = {}  # {"model_name": True/False}
@@ -943,6 +944,20 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                                                    options=options, think=think, on_delta=on_delta,
                                                    on_thought=on_thought)
         tool_calls = tool_calls or []
+
+        # Модель может попросить поиск не протоколом, а словами: напечатать
+        # «search:web_search{query: "..."}» прямо в реплике. Для нас это была
+        # обычная реплика — сырой вызов уезжал в пост, а поиска не было вовсе
+        # (и «Источников» в ленте тоже). Теперь просьба узнаётся и выполняется
+        # (см. tooltext), а из реплики вызов убирается
+        content, text_queries = tooltext.take_calls(content)
+        if text_queries and not tool_calls:
+            print(f"  🔍 {participant_name}: поиск попросили текстом — выполняю: "
+                  + ", ".join(f"«{query}»" for query in text_queries))
+            tool_calls = [{"id": "", "type": "function", "textual": True,
+                           "function": {"name": "search_web",
+                                        "arguments": {"query": query}}}
+                          for query in text_queries]
         
         # Сбрасываем флаг после использования
         if force_tool_use:
@@ -972,12 +987,22 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         if not tool_calls:
             break
         
-        messages.append({
-            "role": "assistant",
-            "content": content or "",
-            "tool_calls": tool_calls,
-            "name": participant_name_normalized
-        })
+        # Вызов, пришедший текстом, отправляем обратно текстом же: протокол
+        # инструментов эта модель не удержала (потому вызов и оказался в реплике),
+        # и ответ инструмента на выдуманный нами id она не поймёт
+        if all(tc.get("textual") for tc in tool_calls):
+            messages.append({
+                "role": "assistant",
+                "content": content or "",
+                "name": participant_name_normalized
+            })
+        else:
+            messages.append({
+                "role": "assistant",
+                "content": content or "",
+                "tool_calls": tool_calls,
+                "name": participant_name_normalized
+            })
         
         has_search = False
         for tc in tool_calls:
@@ -1011,12 +1036,21 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                 
                 result = search_web(query, max_results)
                 
-                messages.append({
-                    "role": "tool",
-                    "tool_name": "search_web",
-                    "content": result,
-                    "name": "search_web"
-                })
+                if tc.get("textual"):
+                    # Найденное — обычным сообщением: с этой моделью мы говорим
+                    # на её языке, а не на языке протокола (см. выше)
+                    messages.append({
+                        "role": "user",
+                        "content": f"Результаты поиска по запросу «{query}»:\n\n{result}",
+                        "name": "system"
+                    })
+                else:
+                    messages.append({
+                        "role": "tool",
+                        "tool_name": "search_web",
+                        "content": result,
+                        "name": "search_web"
+                    })
                 
                 if show_session is not None:
                     show_session.current_action = "thinking"
@@ -1054,6 +1088,9 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             content, _tool_calls = ask_model_with_tools(model, messages, tool_choice=None,
                                                         options=options, think=False,
                                                         on_delta=on_delta, on_thought=on_thought)
+            # И тут просьба о поиске может прийти словами: репликой её считать
+            # нельзя, а выполнять уже нечего — ход кончается (см. tooltext)
+            content = tooltext.take_calls(content)[0]
             if content and content.strip():
                 return content, search_count, search_queries
         except Exception as e:

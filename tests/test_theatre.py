@@ -49,14 +49,16 @@ from unittest import mock
 
 import aitheatre
 
-from aitheatre import avatars, cloud, deps, ollama_api, page, search, settings, show, text
+from aitheatre import (avatars, cloud, deps, ollama_api, page, search, settings, show,
+                       text, tooltext)
 from aitheatre import web as web_app
 
 # Приложение разбито на модули, и подменять функцию нужно там, где она живёт:
 # модули вызывают друг друга по полному адресу (ollama_api.check_models_available),
 # поэтому правка в «своём» модуле видна всем. app_module_of находит нужный модуль
 # по имени — так подмена бьёт в цель, а не в копию имени в другом файле.
-APP_MODULES = (settings, deps, text, search, avatars, cloud, ollama_api, show, page, web_app)
+APP_MODULES = (settings, deps, text, tooltext, search, avatars, cloud, ollama_api, show,
+               page, web_app)
 
 
 def app_module_of(name):
@@ -84,6 +86,23 @@ def cloud_setting(test, name, value):
     setattr(settings, name, value)
 
 
+# Настройки облака теперь живут в settings.py, и человек правит их под себя:
+# включает поиск, меняет окно, выключает числа характеров. Прогон не должен это
+# наследовать — иначе проверки вроде «в теле только модель, сообщения и stream»
+# падали бы на машине, где хозяин включил поиск у себя. Возвращаем эти
+# переключатели к тому, с чем проект отдаётся, а нужное каждой проверке она
+# выставляет сама (см. cloud_setting)
+CLOUD_DEFAULTS = (
+    ("ENABLE_SEARCH", True), ("SEARCH_BEFORE_REPLY", True), ("MIN_SEARCHES", 1),
+    ("CLOUD_SEND_PARAMS", False), ("CLOUD_SEND_TOOLS", False),
+    ("CLOUD_SEND_MESSAGE_NAMES", False), ("CLOUD_PASS_OLLAMA_EXTRAS", False),
+    ("CLOUD_STREAM", True), ("CLOUD_SHOW_THINKING", True),
+    ("CLOUD_LIMIT_PARAMS", True), ("CLOUD_NUM_CTX", 32768),
+    ("CLOUD_MAX_TOKENS", 0), ("CLOUD_TURN_LIMIT", 120),
+    ("THINKING_KEEP_SHOWS", 20),
+)
+
+
 def setUpModule():
     """Набор не должен зависеть от вашего .env и не пишет в проект.
 
@@ -98,6 +117,11 @@ def setUpModule():
     for name in cloud.CLOUD_ENV_NAMES + (settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV"):
         os.environ.pop(name, None)
 
+    global SAVED_SETTINGS
+    SAVED_SETTINGS = {name: getattr(settings, name) for name, _value in CLOUD_DEFAULTS}
+    for name, value in CLOUD_DEFAULTS:
+        setattr(settings, name, value)
+
     global SCRATCH_DIR, SAVED_THINKING_FILE
     SCRATCH_DIR = tempfile.TemporaryDirectory()
     SAVED_THINKING_FILE = settings.THINKING_FILE
@@ -107,6 +131,8 @@ def setUpModule():
 def tearDownModule():
     """После прогона возвращаем настройки как были и убираем временную папку."""
     settings.THINKING_FILE = SAVED_THINKING_FILE
+    for name, value in SAVED_SETTINGS.items():
+        setattr(settings, name, value)
     SCRATCH_DIR.cleanup()
 
 
@@ -144,7 +170,7 @@ class TestModuleLayout(unittest.TestCase):
 
     def app_modules(self):
         """Модули приложения в порядке знакомства (константы -> зависимости)."""
-        order = ("settings", "deps", "text", "search", "avatars", "cloud",
+        order = ("settings", "deps", "text", "tooltext", "search", "avatars", "cloud",
                  "ollama_api", "show", "page")
         return [(name, getattr(aitheatre, name)) for name in order] + [("web", web_app)]
 
@@ -906,6 +932,53 @@ class TestStreamingReply(unittest.TestCase):
         self.assertIn("<strong>Жирное</strong>", marked[-1]["content_html"])
         # И простой текст рядом: он нужен тем местам, где HTML не подходит
         self.assertEqual(marked[-1]["content"], "**Жирное** слово.")
+
+    def test_a_search_asked_in_words_never_reaches_the_feed(self):
+        """Просьба о поиске, написанная текстом, — не реплика.
+
+        В настоящей ленте такие посты и появлялись: «search:web_search{query: …}»
+        стоял посреди реплики, а «Источников» у поста не было вовсе — поиск
+        по такой просьбе не выполнялся (см. tooltext и ollama_api).
+        """
+        def answer(model, messages, participant_name, **kwargs):
+            feed = kwargs["on_delta"]
+            feed('Сейчас поищу.\n\nsearch:web_search{query: "Сыктывкар новости"}', True)
+            feed("Вот что нашлось.", True)      # ответила заново, уже после поиска
+            return "Вот что нашлось.", 1, ["Сыктывкар новости"]
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+
+        shown = " ".join(d.get("content") or "" for d in self.drafts)
+        self.assertNotIn("web_search", shown, "сырой вызов уехал в ленту")
+        self.assertNotIn("query:", shown)
+        grown = [d for d in self.drafts if d.get("content")]
+        self.assertEqual(grown[-1]["content"], "Вот что нашлось.")
+
+        # И в наброске тоже: в нём оседает прежняя версия реплики, а вызов —
+        # не версия реплики, а просьба
+        kept = [d for d in self.drafts if d.get("sketch")]
+        self.assertTrue(kept, "сметённая реплика пропала")
+        self.assertNotIn("web_search", kept[0]["sketch"])
+
+    def test_the_transcript_is_trimmed_to_the_last_shows(self):
+        """Стенограмма не растёт вечно: её читают руками и всегда с конца."""
+        transcript = Path(tempfile.mkdtemp()) / "thinking.md"
+        transcript.write_text(
+            "".join(f"\n\n# 0{i}.09.2026 12:00 — тема {i}\n\nмысль {i}\n"
+                    for i in range(1, 6)), encoding="utf-8")
+
+        # Именно через начало спектакля: обрезка должна быть встроена в него,
+        # а не жить отдельной функцией, которую никто не зовёт
+        with mock.patch.object(settings, "THINKING_FILE", transcript), \
+                mock.patch.object(settings, "THINKING_KEEP_SHOWS", 2):
+            show.start_thinking_log("новая тема")
+            written = transcript.read_text(encoding="utf-8")
+
+        self.assertNotIn("тема 3", written)
+        self.assertIn("тема 4", written)
+        self.assertIn("тема 5", written)
+        self.assertIn("новая тема", written)
 
     def test_the_sketch_lays_down_in_the_transcript(self):
         """Прежнюю версию реплики можно прочитать и после занавеса.
@@ -1735,6 +1808,18 @@ class TestCloudContextWindow(unittest.TestCase):
                              len(messages),
                              "узкое окно не должно отнимать историю целиком")
 
+    def test_the_answer_reserve_of_the_cloud_is_its_own_setting(self):
+        """Место под ответ у облака — CLOUD_MAX_TOKENS, а не олламовский предел.
+
+        Иначе «я готов платить за генерацию, но не за историю» словами не
+        выражается: и то и другое было одним числом num_predict.
+        """
+        with mock.patch.object(settings, "CLOUD_MAX_TOKENS", 512):
+            window, reserve = settings.context_budget("cloud:qwen/qwen3.8-flash")
+
+        self.assertEqual(window, settings.CLOUD_NUM_CTX)
+        self.assertEqual(reserve, 512)
+
     def test_the_window_lives_in_the_settings_file_not_in_dotenv(self):
         """Окно правится в settings.py, а строка в .env его больше не двигает.
 
@@ -2169,6 +2254,66 @@ class FakeGateway:
     def stop(self):
         self.httpd.server_close()
         self.thread.join(timeout=2)
+
+
+class TestSearchAskedInWords(unittest.TestCase):
+    """Модель может попросить поиск не протоколом, а текстом.
+
+    Обе формы — из настоящей ленты: так просили z-ai/glm-5.3-flash («search:
+    web_search{query: …}» посреди реплики) и google/gemma-4-31b-it («call:
+    google_search:search{queries:[…]}» вместо реплики целиком). Вызов уезжал
+    в пост, поиск не выполнялся, и «Источников» в ленте не было.
+    """
+
+    def test_the_call_from_the_feed_is_understood(self):
+        clean, queries = tooltext.take_calls(
+            "Открываю вкладки и делаю быстрый поиск.\n\n"
+            'search:web_search{query: "Сыктывкар новости сейчас"}\n\n'
+            "Так, пока Владимир крутит запросы, внесу свою лепту.")
+
+        self.assertEqual(queries, ["Сыктывкар новости сейчас"])
+        self.assertEqual(clean,
+                         "Открываю вкладки и делаю быстрый поиск.\n\n"
+                         "Так, пока Владимир крутит запросы, внесу свою лепту.")
+
+    def test_the_google_shape_with_several_queries(self):
+        clean, queries = tooltext.take_calls(
+            'call:google_search:search{queries:["последние новости Сыктывкар", '
+            '"мероприятия Сыктывкар филармония"]}')
+
+        self.assertEqual(queries, ["последние новости Сыктывкар",
+                                   "мероприятия Сыктывкар филармония"])
+        self.assertEqual(clean, "", "кроме просьбы в такой реплике ничего нет")
+
+    def test_a_call_wrapped_in_tags(self):
+        clean, queries = tooltext.take_calls(
+            'Проверю погоду. <tool_call>{"name": "search_web", '
+            '"arguments": {"query": "погода Сыктывкар"}}</tool_call>')
+
+        self.assertEqual(queries, ["погода Сыктывкар"])
+        self.assertEqual(clean, "Проверю погоду.")
+
+    def test_an_unfinished_call_does_not_stay_in_the_reply(self):
+        """Оборванный по времени ход оставлял в реплике половину вызова."""
+        clean, queries = tooltext.take_calls('Поищу.\n\nsearch:web_search{query: "Сыктывкар')
+
+        self.assertEqual(clean, "Поищу.")
+        self.assertEqual(queries, [])
+
+    def test_ordinary_speech_is_untouched(self):
+        """Скобки и слово search в обычной реплике — не повод что-то вынимать."""
+        for speech in ("Функция search возвращает список, а параметр {query} в ней строковый.",
+                       "Итог: **2:1** в пользу Сыктывкара — {отличный} результат."):
+            with self.subTest(speech=speech):
+                self.assertEqual(tooltext.take_calls(speech), (speech, []))
+
+    def test_the_same_query_twice_asks_once(self):
+        _clean, queries = tooltext.take_calls(
+            'search_web{query: "погода Сыктывкар"} и ещё раз '
+            'search:google_search{query: "Погода сыктывкар"}')
+
+        self.assertEqual(queries, ["погода Сыктывкар"],
+                         "один и тот же запрос — один поиск")
 
 
 class TestCloudGateway(unittest.TestCase):
@@ -2688,6 +2833,56 @@ class TestCloudGateway(unittest.TestCase):
         # Первой версии реплики не было: черновик начался ровно один раз
         self.assertEqual(len(pieces), 1, f"реплика выходила в ленту {len(pieces)} раза")
         self.assertTrue(pieces[0][1], "первая порция начинает реплику заново")
+
+    def test_a_search_asked_in_words_is_understood_and_done(self):
+        """Модель, написавшая просьбу о поиске текстом, всё равно получает поиск.
+
+        Раньше это было тупиком: вызов уезжал в реплику, поиск не выполнялся,
+        и «Источников» у поста не появлялось — хотя модель именно их и просила.
+        Ответ инструмента ей тоже нельзя слать: протокол она не удержала,
+        на ответ с выдуманным нами id шлюз ответил бы отказом.
+        """
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        self.gateway.texts = [
+            json.dumps({"choices": [{"message": {"content":
+                'Сейчас поищу.\n\nsearch:web_search{query: "Сыктывкар новости"}'}}]}),
+            json.dumps({"choices": [{"message": {"content": "Сыктывкар — столица Коми."}}]}),
+        ]
+
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="Вот что нашлось")):
+            content, count, queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Что нового в Сыктывкаре?"}],
+                participant_name="Проверка")
+
+        self.assertEqual(content, "Сыктывкар — столица Коми.")
+        self.assertEqual(count, 1, "поиск по текстовой просьбе не выполнился")
+        self.assertEqual(queries, ["Сыктывкар новости"])
+        messages = self.gateway.requests[1]["body"]["messages"]
+        self.assertNotIn("tool", [m["role"] for m in messages],
+                         "модель, не удержавшая протокол, ответа инструмента не поймёт")
+        self.assertNotIn("tool_calls", messages[-2],
+                         "выдуманный нами id — не её вызов: протокол с ней не держим")
+        self.assertIn("Вот что нашлось", messages[-1]["content"])
+        self.assertIn("Сыктывкар новости", messages[-1]["content"])
+
+    def test_the_size_of_the_cloud_answer_sits_next_to_the_window(self):
+        """Вторая половина стола: сколько облачной модели позволено ответить.
+
+        Местной модели это число задано в OPTIONS и уходит в Ollama вместе с
+        запросом. Облачному участнику оно не уходило вовсе: ответ не ограничивало
+        ничто, кроме CLOUD_TURN_LIMIT в 120 секунд, и «хаотичная» модель успевала
+        наговорить сколько угодно за наши токены.
+        """
+        cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        self.assertNotIn("max_tokens", self.gateway.last_request()["body"],
+                         "по умолчанию ответ не ограничиваем: шлюз решает сам")
+
+        cloud_setting(self, "CLOUD_MAX_TOKENS", 700)
+        cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        body = self.gateway.last_request()["body"]
+        self.assertEqual(body["max_tokens"], 700)
+        self.assertNotIn("temperature", body,
+                         "предел ответа — не характер: числа характеров не включаются")
 
     def test_a_model_that_refuses_tools_is_asked_again_without_them(self):
         """400 на инструмент — не приговор модели: говорим с ней без поиска.

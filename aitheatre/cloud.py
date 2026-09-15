@@ -91,7 +91,7 @@ CLOUD_MOVED_TO_SETTINGS = (
     "CLOUD_TIMEOUT", "CLOUD_SEND_PARAMS", "CLOUD_SEND_TOOLS",
     "CLOUD_SEND_MESSAGE_NAMES", "CLOUD_PASS_OLLAMA_EXTRAS", "CLOUD_RETRY_DELAYS",
     "CLOUD_NUM_CTX", "CLOUD_STREAM", "CLOUD_SHOW_THINKING", "CLOUD_LIMIT_PARAMS",
-    "CLOUD_TURN_LIMIT", "CLOUD_MODELS_CACHE_TTL",
+    "CLOUD_TURN_LIMIT", "CLOUD_MODELS_CACHE_TTL", "CLOUD_MAX_TOKENS",
 )
 
 
@@ -1040,6 +1040,15 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     # каждый ход повторял бы один и тот же отказ, а ключ уходил бы в паузу
     for field in dropped_params(model):
         payload.pop(field, None)
+
+    # Вторая половина стола: сколько модели позволено ответить. Уходит даже
+    # при выключенных числах характеров — max_tokens есть в самой схеме OpenAI,
+    # его понимают все шлюзы, и это не характер, а страховка от «улетело
+    # в космос» (см. CLOUD_MAX_TOKENS). Ноль — не отправляем, шлюз решает сам
+    cap = int(settings.CLOUD_MAX_TOKENS or 0)
+    cap_field = max_tokens_field(model)
+    if cap > 0 and cap_field not in dropped_params(model):
+        payload[cap_field] = cap
 
     uses_tools = send_tools() and model_takes_tools(model)
     if uses_tools:

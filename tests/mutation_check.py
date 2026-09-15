@@ -538,6 +538,36 @@ BUGS = {
          "            history_messages, text.estimate_tokens(system_prompt),\n"
          '            model="")'),
     ],
+    "просьбу о поиске, написанную текстом, снова отправляют в ленту как реплику": [
+        ("aitheatre/ollama_api.py",
+         "        content, text_queries = tooltext.take_calls(content)",
+         "        content, text_queries = content, []"),
+    ],
+    "сырой вызов поиска снова уезжает в черновик ленты": [
+        ("aitheatre/show.py",
+         "        return tooltext.take_calls(self.text)[0]",
+         "        return self.text"),
+    ],
+    "ответ инструмента снова шлют модели, не удержавшей протокол": [
+        ("aitheatre/ollama_api.py",
+         '        if all(tc.get("textual") for tc in tool_calls):',
+         "        if False:"),
+    ],
+    "предел ответа облачной модели снова никуда не уходит": [
+        ("aitheatre/cloud.py",
+         "    if cap > 0 and cap_field not in dropped_params(model):",
+         "    if False:"),
+    ],
+    "место под ответ у облака снова считают олламовским числом": [
+        ("aitheatre/settings.py",
+         "        reserve = int(CLOUD_MAX_TOKENS or 0) or int(OPTIONS.get(\"num_predict\", 0) or 0)",
+         "        reserve = int(OPTIONS.get(\"num_predict\", 0) or 0)"),
+    ],
+    "стенограмма снова растёт без конца": [
+        ("aitheatre/show.py",
+         "    dropped = trim_thinking_log()",
+         "    dropped = 0"),
+    ],
 }
 
 

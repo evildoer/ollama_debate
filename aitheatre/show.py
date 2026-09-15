@@ -11,6 +11,7 @@
 
 import json
 import random
+import re
 import threading
 import time
 import traceback
@@ -20,6 +21,7 @@ from pathlib import Path
 from . import ollama_api
 from . import settings
 from . import text
+from . import tooltext
 
 def load_theatre_settings():
     """
@@ -53,13 +55,60 @@ def save_theatre_settings():
         print(f"  ⚠️  Не сохраняется {settings.SETTINGS_FILE.name}: {e}")
 
 
+# Заголовок раздела стенограммы — тот же, что пишет start_thinking_log.
+# Ищем по нему, а не по любому «# » в начале строки: модели пишут заголовки
+# и в самих мыслях, и обрезка по чужим заголовкам резала бы спектакль пополам
+_THINKING_SECTION = re.compile(r"(?m)^(?=# \d{2}\.\d{2}\.\d{4} \d{2}:\d{2} — )")
+
+
+def trim_thinking_log(keep: int = None) -> int:
+    """Обрезает стенограмму до последних `keep` спектаклей.
+
+    Стенограмма растёт с каждым ходом и никогда не чистилась: после десятков
+    спектаклей это мегабайты, а читают её глазами и всегда с конца. Возвращает,
+    сколько разделов убрано (0 — обрезать было нечего или запрещено настройкой).
+    """
+    keep = int(settings.THINKING_KEEP_SHOWS if keep is None else keep)
+    if keep <= 0:                      # 0 — не чистить вовсе
+        return 0
+
+    path = settings.THINKING_FILE
+    try:
+        if not path.exists():
+            return 0
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        print(f"  ⚠️  Не читается {path.name}: {e}")
+        return 0
+
+    parts = _THINKING_SECTION.split(raw)
+    sections = parts[1:]
+    if len(sections) <= keep:
+        return 0
+
+    dropped = len(sections) - keep
+    try:
+        path.write_text(parts[0] + "".join(sections[-keep:]), encoding="utf-8")
+    except OSError as e:
+        print(f"  ⚠️  Не обрезается {path.name}: {e}")
+        return 0
+    return dropped
+
+
 def start_thinking_log(topic: str):
     """Начинает раздел размышлений этого спектакля в стенограмме.
 
     В ленте мысли видны только пока идёт ход, и после занавеса они бы пропали.
     Стенограмма (обычный markdown-файл рядом с проектом) остаётся: её можно
     прочитать позже — там видно, о чём модель думала на каждом своём ходу.
+
+    Перед записью стенограмма обрезается до последних спектаклей: иначе файл
+    рос бы вечно (см. THINKING_KEEP_SHOWS).
     """
+    dropped = trim_thinking_log()
+    if dropped:
+        print(f"  🧹 Стенограмма: убрано {dropped} прежних спектаклей, "
+              f"оставлено {settings.THINKING_KEEP_SHOWS}")
     try:
         with open(settings.THINKING_FILE, "a", encoding="utf-8") as handle:
             handle.write(f"\n\n# {time.strftime('%d.%m.%Y %H:%M')} — "
@@ -220,11 +269,22 @@ class _StreamingReply:
         потом убрали». Набросок остаётся свёрнутым блоком (см. sketch в send),
         а в конце хода уходит в готовый пост.
         """
-        text = self.text.strip()
+        text = self.visible().strip()
         if not text:
             return
         joined = text if not self.sketch else self.sketch + self.SKETCH_MARK + text
         self.sketch = joined[-self.SKETCH_LIMIT:]
+
+    def visible(self) -> str:
+        """Набранное без сырых вызовов поиска.
+
+        Часть облачных моделей просит поиск не протоколом, а текстом —
+        «search:web_search{query: "..."}». В ленте этому делать нечего: вызов
+        вынимается, а поиск по нему выполняет код хода (см. tooltext). И для
+        черновика тоже: иначе зритель видел бы вызов напечатанным, а потом
+        он бы оттуда исчез.
+        """
+        return tooltext.take_calls(self.text)[0]
 
     def think(self, piece: str, replace: bool = False):
         """Порция размышлений: модель говорит сама с собой, пока не сказала вслух.
@@ -265,9 +325,10 @@ class _StreamingReply:
     def send(self, now: float = None):
         self.started = True
         self.sent_at = time.monotonic() if now is None else now
+        shown = self.visible()
         self.publisher({**self.identity,
                         "stream_id": self.stream_id,
-                        "content": self.text,
+                        "content": shown,
                         "thinking": self.thought_tail(),
                         "sketch": self.sketch,
                         "answer_started": self.answer_started,
@@ -275,7 +336,7 @@ class _StreamingReply:
                         # и формулы-строчки появляются на глазах, а не в самом
                         # конце хода. Незакрытая звёздочка так звёздочкой
                         # и остаётся — её съест только готовая пара
-                        "content_html": text.markdown_to_html(self.text),
+                        "content_html": text.markdown_to_html(shown),
                         "draft": True})
 
     def finish(self):
