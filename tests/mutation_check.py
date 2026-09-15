@@ -565,8 +565,28 @@ BUGS = {
     ],
     "место под ответ у облака снова считают олламовским числом": [
         ("aitheatre/settings.py",
-         "        reserve = int(CLOUD_MAX_TOKENS or 0) or int(OPTIONS.get(\"num_predict\", 0) or 0)",
-         "        reserve = int(OPTIONS.get(\"num_predict\", 0) or 0)"),
+         "        reserve = max(0, int(CLOUD_MAX_TOKENS or 0))",
+         "        reserve = (int(CLOUD_MAX_TOKENS or 0)\n"
+         "                   or int(OPTIONS.get(\"num_predict\", 0) or 0))"),
+    ],
+    # Отказ по tool_choice — не повод отбирать у модели поиск: это разные
+    # возможности, и судья на qwen остался без поиска именно из-за этой путаницы
+    "отказ по tool_choice снова отбирает у модели сам инструмент": [
+        ("aitheatre/cloud.py",
+         "        return {key: value for key, value in body.items()\n"
+         "                if key not in _TOOL_CHOICE_FIELDS}",
+         "        return {key: value for key, value in body.items()\n"
+         "                if key not in _TOOL_CHOICE_FIELDS and key != \"tools\"}"),
+    ],
+    "модели без инструмента снова запрещают искать": [
+        ("aitheatre/show.py",
+         '                f"{self.SEARCH_CALL_EXAMPLE} — приложение выполнит поиск "',
+         '                ""'),
+    ],
+    "кругов хода снова жёстко восемь, а поисков разрешено больше": [
+        ("aitheatre/ollama_api.py",
+         "    max_iterations = max(8, min_searches + max_searches + max_forced_attempts + 2)",
+         "    max_iterations = 8"),
     ],
     "стенограмма снова растёт без конца": [
         ("aitheatre/show.py",
@@ -753,8 +773,14 @@ BUGS = {
     # первое число считало все сообщения запроса, второе — только сцену
     "шапка хода снова с прежними путаными именами": [
         ("aitheatre/show.py",
-         '            f"{numbers_word(budget.get(\'reserve\'))} оставлено на ответ модели, "',
-         '            f"{numbers_word(budget.get(\'reserve\'))} — запас на ответ, "'),
+         '    line = (f"**Запрос к модели состоял из:** {summary.get(\'messages\')} сообщ. "',
+         '    line = (f"**Что уехало:** {summary.get(\'messages\')} сообщ. "'),
+    ],
+    "ноль в запасе снова читается как «ноль токенов на ответ»": [
+        ("aitheatre/show.py",
+         '              else "на ответ ничего не зарезервировано '
+         '(CLOUD_MAX_TOKENS = 0 — ответ не ограничиваем)")',
+         '              else f"{numbers_word(reserve)} оставлено на ответ модели")'),
     ],
     "ноль в шапке снова затыкают общим числом сообщений": [
         ("aitheatre/show.py",

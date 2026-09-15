@@ -486,7 +486,17 @@ def _url(path: str) -> str:
 # Что значат коды шлюза — словами, а не номером: по номеру причина не видна,
 # а ошибка из чата идёт прямо в ленту спектакля.
 # Поля тела, которые в схеме OpenAI отвечают за инструменты поиска
-_TOOL_FIELDS = ("tools", "tool_choice", "functions")
+# Инструмент и указание «обязан его вызвать» — разные поля, и отказы у них
+# разные. Шлюз, не знающий tool_choice, отвечает 400 на запрос целиком, а сам
+# инструмент понимает прекрасно: выкинуть его вместе с указанием — значит
+# отобрать у модели поиск до конца процесса (так судья на qwen и остался без
+# поиска, которого от него же требовали правила, и ушёл думать в никуда)
+_TOOL_CHOICE_FIELDS = ("tool_choice", "functions")
+
+# Модели, чей шлюз не понимает tool_choice: инструмент им по-прежнему шлём,
+# а обязательный вызов — нет (это отдельная возможность, и отказ по ней
+# не должен стоить модели поиска)
+_NO_TOOL_CHOICE = set()
 
 # Числа, которые шлюз назвал лишними: он пишет имя поля словами («Unknown
 # parameter: 'repeat_penalty'»), и повторять этот отказ на каждом ходу незачем.
@@ -516,6 +526,16 @@ _EASE_ROUNDS = 6
 def dropped_params(model: str) -> set:
     """Поля, которых эта модель больше не увидит: шлюз назвал их лишними."""
     return _DROPPED_PARAMS.get(model, set())
+
+
+def tool_choice_supported(model: str) -> bool:
+    """Понимает ли этот шлюз поле tool_choice — «обязан вызвать инструмент».
+
+    Требовать поиск умеет не каждый шлюз, а вот инструментом пользоваться
+    по своей воле умеют почти все. Поэтому отказ по tool_choice
+    запоминается отдельно и не трогает сам инструмент (см. _NO_TOOL_CHOICE).
+    """
+    return model not in _NO_TOOL_CHOICE
 
 
 def named_field(text: str) -> str:
@@ -549,6 +569,10 @@ def _eased_body(model: str, body: dict, error):
     Третья. Если запрос с инструментом поиска не проходит, а такой же без него
     проходит — модель его не принимает. Признаком этого делится вызывающий:
     он видит, что запрос без инструмента удался (см. _MODELS_WITHOUT_TOOLS).
+    Но сначала пробуется более дешёвое объяснение: отказ может быть только
+    по указанию «обязан вызвать» (tool_choice), и тогда инструмент остаётся
+    на месте — иначе каждая модель, чей шлюз не знает этого поля, теряла бы
+    поиск на весь спектакль (см. _TOOL_CHOICE_FIELDS).
 
     None — сказать нечего: тогда ошибка показывается как есть, а не превращается
     в три бесполезных запроса подряд.
@@ -565,9 +589,21 @@ def _eased_body(model: str, body: dict, error):
         eased["max_completion_tokens"] = body["max_tokens"]
         return eased
 
-    if named in _TOOL_FIELDS:
-        # Про инструмент шлюз сказал сам — убираем его, не трогая числа
-        return {key: value for key, value in body.items() if key not in _TOOL_FIELDS}
+    if named in _TOOL_CHOICE_FIELDS or (not named and "tool_choice" in body
+                                        and tool_choice_supported(model)):
+        # Указание «обязан вызвать» — не инструмент, и отказ по нему не значит,
+        # что модель не ищет: убираем только его, а инструмент остаётся
+        _NO_TOOL_CHOICE.add(model)
+        print(f"  ℹ️  Облако: {bare_model_name(model)} не понимает tool_choice — "
+              f"инструмент поиска оставляю, а требование вызова снимаю")
+        return {key: value for key, value in body.items()
+                if key not in _TOOL_CHOICE_FIELDS}
+
+    if named == "tools":
+        # Шлюз назвал сам инструмент — убираем только его: числа и остальное
+        # остаются на месте, а вызывающий по этому признаку пометит модель
+        # «инструмента не принимает» (см. _MODELS_WITHOUT_TOOLS)
+        return {key: value for key, value in body.items() if key != "tools"}
 
     if named and named in body:
         _DROPPED_PARAMS.setdefault(model, set()).add(named)
@@ -576,8 +612,8 @@ def _eased_body(model: str, body: dict, error):
               f"которые она понимает)")
         return {key: value for key, value in body.items() if key != named}
 
-    if "tools" in body or "tool_choice" in body:
-        return {key: value for key, value in body.items() if key not in _TOOL_FIELDS}
+    if "tools" in body:
+        return {key: value for key, value in body.items() if key != "tools"}
     return None
 
 
@@ -1227,7 +1263,10 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     uses_tools = use_tools is not False and send_tools() and model_takes_tools(model)
     if uses_tools:
         payload["tools"] = _tool_schema()
-        if tool_choice:
+        # Требовать вызов — отдельная возможность шлюза, и если он её не понимает,
+        # инструмент всё равно уезжает: модель ищет по своей воле, а правила
+        # про поиск остаются в силе (см. _NO_TOOL_CHOICE)
+        if tool_choice and tool_choice_supported(model):
             # «any» у Ollama значит «обязан вызвать инструмент», у OpenAI — «required»
             payload["tool_choice"] = "required" if tool_choice == "any" else tool_choice
 
@@ -1270,18 +1309,23 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     # нужно несколько: OpenAI-подобные вендоры называют поля по одному, и ход
     # с пятью числами характера требует до пяти запросов. Зато каждый убранный
     # ключ запоминается, и следующие ходы идут без отказов вовсе
+    tools_stripped = False   # инструмент пришлось убрать из тела — только это
+                             # и значит «модель не принимает инструмент»
     for _ in range(_EASE_ROUNDS):
         if getattr(error, "code", None) != 400:
             break
         eased = _eased_body(model, body, error)
         if eased is None:
             break
+        if "tools" in body and "tools" not in eased:
+            tools_stripped = True
         body = eased
         answer, error, notes = ask(body)
 
-    # Метку «инструмент не принят» ставим только тогда, когда запрос без него
-    # правда прошёл: иначе по 400 другой причины модель была бы помечена зря
-    if not error and uses_tools and "tools" not in body:
+    # Метку «инструмент не принят» ставим только тогда, когда запрос без самого
+    # инструмента правда прошёл: отказ по одному лишь tool_choice — это отказ
+    # по указанию «обязан вызвать», и поиска у модели он отбирать не должен
+    if not error and tools_stripped:
         _MODELS_WITHOUT_TOOLS.add(model)
         print(f"  ℹ️  Облако: {bare_model_name(model)} не приняла инструмент поиска — "
               f"дальше говорю с ней без него")

@@ -892,7 +892,8 @@ class TestStreamingReply(unittest.TestCase):
         self.assertIn("Сначала взвешу доводы.", written)
         self.assertIn(self._participant()["display_name"], written)
         self.assertIn("Вот ответ.", written, "в ДАМПе ход заканчивается репликой")
-        self.assertIn("### Что уехало в модель", written, "виден и вход, а не только выход")
+        self.assertIn("### Что вошло в запрос к модели", written,
+                      "виден и вход, а не только выход")
         self.assertIn("### Реплика", written)
 
     def test_the_rewritten_reply_is_kept_as_a_sketch(self):
@@ -1460,13 +1461,15 @@ class TestSystemPrompt(unittest.TestCase):
         self.assertIn("минимум 2 поиск", prompt)
         self.assertIn("не больше 3 поиск", prompt)
 
-    def test_a_model_without_the_search_tool_is_not_asked_to_search(self):
-        """Модель без инструмента поиска не должна слышать про поиск вообще.
+    def test_a_model_without_the_search_tool_still_knows_how_to_ask(self):
+        """Модель без инструмента поиска всё равно может искать — словами.
 
         Тот самый случай судьи на qwen3.8-flash: в промпте было «сделай минимум
         поиск», а инструмента шлюз ей не дал — модель пыталась искать, не могла
         и две минуты молотила размышления, пока ход не оборвался по
-        CLOUD_TURN_LIMIT. Правила и возможности должны совпадать.
+        CLOUD_TURN_LIMIT. Правила и возможности должны совпадать, но запрет тут
+        не выход: способ искать у модели есть всегда — просьба словами, её
+        узнаёт и выполняет код хода (см. tooltext).
         """
         cloud_setting(self, "MIN_SEARCHES", 2)
         cloud_setting(self, "CLOUD_SEND_TOOLS", True)   # поиск включён…
@@ -1474,10 +1477,12 @@ class TestSystemPrompt(unittest.TestCase):
         person = non_judge_ai(self.session)
         prompt = self.session.get_system_prompt(person)
 
-        self.assertNotIn("минимум 2 поиск", prompt,
-                         "поиск требуется у модели, которой его не дали")
-        self.assertIn("не подключён", prompt,
-                      "модель должна знать, что искать ей нечем")
+        self.assertIn("не выдан протоколом", prompt,
+                      "модель должна знать, чем именно искать сейчас не выйдет")
+        self.assertIn(self.session.SEARCH_CALL_EXAMPLE, prompt,
+                      "но способ искать должен остаться: запрет и был той петлёй")
+        self.assertIn("минимум 2 поиск", prompt,
+                      "минимум поисков остаётся в силе и для этого способа")
 
     def test_the_last_reply_does_not_travel_to_the_model_twice(self):
         """Реплика собеседника уезжает в модель ровно один раз.
@@ -1989,7 +1994,11 @@ class TestCloudContextWindow(unittest.TestCase):
                          "предупреждение повторяется на каждом ходу")
 
     def test_window_smaller_than_the_answer_reserve_keeps_the_scene(self):
-        with mock.patch.object(settings, "CLOUD_NUM_CTX", 4096):
+        # Запас задан положительным нарочно: при нуле (CLOUD_MAX_TOKENS = 0)
+        # он и не откладывается вовсе, и узкое окно проверять было бы нечем.
+        # Здесь запас (8192) больше самого окна — и историю он съесть не должен
+        with mock.patch.object(settings, "CLOUD_NUM_CTX", 4096), \
+                mock.patch.object(settings, "CLOUD_MAX_TOKENS", 8192):
             messages = self._long_history(reels=40, count=1)
             self.assertEqual(len(text.trim_history_by_tokens(messages, 10, model="cloud:x/y")),
                              len(messages),
@@ -2006,6 +2015,29 @@ class TestCloudContextWindow(unittest.TestCase):
 
         self.assertEqual(window, settings.CLOUD_NUM_CTX)
         self.assertEqual(reserve, 512)
+
+    def test_zero_answer_seat_means_no_limit_at_all(self):
+        """CLOUD_MAX_TOKENS = 0 — это ноль, а не олламовское число.
+
+        Так и просил режиссёр: за генерацию ответа платить не жалко, жалко
+        за длинную историю, которую гоняют токенами в каждом запросе. Поэтому
+        ноль здесь значит «ответ не ограничиваем»: и max_tokens не уходит,
+        и место под ответ в окне не откладывается. Иначе местный num_predict
+        съедал бы часть облачного окна, и история резалась бы ни за что.
+        """
+        with mock.patch.object(settings, "CLOUD_MAX_TOKENS", 0), \
+                mock.patch.dict(settings.OPTIONS, {"num_predict": 8192}):
+            window, reserve = settings.context_budget("cloud:qwen/qwen3.8-flash")
+            messages = [{"role": "user", "name": "икс", "content": "реплика " * 50}]
+            _trimmed, report = text.trim_history_with_report(
+                messages, 100, model="cloud:qwen/qwen3.8-flash")
+
+        self.assertEqual(window, settings.CLOUD_NUM_CTX)
+        self.assertEqual(reserve, 0, "ollaмовский предел ответа у облака не при чём")
+        self.assertEqual(report["reserve"], 0)
+        self.assertEqual(report["available"],
+                         settings.CLOUD_NUM_CTX - settings.CONTEXT_SAFETY_MARGIN - 100,
+                         "всё окно, кроме технического запаса, отдано истории")
 
     def test_the_window_lives_in_the_settings_file_not_in_dotenv(self):
         """Окно правится в settings.py, а строка в .env его больше не двигает.
@@ -2101,10 +2133,16 @@ class TestTurnReport(unittest.TestCase):
     def test_the_trim_report_names_the_window_and_what_was_dropped(self):
         messages = [{"role": "user", "name": f"говорун{i}",
                      "content": "реплика сцены " * 900} for i in range(4)]
-        trimmed, report = text.trim_history_with_report(
-            messages, 100, model="cloud:qwen/qwen3.8-flash")
+        # Окно и запас задаём явно и узко: при CLOUD_MAX_TOKENS = 0 (значит
+        # «ответ не ограничиваем») окно 32 768 не режет ничего, и обрезать было
+        # бы нечего. Здесь проверяется сам отчёт об обрезке, а не её отсутствие
+        narrow = 8192
+        with mock.patch.object(settings, "CLOUD_MAX_TOKENS", 512), \
+                mock.patch.object(settings, "CLOUD_NUM_CTX", narrow):
+            trimmed, report = text.trim_history_with_report(
+                messages, 100, model="cloud:qwen/qwen3.8-flash")
 
-        self.assertEqual(report["window"], settings.CLOUD_NUM_CTX)
+        self.assertEqual(report["window"], narrow)
         self.assertTrue(report["cloud"], "окно должно быть облачным — по говорящей модели")
         self.assertLess(len(trimmed), len(messages))
         self.assertEqual(report["messages_before"], len(messages))
@@ -2270,12 +2308,26 @@ class TestTurnReport(unittest.TestCase):
         self.assertIn("оставлено на ответ модели", written,
                       "запас на ответ нужно объяснить словами, а не назвать «запасом")
         self.assertIn("технический запас", written)
-        self.assertIn("**Что уехало:**", written)
+        self.assertIn("**Запрос к модели состоял из:**", written)
         self.assertIn("из сцены", written, "сцена и задания — разные вещи, и это видно")
         self.assertNotIn(") из ", written,
                          "«уехало N из M» сравнивало разные вещи: это забыто")
         # И ни одного выдуманного числа: сцены в этом ходу нет, и так и сказано
         self.assertIn("из сцены 0 сообщ.", written)
+
+    def test_a_zero_answer_seat_is_not_called_zero_tokens(self):
+        """Ноль в запасе — это «ответ не ограничиваем», а не «0 токенов на ответ».
+
+        Именно так это у облака и есть (CLOUD_MAX_TOKENS = 0). Строка
+        «0 оставлено на ответ модели» читалась бы ровно наоборот и заставляла бы
+        искать, куда эти токены пропали.
+        """
+        line = show.window_line({"kind": "cloud", "window": 32768, "reserve": 0,
+                                 "safety": 500, "available": 32268})
+
+        self.assertIn("на ответ ничего не зарезервировано", line)
+        self.assertIn("CLOUD_MAX_TOKENS = 0", line)
+        self.assertNotIn("0 оставлено на ответ", line)
 
     def test_the_dump_is_written_while_the_turn_is_still_going(self):
         """ДАМП пишется по ходу дела, а не в конце: у оборванного хода не было следов.
@@ -2315,7 +2367,7 @@ class TestTurnReport(unittest.TestCase):
         self.assertNotIn("### Реплика", mid, "реплики в середине хода ещё нет")
         self.assertIn("Вот ответ.", written)
         self.assertIn("### Реплика", written)
-        self.assertEqual(written.count("### Что уехало в модель"), 1,
+        self.assertEqual(written.count("### Что вошло в запрос к модели"), 1,
                          "ход должен попасть в файл один раз, а не дважды")
 
     def test_a_search_round_lands_in_the_turn_step_by_step(self):
@@ -2343,6 +2395,7 @@ class TestTurnReport(unittest.TestCase):
         settings.CLOUD_BASE_URL = gateway.base_url
         settings.CLOUD_API_KEY = "test-key-1234567890"
         self.addCleanup(cloud._MODELS_WITHOUT_TOOLS.clear)
+        self.addCleanup(cloud._NO_TOOL_CHOICE.clear)
         cloud_setting(self, "CLOUD_SEND_TOOLS", True)
 
         participant = {"display_name": "Проверка", "model": "cloud:openai/gpt-5-nano",
@@ -2995,6 +3048,7 @@ class TestCloudGateway(unittest.TestCase):
         # Отказ от инструмента поиска — тоже память процесса: без этого одна
         # проверка влияла бы на следующую
         self.addCleanup(cloud._MODELS_WITHOUT_TOOLS.clear)
+        self.addCleanup(cloud._NO_TOOL_CHOICE.clear)
         # Никаких зависимостей от запущенной Ollama: список местных моделей,
         # проверка «умеет ли модель размышлять» (у каждой модели это /api/show!)
         # и опрос загруженных моделей подменяются на мгновенные заглушки
@@ -3581,9 +3635,13 @@ class TestCloudGateway(unittest.TestCase):
         Спрашивать поиск у той, кто инструмент не берёт, не за что — он не сработает.
         """
         cloud_setting(self, "CLOUD_SEND_TOOLS", True)
-        # Отказ от инструмента и реплика приходят в одном ходу — именно так это
-        # и было в логе: шлюз ругается на tools, а следом отдаёт обычный ответ
+        # Настоящий отказ по инструменту: шлюз называет поле, которого не знает,
+        # и следом за этим отдаёт обычный ответ — именно так это было в логе
         self.gateway.statuses = [400, 200]
+        self.gateway.texts = [
+            json.dumps({"error": {"message": "Unknown parameter: 'tools'."}}),
+            json.dumps({"choices": [{"message": {"content": "Канберра."}}]}),
+        ]
 
         content, count, _queries = ollama_api.ask_model(
             self.MODEL, [{"role": "user", "content": "Привет!"}],
@@ -3594,6 +3652,65 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(len(self.gateway.requests), 2,
                          "после отказа модель послали искать — а инструмент она не берёт")
         self.assertFalse(cloud.model_takes_tools(self.MODEL), "отказ надо было запомнить")
+
+    def test_a_refused_tool_choice_does_not_take_the_search_away(self):
+        """Отказ по tool_choice — не повод отобрать у модели поиск.
+
+        Это разные возможности: инструментом модель пользуется сама, а «обязан
+        вызвать его прямо сейчас» понимает не каждый шлюз. Раньше любой 400
+        с инструментом в теле заканчивался одним и тем же: инструмент выкидывался
+        и запоминалось «модель его не принимает». Так судья на qwen3.8-flash
+        остался без поиска до конца процесса — и, по требованию своих же правил,
+        ушёл думать в двухминутную петлю.
+        """
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        self.gateway.statuses = [400, 200]
+        self.gateway.texts = [
+            json.dumps({"error": {"message": "Unknown parameter: 'tool_choice'."}}),
+            json.dumps({"choices": [{"message": {"content": "Канберра."}}]}),
+        ]
+
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                     tool_choice="any")
+
+        self.assertEqual(content, "Канберра.")
+        self.assertEqual(len(self.gateway.requests), 2)
+        retry = self.gateway.requests[1]["body"]
+        self.assertIn("tools", retry, "инструмент поиска отбирать было не за что")
+        self.assertNotIn("tool_choice", retry,
+                         "а вот требование вызова повторять не надо")
+        self.assertTrue(cloud.model_takes_tools(self.MODEL),
+                        "модель с поиском, а не без него")
+        # И в следующий раз требование не уезжает снова: отказ запомнен
+        cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}], tool_choice="any")
+        self.assertNotIn("tool_choice", self.gateway.last_request()["body"])
+
+    def test_the_turn_has_a_round_for_every_allowed_search(self):
+        """Кругов хода должно хватать на все поиски, разрешённые настройками.
+
+        Кругов было жёстко восемь, а потолок поисков — настройка. Режиссёр мог
+        поднять MAX_SEARCHES, и часть поисков просто не состоялась бы — молча:
+        ни в ленте, ни в консоли об этом не было бы ни слова.
+        """
+        calls = [json.dumps({"choices": [{"message": {"content": "", "tool_calls": [
+            {"id": f"call-{n}", "type": "function",
+             "function": {"name": "search_web",
+                          "arguments": json.dumps({"query": f"запрос-{n}"})}}]}}]})
+            for n in range(10)]
+        calls.append(json.dumps({"choices": [{"message": {
+            "content": "Сыктывкар — столица Коми."}}]}))
+        self.gateway.texts = calls
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        cloud_setting(self, "MAX_SEARCHES", 10)
+
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")):
+            content, count, queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Что нового?"}],
+                participant_name="Роман")
+
+        self.assertEqual(count, 10, "разрешённые поиски должны состояться все")
+        self.assertEqual(len(queries), 10)
+        self.assertEqual(content, "Сыктывкар — столица Коми.")
 
     def test_an_error_is_not_taken_for_an_answer(self):
         """Текст ошибки — не реплика: поиск за ним не просят.
@@ -3774,6 +3891,7 @@ class TestATurnThatStayedSilent(unittest.TestCase):
         settings.CLOUD_BASE_URL = self.gateway.base_url
         settings.CLOUD_API_KEY = self.KEY
         self.addCleanup(cloud._MODELS_WITHOUT_TOOLS.clear)
+        self.addCleanup(cloud._NO_TOOL_CHOICE.clear)
         cloud_setting(self, "CLOUD_SEND_TOOLS", True)
         # Ответ, съеденный размышлениями: текста нет, а вывод посчитан
         self.gateway.texts = [json.dumps({
