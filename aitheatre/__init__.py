@@ -99,6 +99,7 @@ from .show import (
     character_parameters,
     create_post,
     draw_character,
+    forget_theatre_settings,
     load_theatre_settings,
     run_debate_thread,
     save_theatre_settings,
@@ -121,6 +122,6 @@ __all__ = [
     "fetch_model_parameters", "fetch_ollama_models", "load_vram_measurements",
     "models_problem_message", "suggest_safe_ctx", "unload_model",
     "DebateSession", "apply_cast_patch", "build_new_cast", "character_parameters",
-    "create_post", "draw_character", "load_theatre_settings", "run_debate_thread",
-    "save_theatre_settings", "session", "HTML_TEMPLATE",
+    "create_post", "draw_character", "forget_theatre_settings", "load_theatre_settings",
+    "run_debate_thread", "save_theatre_settings", "session", "HTML_TEMPLATE",
 ]

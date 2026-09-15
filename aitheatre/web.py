@@ -324,6 +324,9 @@ def refresh_avatar(keywords):
         # Аватар живёт в составе: его видит и следующий спектакль, и идущий
         cast[participant_idx]["avatar_url"] = avatar_url or None
         show.session.sync_cast_media()
+        # Аватар — часть пульта: его видит и следующий запуск, а не только
+        # текущая страница (иначе «Найти аватар» приходилось бы повторять)
+        show.save_theatre_settings()
         
         if avatar_url:
             return jsonify({"avatar_url": avatar_url})
@@ -393,7 +396,25 @@ def start():
 def reset():
     """«Новый спектакль»: новые имена и характеры, а сцена и правила — те же."""
     show.session.new_show()
+    # Новые имена — это тоже пульт: сохраняем, чтобы после перезапуска вернуться
+    # именно к этому составу, а не к тому, что был до «Нового спектакля»
+    show.save_theatre_settings()
     print(f"🎭 Новый состав: {[p.get('display_name') for p in show.session.runtime_participants]}")
+    return jsonify({"success": True, "participants": cast_payload()})
+
+
+@app.route('/api/settings/reset', methods=['POST'])
+def reset_settings():
+    """«Полный сброс»: пульт заново из settings.py, сохранённое — забыть.
+
+    Не то же, что «Состав из PARTICIPANTS»: та кнопка берёт из файла только места,
+    а эта возвращает к исходному всё, что есть в редакторе, — состав с ролями,
+    общие правила общения, руководства модератора и правила судьи — и стирает
+    сохранённый пульт, чтобы сброс пережил и перезапуск.
+    """
+    show.session.reset_to_defaults()
+    show.forget_theatre_settings()
+    print("🧹 Полный сброс: состав и правила взяты из settings.py, сохранённое забыто")
     return jsonify({"success": True, "participants": cast_payload()})
 
 @app.route('/api/post/<int:post_id>/prompt')
@@ -520,7 +541,6 @@ def update_moderator_instructions():
     # Обновляем правила судьи если переданы
     if isinstance(data.get("judge_rules"), list):
         show.session.judge_rules = [str(instr) for instr in data["judge_rules"]]
-        show.save_theatre_settings()
         print(f"⚖️  Обновлены правила судьи: {len(show.session.judge_rules)} пунктов")
     
     # Обновляем индивидуальные инструкции участников если переданы
@@ -540,7 +560,12 @@ def update_moderator_instructions():
                 print(f"📝 Обновлена индивидуальная инструкция для {name}: {instruction[:50]}...")
             else:
                 print(f"📝 Удалена индивидуальная инструкция для {name}")
-    
+
+    # Редактор — часть режиссёрского пульта, поэтому его правки тоже переживают
+    # перезапуск: раньше сохранялись только правила судьи, а правила общения
+    # и руководства после перезапуска тихо возвращались к дефолтным
+    show.save_theatre_settings()
+
     return jsonify({"success": True})
 
 @app.route('/api/shutdown', methods=['POST'])

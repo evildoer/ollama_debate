@@ -343,7 +343,7 @@ HTML_TEMPLATE = """
 
                     <div class="panel-section" id="sec-cast">
                         <div class="panel-heading"><span class="num">02</span><span class="name">Состав</span></div>
-                        <div class="panel-note">Сцена: кто играет, в каком порядке и в какой роли. Правки действуют сразу и работают до и на ходу — уже сказанное не меняется. Порядок карточек — очередь реплик, поэтому участников можно переставлять, а место может быть любым из трёх ролей. Характер (температура и прочее) на каждый спектакль разыгрывается случайно.</div>
+                        <div class="panel-note">Сцена: кто играет, в каком порядке и в какой роли. Правки действуют сразу и работают до и на ходу — уже сказанное не меняется. Порядок карточек — очередь реплик, поэтому участников можно переставлять, а место может быть любым из трёх ролей. Характер (температура и прочее) на каждый спектакль разыгрывается случайно. Всё собранное здесь сохраняется: после перезапуска театра вы вернётесь к этому же составу — с теми же именами, моделями и ролями, только с чистой историей.</div>
                         <div id="castEditor"></div>
                         <!-- Общие подсказки для поля модели всего состава: у шлюза
                              сотни моделей, и своя копия списка в каждой карточке
@@ -354,13 +354,14 @@ HTML_TEMPLATE = """
                             <button class="btn btn-secondary" onclick="addCast()" style="margin:0;" title="Добавить место в конец сцены: имя, эмодзи и профессия придумаются сами, а модель будет как у соседа. Потом место можно настроить как любое другое">➕ Добавить участника</button>
                             <button class="btn btn-secondary" onclick="randomizeCharacters()" style="margin:0;" title="Заново вытянуть случайный характер каждому ИИ-участнику — и судье тоже (числа, вписанные вручную, будут перезаписаны)">🎲 Разбросать характеры</button>
                             <button class="btn btn-secondary" onclick="resetCast()" style="margin:0;" title="Забыть собранную сцену и взять места из PARTICIPANTS — имена, роли и порядок как в файле настроек">↺ Состав из PARTICIPANTS</button>
+                            <button class="btn btn-secondary" onclick="resetEverything()" style="margin:0;" title="Чистый старт: состав, общие правила, руководства модератора и правила судьи — из settings.py, а сохранённый пульт забывается">🧹 Полный сброс</button>
                             <span id="randomizeHint" style="font-size:12px;color:#666;"></span>
                         </div>
                     </div>
 
                     <div class="panel-section">
                         <div class="panel-heading"><span class="num">03</span><span class="name">Правила и инструкции</span></div>
-                        <div class="panel-note">Общие правила общения, руководства модератора, правила судьи и личные инструкции участников. Работают одинаково до и во время спектакля.</div>
+                        <div class="panel-note">Общие правила общения, руководства модератора, правила судьи и личные инструкции участников. Работают одинаково до и во время спектакля и сохраняются вместе с составом — после перезапуска театра редактор откроется с тем же текстом. Личная инструкция принадлежит месту в составе, а не имени: «Новый спектакль» переименует участников, но инструкции оставит на своих местах.</div>
                         <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Открыть редактор</button>
 
                         <div id="instructionsEditor" style="display:none;">
@@ -877,6 +878,31 @@ HTML_TEMPLATE = """
                 renderCastEditor();
                 updateSidebarParticipants();
                 loadCast();
+            })
+            .catch(err => alert('❌ ' + err.message));
+        }
+
+        // «Полный сброс»: как первый запуск с пустой папкой экземпляра — состав,
+        // общие правила, руководства модератора и правила судьи берутся из
+        // settings.py, а сохранённый пульт забывается (иначе сброс пережил бы
+        // только до перезапуска). Не путать с «Состав из PARTICIPANTS»: та кнопка
+        // берёт из файла только места, а инструкции не трогает.
+        function resetEverything() {
+            if (!confirm('Полный сброс: состав, правила общения, руководства модератора и правила судьи вернутся к значениям из settings.py, а сохранённый пульт будет забыт.\n\nПродолжить?')) return;
+            fetch('/api/settings/reset', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { alert('❌ ' + (data.error || 'не удалось сбросить пульт')); return; }
+                cast = data.participants || [];
+                renderCastEditor();
+                updateSidebarParticipants();
+                loadCast();
+                // Открытый редактор показывает то, что сейчас на сервере: после
+                // сброса в его полях должен быть заводской текст, а не старый
+                const editor = document.getElementById('instructionsEditor');
+                if (editor && editor.style.display !== 'none') loadInstructionsForEdit();
             })
             .catch(err => alert('❌ ' + err.message));
         }

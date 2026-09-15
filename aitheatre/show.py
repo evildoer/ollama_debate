@@ -26,18 +26,32 @@ from . import tooltext
 
 def load_theatre_settings():
     """
-    Возвращает правила судьи и сцену, сохранённые в прошлых запусках: имена
-    участников каждый спектакль новые, а это — режиссёрские настройки.
+    Возвращает режиссёрский пульт, сохранённый в прошлых запусках: состав
+    целиком (имена, аватары, модели, роли, числа и личные инструкции) и правила —
+    общие правила общения, руководства модератора и правила судьи.
+
+    Так перезапуск приложения возвращает режиссёра к прежнему спектаклю, только
+    с чистой историей: настроенное не приходится собирать заново. Файл может быть
+    и от прежней версии — в нём тогда одна сцена без имён: места берутся оттуда,
+    а имена и характеры разыгрываются как раньше.
     """
     try:
         if settings.SETTINGS_FILE.exists():
             data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 return
-            rules = data.get("judge_rules")
-            if isinstance(rules, list) and rules:
-                session.judge_rules = [str(r) for r in rules]
-                print(f"⚖️  Загружены сохранённые правила судьи: {len(session.judge_rules)} пунктов")
+            _load_saved_instructions(data)
+            cast = sanitize_cast(data.get("cast"))
+            if cast:
+                session.runtime_participants = cast
+                # Сцена — производное от состава: она нужна «Новому спектаклю»,
+                # который разыграет имена заново, а роли, числа и личные
+                # инструкции мест возьмёт отсюда
+                session.scene = scene_from_cast(cast)
+                session.sync_cast_media()
+                print(f"🎭 Загружен сохранённый состав: мест {len(cast)} — "
+                      f"{', '.join(p['display_name'] for p in cast)}")
+                return
             scene = sanitize_scene(data.get("scene"))
             if scene:
                 session.scene = scene
@@ -45,15 +59,59 @@ def load_theatre_settings():
     except Exception as e:
         print(f"  ⚠️  Не читается {settings.SETTINGS_FILE.name}: {e}")
 
+
+def _load_saved_instructions(data: dict):
+    """Правила, руководства и общие инструкции из файла — в сессию."""
+    for key, field, title in (
+        ("judge_rules", "judge_rules", "правила судьи"),
+        ("static_instructions", "static_instructions", "правила общения"),
+        ("moderator_guidelines", "moderator_guidelines", "руководства модератора"),
+    ):
+        saved = data.get(key)
+        if not isinstance(saved, list):
+            continue
+        # Пустой список — это «как в settings.py», а не «ничего не сказано»:
+        # иначе стёртые в редакторе правила возвращались бы из дефолтов молча
+        lines = [str(line) for line in saved if str(line).strip()]
+        setattr(session, field, lines)
+        if lines:
+            print(f"📝 Загружены сохранённые {title}: {len(lines)} пунктов")
+
+
 def save_theatre_settings():
-    """Сохраняет правила судьи и сцену рядом с проектом (файл в .gitignore)."""
+    """Сохраняет пульт целиком рядом с проектом (файл в .gitignore).
+
+    Состав сохраняется вместе с именами и личными инструкциями: режиссёр,
+    вернувшись к театру после перезапуска, хочет видеть прежний спектакль.
+    История при этом начинается с нуля — посты и снимки ходов живут в памяти.
+    """
     try:
         settings.SETTINGS_FILE.write_text(
-            json.dumps({"judge_rules": session.judge_rules, "scene": session.scene or []},
-                       ensure_ascii=False, indent=1),
+            json.dumps({
+                "version": 2,
+                "judge_rules": list(session.judge_rules or []),
+                "static_instructions": list(session.static_instructions or []),
+                "moderator_guidelines": list(session.moderator_guidelines or []),
+                # Роль пишем и словом: файл правят руками, и «judge» читается
+                # явно, тогда как два флага рядом с именем — уже загадка
+                "cast": [{**dict(place), "role": cast_role(place)}
+                         for place in session.runtime_participants],
+            }, ensure_ascii=False, indent=1),
             encoding="utf-8")
     except Exception as e:
         print(f"  ⚠️  Не сохраняется {settings.SETTINGS_FILE.name}: {e}")
+
+
+def forget_theatre_settings():
+    """Забыть сохранённый пульт.
+
+    Нужен полному сбросу: если файл оставить, следующий запуск вернул бы то,
+    от чего режиссёр только что отказался.
+    """
+    try:
+        settings.SETTINGS_FILE.unlink(missing_ok=True)
+    except OSError as e:
+        print(f"  ⚠️  Не удаляется {settings.SETTINGS_FILE.name}: {e}")
 
 
 # Заголовок раздела стенограммы — тот же, что пишет start_thinking_log.
@@ -491,6 +549,24 @@ class DebateSession:
         Это выход из положения, если составом наэкспериментировались так, что
         непонятно, откуда что взялось: имена, роли и порядок станут как в файле.
         """
+        self.scene = None
+        self.load_new_cast()
+
+    def reset_to_defaults(self):
+        """«Полный сброс»: весь пульт заново из настроек проекта.
+
+        Состав, общие правила общения, руководства модератора и правила судьи
+        возвращаются к значениям из settings.py — ровно так, как это выглядит
+        при первом запуске с пустой папкой экземпляра. Сохранённый пульт при этом
+        забывается (см. forget_theatre_settings): иначе следующий запуск вернул
+        бы то, от чего режиссёр только что отказался.
+
+        Тема не трогается: она набирается в пульте, а не лежит в настройках,
+        и отменять набранное заодно со сбросом состава — сюрприз.
+        """
+        self.static_instructions = []
+        self.judge_rules = list(settings.DEFAULT_JUDGE_RULES)
+        self.moderator_guidelines = []
         self.scene = None
         self.load_new_cast()
 
@@ -1239,7 +1315,10 @@ def build_cast_entry(template: dict, used: dict) -> dict:
         "avatar_emoji": emoji,
         "avatar_url": None,
         "gender": gender,
-        "instruction": settings.DEFAULT_JUDGE_INSTRUCTION if role == "judge" else "",
+        # Личная инструкция живёт у места: написанную режиссёром переносим,
+        # а судье без неё ставим ту, что написана для роли в settings.py
+        "instruction": str(template.get("instruction", "") or "").strip()
+                        or (settings.DEFAULT_JUDGE_INSTRUCTION if role == "judge" else ""),
     }
     set_cast_role(entry, role)
     apply_role_options(entry, template.get("role_options"))
@@ -1277,11 +1356,14 @@ def build_new_cast(places: list = None) -> list:
 
 def scene_from_cast(cast: list) -> list:
     """
-    Сцена: места состава без имён, аватаров и личных инструкций.
+    Сцена: места состава без имён и аватаров — роли, модели, порядок, числа
+    и личные инструкции.
 
-    Имена каждый спектакль новые, а вот роли, модели, порядок в очереди реплик и
-    числа генерации режиссёр настраивает один раз — они и переживают и «Новый
-    спектакль», и перезапуск приложения.
+    Имена и характеры «Новый спектакль» разыгрывает заново, а вот роли, модели,
+    порядок в очереди реплик, числа и написанные руками инструкции режиссёр
+    настраивает один раз — они и переживают и «Новый спектакль», и перезапуск
+    приложения. Личная инструкция поэтому привязана к месту, а не к имени:
+    она — часть режиссёрской настройки, а не свойство случайного имени.
     """
     scene = []
     for participant in cast or []:
@@ -1296,6 +1378,9 @@ def scene_from_cast(cast: list) -> list:
             place["think"] = participant["think"]
         if participant.get("preset"):
             place["preset"] = str(participant["preset"])[:32]
+        instruction = str(participant.get("instruction", "") or "").strip()
+        if instruction:
+            place["instruction"] = instruction
         scene.append(place)
     return scene
 
@@ -1351,8 +1436,76 @@ def sanitize_scene(raw) -> list:
             place["think"] = item["think"]
         if item.get("preset") in settings.CHARACTER_PRESETS:
             place["preset"] = item["preset"]
+        instruction = item.get("instruction")
+        if isinstance(instruction, str) and instruction.strip():
+            place["instruction"] = instruction
         scene.append(place)
     return scene
+
+
+def sanitize_cast(raw) -> list:
+    """
+    Сохранённый состав из файла: места целиком, как их собрал пульт, — с именами,
+    аватарами, моделями, ролями, числами и личными инструкциями.
+
+    Файл лежит рядом с проектом и правится руками, поэтому состав из него проверяем
+    так же строго, как пришедший из пульта: непонятная роль или строка вместо
+    числа не должны ломать спектакль — место просто теряет это поле. Место без
+    имени не берётся вовсе: имя — это то, чем место зовётся в ленте и в истории.
+    """
+    if not isinstance(raw, list):
+        return []
+    cast = []
+    used = empty_used()
+    used_ids = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("display_name", "") or "").strip()
+        if not name:
+            continue
+        gender = "female" if item.get("gender") == "female" else "male"
+        # Два места с одним именем запутали бы и историю для промптов, и ленту:
+        # файл правится руками, поэтому второму имени достаётся свободное
+        if name in used["names"]:
+            replacement = pick_name(gender, used["names"])
+            print(f"  ⚠️  В сохранённом составе два места звались {name} — "
+                  f"второе названо {replacement}")
+            name = replacement
+        used["names"].add(name)
+
+        cast_id = str(item.get("cast_id", "") or "")
+        if not cast_id or cast_id in used_ids:
+            cast_id = uuid.uuid4().hex[:8]
+        used_ids.add(cast_id)
+
+        avatar_url = item.get("avatar_url")
+        place = {
+            "cast_id": cast_id,
+            "model": str(item.get("model", "") or ""),
+            "display_name": name,
+            "avatar_keywords": str(item.get("avatar_keywords", "") or ""),
+            "avatar_emoji": str(item.get("avatar_emoji", "") or "") or "📣",
+            "avatar_url": avatar_url if isinstance(avatar_url, str) and avatar_url.strip() else None,
+            "gender": gender,
+            "instruction": str(item.get("instruction", "") or ""),
+        }
+        # Роль в файле — одним словом («judge»), но рядом лежат и флаги состава:
+        # файл правят руками, поэтому понимаем и то, и другое, а место с непонятной
+        # ролью остаётся обычным участником
+        role = item.get("role")
+        set_cast_role(place, role if role in CAST_ROLES else cast_role(item))
+        apply_role_options(place, item.get("role_options"))
+        for key in settings.PER_PARTICIPANT_OPTION_KEYS:
+            value = item.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                place[key] = value
+        if item.get("think") in settings.THINK_MODES and item.get("think") != "auto":
+            place["think"] = item["think"]
+        if item.get("preset") in settings.CHARACTER_PRESETS:
+            place["preset"] = item["preset"]
+        cast.append(place)
+    return cast
 
 
 def still_in_cast(participant: dict, cast: list) -> bool:

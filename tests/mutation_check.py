@@ -603,6 +603,46 @@ BUGS = {
          "@app.route('/api/post/<int:post_id>/prompt')",
          "@app.route('/api/post/<int:post_id>/prompt_text')"),
     ],
+    "сохранённые имена участников снова разыгрывают заново": [
+        ("aitheatre/show.py",
+         '            cast = sanitize_cast(data.get("cast"))',
+         "            cast = []"),
+    ],
+    "роль из сохранённого состава снова теряется": [
+        ("aitheatre/show.py",
+         '        set_cast_role(place, role if role in CAST_ROLES else cast_role(item))',
+         '        set_cast_role(place, "participant")'),
+    ],
+    "правила общения и руководства снова не сохраняются": [
+        ("aitheatre/show.py",
+         '                "static_instructions": list(session.static_instructions or []),',
+         '                "static_instructions": [],'),
+    ],
+    "личная инструкция снова остаётся у имени, а не у места": [
+        ("aitheatre/show.py",
+         '        instruction = str(participant.get("instruction", "") or "").strip()\n'
+         '        if instruction:',
+         '        instruction = str(participant.get("instruction", "") or "").strip()\n'
+         '        if False:'),
+    ],
+    "полный сброс снова оставляет сохранённый пульт": [
+        ("aitheatre/show.py",
+         "        settings.SETTINGS_FILE.unlink(missing_ok=True)",
+         "        return"),
+    ],
+    "правка инструкций в редакторе снова не сохраняется": [
+        ("aitheatre/web.py",
+         "    # Редактор — часть режиссёрского пульта, поэтому его правки тоже переживают\n"
+         "    # перезапуск: раньше сохранялись только правила судьи, а правила общения\n"
+         "    # и руководства после перезапуска тихо возвращались к дефолтным\n"
+         "    show.save_theatre_settings()\n",
+         ""),
+    ],
+    "кнопка полного сброса снова ведёт в никуда": [
+        ("aitheatre/page.py",
+         "            fetch('/api/settings/reset', {",
+         "            fetch('/api/settings/clear', {"),
+    ],
 }
 
 

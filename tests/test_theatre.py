@@ -1174,6 +1174,9 @@ class TestSceneEditing(unittest.TestCase):
                       "судья без правил судьи — это уже не судья")
 
     def test_the_scene_stores_places_without_names(self):
+        """Имена «Новый спектакль» разыгрывает заново, а инструкции — у места."""
+        captain = self.session.runtime_participants[0]["display_name"]
+        self.session.runtime_participants[0]["instruction"] = "Держись образа капитана"
         payload = cast_payload(self.session)
         payload.reverse()
         self._apply(payload)
@@ -1183,7 +1186,22 @@ class TestSceneEditing(unittest.TestCase):
                          [show.cast_role(p) for p in self.session.runtime_participants])
         for place in scene:
             self.assertNotIn("display_name", place)
-            self.assertNotIn("instruction", place)
+            self.assertNotIn("avatar_emoji", place)
+        # Инструкция — режиссёрская настройка, а не свойство случайного имени:
+        # место с ней уезжает в сцену и переживает новый состав
+        where = next(i for i, p in enumerate(self.session.runtime_participants)
+                     if p["display_name"] == captain)
+        self.assertEqual(scene[where]["instruction"], "Держись образа капитана")
+
+    def test_a_new_show_keeps_personal_instructions(self):
+        """Инструкция — часть места, а не имени: переименование её не теряет."""
+        self.session.runtime_participants[0]["instruction"] = "Держись образа капитана"
+        self.session.scene = show.scene_from_cast(self.session.runtime_participants)
+
+        self.session.new_show()
+
+        self.assertEqual(self.session.runtime_participants[0]["instruction"],
+                         "Держись образа капитана")
 
     def test_a_model_moderator_is_marked_as_one_in_the_feed(self):
         """Модератором можно назначить и модель — в ленте это должно быть видно."""
@@ -1448,10 +1466,11 @@ class TestSettingsPersistence(unittest.TestCase):
 
 
 class TestScenePersistence(unittest.TestCase):
-    """Сцена переживает перезапуск: лежит в том же файле, что правила судьи.
+    """Пульт целиком переживает перезапуск: состав — вместе с именами, аватарами
+    и личными инструкциями, а правила, руководства и правила судьи — рядом с ним.
 
-    В файле мест не хранятся: только роли, модели, порядок и числа. Имена
-    каждый спектакль новые, а собранную сцену не хочется собирать заново.
+    Режиссёр, вернувшись к театру, хочет увидеть прежний спектакль с чистой
+    историей, а не тот же состав с другими именами.
     """
 
     def setUp(self):
@@ -1468,43 +1487,93 @@ class TestScenePersistence(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def test_saved_scene_comes_back_after_a_restart(self):
+    def test_the_whole_cast_comes_back_after_a_restart(self):
+        """Состав возвращается как был: имена, аватары, порядок и инструкции."""
         payload = cast_payload(self.session)
         payload[0]["role"] = "judge"
         payload[1]["role"] = "participant"
         payload[2]["temperature"] = 0.33
+        payload[2]["avatar_url"] = "/avatars/капитан.jpg"
         payload.reverse()
         self.assertEqual(show.apply_cast_patch(payload), "")
-        saved = copy.deepcopy(self.session.scene)
+        self.session.runtime_participants[0]["instruction"] = "Держись образа капитана"
+        self.session.sync_cast_media()
+        expected = copy.deepcopy(self.session.runtime_participants)
+        before = [p["display_name"] for p in expected]
         show.save_theatre_settings()
 
         # Перезапуск: сессия поднимается с нуля и читает файл
+        self.session.runtime_participants = []
         self.session.scene = None
         show.load_theatre_settings()
-        self.assertEqual(self.session.scene, saved)
 
-    def test_rules_and_scene_live_in_one_file(self):
+        loaded = self.session.runtime_participants
+        self.assertEqual([p["display_name"] for p in loaded], before,
+                         "имена должны вернуться те же — их не разыгрывают заново")
+        keys = ("model", "avatar_emoji", "avatar_keywords", "avatar_url", "gender",
+                "instruction", "is_judge", "is_moderator", "think", "preset")
+        for was, now in zip(expected, loaded):
+            for key in keys:
+                self.assertEqual(now.get(key), was.get(key),
+                                 f"{key} места {was['display_name']} не вернулось")
+            for key in settings.PER_PARTICIPANT_OPTION_KEYS:
+                self.assertEqual(now.get(key), was.get(key),
+                                 f"число {key} места {was['display_name']} не вернулось")
+            self.assertEqual(show.role_options(now), show.role_options(was))
+        # Сцена — производное от состава: из неё «Новый спектакль» берёт места
+        self.assertEqual(self.session.scene, show.scene_from_cast(expected))
+
+    def test_the_whole_console_lives_in_one_file(self):
+        """Один файл — весь пульт: состав, правила общения, руководства и судья."""
         self.session.judge_rules = ["Пункт"]
-        self.session.scene = [{"model": "r1", "role": "judge"}]
+        self.session.static_instructions = ["Общее правило"]
+        self.session.moderator_guidelines = ["Руководство"]
         show.save_theatre_settings()
 
         data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
         self.assertEqual(data["judge_rules"], ["Пункт"])
-        self.assertEqual(data["scene"], [{"model": "r1", "role": "judge"}])
+        self.assertEqual(data["static_instructions"], ["Общее правило"])
+        self.assertEqual(data["moderator_guidelines"], ["Руководство"])
+        self.assertEqual([p["display_name"] for p in data["cast"]],
+                         [p["display_name"] for p in self.session.runtime_participants])
 
-    def test_a_new_cast_is_built_from_the_saved_scene(self):
-        self.session.scene = [{"model": "r1", "role": "participant"},
-                              {"model": "human", "role": "judge"}]
+    def test_the_editor_comes_back_after_a_restart(self):
+        """Раньше переживали перезапуск только правила судьи — теперь всё."""
+        self.session.judge_rules = ["Пункт"]
+        self.session.static_instructions = ["Общее правило"]
+        self.session.moderator_guidelines = ["Руководство"]
         show.save_theatre_settings()
 
+        self.session.judge_rules = []
+        self.session.static_instructions = []
+        self.session.moderator_guidelines = []
+        show.load_theatre_settings()
+
+        self.assertEqual(self.session.judge_rules, ["Пункт"])
+        self.assertEqual(self.session.static_instructions, ["Общее правило"])
+        self.assertEqual(self.session.moderator_guidelines, ["Руководство"])
+
+    def test_a_new_show_takes_places_from_the_saved_console(self):
+        """Сохранённый состав — материал и для «Нового спектакля»: роли, модели
+        и личные инструкции мест переживают и перезапуск, и новые имена."""
+        payload = cast_payload(self.session)
+        payload[0]["role"] = "judge"
+        payload[0]["model"] = "r1"
+        self.assertEqual(show.apply_cast_patch(payload), "")
+        self.session.runtime_participants[0]["instruction"] = "Строго по фактам"
+        roles = [show.cast_role(p) for p in self.session.runtime_participants]
+        models = [p["model"] for p in self.session.runtime_participants]
+        show.save_theatre_settings()
+
+        self.session.runtime_participants = []
         self.session.scene = None
         show.load_theatre_settings()
         self.session.load_new_cast()
 
         cast = self.session.runtime_participants
-        self.assertEqual([show.cast_role(p) for p in cast], ["participant", "judge"])
-        self.assertEqual([p["model"] for p in cast], ["r1", "human"])
-        self.assertTrue(cast[1]["instruction"].strip())
+        self.assertEqual([show.cast_role(p) for p in cast], roles)
+        self.assertEqual([p["model"] for p in cast], models)
+        self.assertEqual(cast[0]["instruction"], "Строго по фактам")
 
     def test_a_broken_scene_in_the_file_does_not_break_the_show(self):
         """Файл лежит рядом с проектом и правится руками — сцена из него не священна."""
@@ -2236,9 +2305,30 @@ class TestScenePanel(unittest.TestCase):
 
     def test_every_scene_action_has_a_control(self):
         for control in ("addCast()", "removeCast(", "moveCast(", "setCastRole(",
-                        "resetCast()"):
+                        "resetCast()", "resetEverything()"):
             with self.subTest(control=control):
                 self.assertIn(control, self.page, f"в пульте нет управления {control}")
+
+    def test_every_endpoint_the_page_calls_exists_on_the_server(self):
+        """Страница и сервер — одна пара: переименованный маршрут иначе не заметить.
+
+        Разметку не исполняет ни один тест — переименованный на сервере маршрут
+        замечается только тогда, когда кнопку нажмёт режиссёр.
+        """
+        called = set(re.findall(r"fetch\(['\"`](/api/[^'\"`]+)", self.page))
+        self.assertTrue(called, "в пульте не нашлось ни одного обращения к серверу")
+        rules = [rule.rule for rule in web_app.app.url_map.iter_rules()
+                 if rule.rule.startswith("/api/")]
+
+        def known(url):
+            # В разметке номер поста и ключевые слова — подстановки, в маршрутах — <...>
+            clean = re.sub(r"\$\{[^}]*\}", "X", url).split("?")[0].rstrip("/")
+            return any(re.fullmatch(re.sub(r"<[^>]+>", "X", rule).rstrip("/"), clean)
+                       for rule in rules)
+
+        missing = sorted(url for url in called if not known(url))
+        self.assertEqual(missing, [],
+                         f"страница зовёт маршруты, которых нет на сервере: {missing}")
 
     def test_the_role_list_matches_the_server(self):
         match = re.search(r"const CAST_ROLES = \[(.*?)\];", self.page, re.DOTALL)
@@ -3574,6 +3664,52 @@ class TestRoutes(unittest.TestCase):
         self.assertTrue(data["success"])
         self.assertIsNone(self.session.scene)
         self.assertEqual(len(data["participants"]), len(settings.PARTICIPANTS))
+
+    def test_the_full_reset_returns_the_console_to_settings(self):
+        """«Полный сброс» — не то же, что «Состав из PARTICIPANTS»: он и инструкции.
+
+        Именно поэтому он отдельной кнопкой: прежняя трогала только места,
+        а правила общения, руководства и правила судьи оставались в редакторе.
+        """
+        self.session.static_instructions = ["Своё правило"]
+        self.session.moderator_guidelines = ["Своё руководство"]
+        self.session.judge_rules = ["Своё правило судьи"]
+        self.client.post("/api/participants",
+                         json={"participants": cast_payload(self.session)[1:]})
+
+        data = self.client.post("/api/settings/reset", json={}).get_json()
+
+        self.assertTrue(data["success"], data.get("error"))
+        self.assertIsNone(self.session.scene)
+        self.assertEqual(len(data["participants"]), len(settings.PARTICIPANTS),
+                         "состав должен вернуться к PARTICIPANTS")
+        shown = self.client.get("/api/moderator/instructions").get_json()
+        self.assertEqual(shown["static_instructions"], settings.DEFAULT_STATIC_INSTRUCTIONS)
+        self.assertEqual(shown["moderator_messages"], [])
+        self.assertEqual(shown["judge_rules"], settings.DEFAULT_JUDGE_RULES)
+
+    def test_the_full_reset_forgets_the_saved_console(self):
+        """Иначе следующий запуск вернул бы то, от чего только что отказались."""
+        show.save_theatre_settings()
+        self.assertTrue(settings.SETTINGS_FILE.exists(), "файл пульта не записался")
+
+        self.client.post("/api/settings/reset", json={})
+
+        self.assertFalse(settings.SETTINGS_FILE.exists())
+
+    def test_editing_instructions_saves_the_console(self):
+        """Редактор — часть пульта: без сохранения его правки жили бы до перезапуска."""
+        self.client.post("/api/moderator/instructions", json={
+            "static_instructions": ["Общее правило"],
+            "moderator_messages": ["Руководство"],
+            "judge_rules": ["Пункт судьи"],
+        })
+
+        data = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(data["static_instructions"], ["Общее правило"])
+        self.assertEqual(data["moderator_guidelines"], ["Руководство"])
+        self.assertEqual(data["judge_rules"], ["Пункт судьи"])
+        self.assertTrue(data["cast"], "состав — часть того же пульта")
 
     def test_participants_post_returns_the_same_view_as_get(self):
         """После «Применить состав» пульт должен получить те же числа, что и при загрузке."""
