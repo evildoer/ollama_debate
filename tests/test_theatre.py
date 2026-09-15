@@ -3374,6 +3374,100 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(cloud.untranslated_options({"min_p": 0.2, "temperature": 0.8}), ["min_p"])
 
 
+class TestATurnThatStayedSilent(unittest.TestCase):
+    """Молчание хода должно объяснять себя само.
+
+    Так выглядел ход gpt-5-nano из настоящей ленты: три поиска выполнены, а пост
+    вышел «[Модель не дала ответ]» — и по нему нельзя было понять ни что модель
+    делала (она ещё раз просила поиск? ушла в размышления?), ни что крутить
+    в настройках. Хуже того, последняя попытка была точной копией неудавшейся:
+    инструмент уезжал снова, а «think=False» — поле Ollama, которое облачный путь
+    не читает вовсе. Модель, застрявшая на просьбах поискать, получала тот же
+    самый вопрос.
+    """
+
+    KEY = "test-key-1234567890"
+    MODEL = "cloud:openai/gpt-5-nano"
+
+    def setUp(self):
+        self.gateway = FakeGateway()
+        self.addCleanup(self.gateway.stop)
+        self.saved = (settings.CLOUD_BASE_URL, settings.CLOUD_API_KEY)
+        self.addCleanup(self._restore)
+        settings.CLOUD_BASE_URL = self.gateway.base_url
+        settings.CLOUD_API_KEY = self.KEY
+        self.addCleanup(cloud._MODELS_WITHOUT_TOOLS.clear)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        # Ответ, съеденный размышлениями: текста нет, а вывод посчитан
+        self.gateway.texts = [json.dumps({
+            "choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 5084, "completion_tokens": 1196,
+                      "completion_tokens_details": {"reasoning_tokens": 1160}}})] * 2
+
+    def _restore(self):
+        settings.CLOUD_BASE_URL, settings.CLOUD_API_KEY = self.saved
+
+    def test_the_silence_is_explained_in_words(self):
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")):
+            content, _count, _queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Что нового?"}],
+                participant_name="Роман")
+
+        self.assertTrue(content.startswith("[Модель не дала ответ]"),
+                        "молчание остаётся молчанием, а не превращается в реплику")
+        self.assertIn("предел вывода", content,
+                      "надо назвать причину: размышления съели весь вывод")
+        self.assertIn("1160", content, "и сколько именно ушло в размышления")
+        self.assertFalse(ollama_api.is_answer(content),
+                         "объяснение причины не делает молчание репликой")
+
+    def test_the_last_try_differs_from_the_failed_one(self):
+        """Последняя попытка не поводит модель по тому же кругу третий раз.
+
+        Раньше она шла с тем же инструментом, что и неудавшаяся, а думающая
+        облачная модель просьбу поискать понимает только через него: вместо слов
+        приходил четвёртый вызов поиска, и ход кончался молчанием.
+        """
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")):
+            ollama_api.ask_model(self.MODEL, [{"role": "user", "content": "Что нового?"}],
+                                 participant_name="Роман")
+
+        self.assertEqual(len(self.gateway.requests), 2,
+                         "попыток должно быть две: ход и последняя")
+        self.assertNotIn("tools", self.gateway.requests[1]["body"],
+                         "без инструмента модель обязана сказать словами")
+        last_words = self.gateway.requests[1]["body"]["messages"][-1]["content"]
+        self.assertIn("Поиска больше не будет", last_words,
+                      "модель должна узнать, что искать больше нечего: иначе повторит")
+
+    def test_a_model_stuck_on_search_still_gets_to_speak(self):
+        """Четыре поиска подряд, лимит — три: ход заканчивается репликой, а не молчанием.
+
+        Раньше четвёртая просьба тихо превращалась в «[лимит поисков исчерпан]»,
+        и об этом в логе не было ни слова — со стороны это выглядело как модель,
+        которая думает и ничего не говорит.
+        """
+        def search_call(query):
+            return json.dumps({"choices": [{"message": {"content": "", "tool_calls": [
+                {"id": f"call-{query}", "type": "function",
+                 "function": {"name": "search_web",
+                              "arguments": json.dumps({"query": query})}}]}}]})
+
+        self.gateway.texts = [search_call("раз"), search_call("два"), search_call("три"),
+                              search_call("четыре"),
+                              json.dumps({"choices": [{"message": {
+                                  "content": "Сыктывкар — столица Коми."}}]})]
+
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")):
+            content, count, queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Что нового?"}],
+                participant_name="Роман")
+
+        self.assertEqual(content, "Сыктывкар — столица Коми.")
+        self.assertEqual(count, 3, "больше трёх поисков за ход не бывает")
+        self.assertEqual(queries, ["раз", "два", "три"], "четвёртый поиск не выполнялся")
+
+
 class TestCloudPanel(unittest.TestCase):
     """Пульт должен честно показывать, что модель играет в интернете."""
 

@@ -886,6 +886,9 @@ def _message_answer(result: dict) -> dict:
                           if isinstance(part, dict))
     return {"content": content, "tool_calls": message.get("tool_calls") or [],
             "thinking": thinking_text(message),
+            # Чем кончился ответ у вендора: stop, length, tool_calls. Нужен, чтобы
+            # объяснить молчание модели словами (см. ollama_api.silence_reason)
+            "finish_reason": str(choices[0].get("finish_reason") or ""),
             "usage": (result or {}).get("usage") or {}}
 
 
@@ -957,6 +960,7 @@ def _read_stream(response, on_delta, on_thought=None, deadline: float = None) ->
     thoughts = []
     calls = {}
     usage = {}
+    finish = ""     # чем ответ кончился у вендора (stop, length, tool_calls)
     cut = False     # ход оборван по времени, а не кончился сам
     wants_thinking = on_thought is not None and show_thinking()
     whole = ""      # всё, что не похоже на поток: разберём целиком в конце
@@ -982,6 +986,8 @@ def _read_stream(response, on_delta, on_thought=None, deadline: float = None) ->
             continue                # нечитаемый кусок: остальное важнее
         usage = chunk.get("usage") or usage
         for choice in (chunk.get("choices") or []):
+            if choice.get("finish_reason"):
+                finish = str(choice["finish_reason"])
             delta = choice.get("delta") or choice.get("message") or {}
             if wants_thinking:
                 thought = thinking_text(delta)
@@ -1001,11 +1007,38 @@ def _read_stream(response, on_delta, on_thought=None, deadline: float = None) ->
             return {"error": f"шлюз ответил не данными, а текстом: {whole[:200]}"}
 
     return {"content": "".join(parts), "tool_calls": _glued_calls(calls),
-            "thinking": "".join(thoughts), "usage": usage, "cut": cut}
+            "thinking": "".join(thoughts), "usage": usage, "cut": cut,
+            "finish_reason": finish}
+
+
+def _turn_notes(answer: dict) -> dict:
+    """Что ход рассказал о себе: почему кончился и сколько ушло в размышления.
+
+    Нужно для одного случая — молчания. Модель тратит вывод, а текста не даёт,
+    и по логу этого не видно: «пустой ответ» бывает и от размышлений, занявших
+    весь предел, и от очередной просьбы поискать, и оттого, что шлюз посчитал
+    токены, но текста не прислал. finish_reason и счётчик размышлений различают
+    эти случаи словами, а не догадкой (см. ollama_api.silence_reason).
+    """
+    answer = answer or {}
+    usage = answer.get("usage") or {}
+    details = usage.get("completion_tokens_details") or {}
+    notes = {"finish_reason": str(answer.get("finish_reason") or "")}
+    for name, value in (
+            ("prompt_tokens", usage.get("prompt_tokens")),
+            ("completion_tokens", usage.get("completion_tokens")),
+            # Размышления считаются в вывод и оплачиваются как вывод, но в
+            # реплику не попадают: у OpenAI-формы они лежат отдельным счётчиком
+            ("reasoning_tokens", details.get("reasoning_tokens"))):
+        try:
+            notes[name] = int(value)
+        except (TypeError, ValueError):
+            pass
+    return notes
 
 
 def chat(model: str, messages: list, options: dict = None, tool_choice: str = None,
-         on_delta=None, on_thought=None) -> tuple:
+         on_delta=None, on_thought=None, use_tools=None, report: dict = None) -> tuple:
     """Один ход облачной модели. Возвращает (текст, вызовы инструментов).
 
     Форма ответа — та же, что у Ollama-пути, поэтому весь остальной код
@@ -1016,6 +1049,15 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     очередная порция текста, а on_thought — порция размышлений (шлюз отдаёт их
     отдельным полем, см. thinking_text). Без них (или когда CLOUD_STREAM выключен)
     ответ приходит целиком, как раньше.
+
+    use_tools=False — на этот запрос инструмент не отправлять вовсе. Нужен
+    последней попытке хода: модель, застрявшая на просьбах поискать, дописывает
+    их и с инструментом, а без него обязана сказать словами; и ещё ею не
+    помечается «не принимает инструмент» — модель его не отвергала.
+
+    report — пустой словарь, который наполнится рассказом о ходе (чем ответ
+    кончился, сколько токенов ушло в размышления): по нему ход объясняет своё
+    молчание словами (см. _turn_notes).
     """
     # Срок на весь ход считаем до запроса: он про ход целиком, вместе с ожиданием
     # шлюза, а не про один кусочек. Ноль значит «без предела»
@@ -1050,7 +1092,7 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     if cap > 0 and cap_field not in dropped_params(model):
         payload[cap_field] = cap
 
-    uses_tools = send_tools() and model_takes_tools(model)
+    uses_tools = use_tools is not False and send_tools() and model_takes_tools(model)
     if uses_tools:
         payload["tools"] = _tool_schema()
         if tool_choice:
@@ -1106,10 +1148,18 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         if not (answer.get("content") or "").strip() and not answer.get("tool_calls"):
             return f"[ОШИБКА: {note}]", []
 
+    notes = _turn_notes(answer)
+    if report is not None:
+        report.update(notes)
     usage = answer.get("usage") or {}
     if usage:
+        # Размышления отдельной скобкой: они считаются выводом и оплачиваются,
+        # но в реплику не попадают — без этой скобки казалось бы, что модель
+        # наговорила тысячу токенов, а показала пустоту
+        thoughts = notes.get("reasoning_tokens")
+        note = f" (из них размышлений {thoughts})" if thoughts else ""
         print(f"  ☁️  {bare_model_name(model)}: токенов {usage.get('prompt_tokens', '?')} "
-              f"+ {usage.get('completion_tokens', '?')}")
+              f"+ {usage.get('completion_tokens', '?')}{note}")
 
     return answer.get("content") or "", answer.get("tool_calls") or []
 

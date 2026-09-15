@@ -780,7 +780,7 @@ def _merge_options(participant: dict) -> dict:
     return opts
 
 
-def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None, think=None, on_delta=None, on_thought=None) -> tuple:
+def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None, think=None, on_delta=None, on_thought=None, tools=None, report: dict = None) -> tuple:
     """
     Отправляет запрос к модели. Автоматически определяет поддержку tools.
     
@@ -789,6 +789,10 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
                      или None (не использовать)
         think: True/False - явно включить/выключить размышления (см. resolve_think),
                None - не трогать режим модели
+        tools: False - на этот запрос инструмент не отправлять (см. последнюю
+               попытку хода в ask_model); None - как решат настройки модели
+        report: пустой словарь, который облачный путь наполнит рассказом о ходе
+               (чем ответ кончился, сколько ушло в размышления)
     """
     # Облачная модель играет не в Ollama: ход уходит на шлюз, в формате OpenAI.
     # Возвращаемая форма та же (текст, вызовы инструментов), поэтому весь цикл
@@ -804,7 +808,8 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         # on_delta и on_thought живут только здесь: к Ollama они не относятся
         # (см. ask_model)
         return cloud.chat(model, messages, options=options, tool_choice=tool_choice,
-                          on_delta=on_delta, on_thought=on_thought)
+                          on_delta=on_delta, on_thought=on_thought, use_tools=tools,
+                          report=report)
 
     # Проверяем кэш поддержки tools
     if model not in MODELS_TOOLS_SUPPORT:
@@ -832,7 +837,7 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
             data["think"] = False
         
         # Добавляем tools только если модель их поддерживает
-        if settings.ENABLE_SEARCH and supports_tools and MODELS_TOOLS_SUPPORT.get(model, False):
+        if tools is not False and settings.ENABLE_SEARCH and supports_tools and MODELS_TOOLS_SUPPORT.get(model, False):
             data["tools"] = [{
                 "type": "function",
                 "function": {
@@ -897,6 +902,38 @@ def search_web(query: str, max_results: int = 5) -> str:
     
     return output.strip()
 
+def silence_reason(report: dict = None, asked_for_search: bool = False) -> str:
+    """Почему ход кончился молчанием — словами, для лога и для ленты.
+
+    «Модель не дала ответ» ничего не говорит ни зрителю, ни судье, ни тому, кто
+    разбирается, что крутить в настройках: у молчания три разных причины, и они
+    лечатся по-разному. Предел вывода (finish_reason=length), съеденный
+    размышлениями, лечится большим пределом или меньшей задумчивостью; модель,
+    которая на каждом запросе просит ещё поиск, не успокоится, пока поиск не
+    закончится; а бывает и так, что вендор посчитал токены и не прислал текста
+    вовсе — это уже его дело, и здесь его не выдумать.
+
+    Живёт здесь, а не в cloud.py: облачный путь только собирает числа
+    (см. cloud._turn_notes), а говорить о них словами — дело хода.
+    """
+    report = report or {}
+    finish = str(report.get("finish_reason") or "")
+    thoughts = int(report.get("reasoning_tokens") or 0)
+    written = int(report.get("completion_tokens") or 0)
+
+    if finish == "length" and thoughts:
+        return f"весь предел вывода ушёл в размышления ({thoughts} токенов)"
+    if finish == "length":
+        return "ответ оборван по пределу вывода"
+    if asked_for_search:
+        return "вместо ответа модель просила ещё поиск"
+    if thoughts:
+        return f"модель только размышляла ({thoughts} токенов) и вслух ничего не сказала"
+    if written:
+        return f"шлюз насчитал {written} токенов вывода, но текста не прислал"
+    return "шлюз не прислал текста"
+
+
 def ask_model(model: str, messages: list, participant_name: str, options: dict = None,
               think=None, show_session=None, on_delta=None, on_thought=None) -> tuple:
     """
@@ -921,6 +958,8 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
     forced_attempts = 0     # Счётчик попыток принудительного поиска
     max_forced_attempts = 2 # Максимум попыток принудительного поиска
     content = ""
+    report = {}             # чем кончились запросы: finish_reason, токены вывод
+    refused_search = False  # модель просила ещё поиск, а мы уже отказали
     
     # Вычисляем нормализованное имя один раз
     participant_name_normalized = participant_name.lower().replace(" ", "_")
@@ -942,7 +981,7 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         
         content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice,
                                                    options=options, think=think, on_delta=on_delta,
-                                                   on_thought=on_thought)
+                                                   on_thought=on_thought, report=report)
         tool_calls = tool_calls or []
 
         # Модель может попросить поиск не протоколом, а словами: напечатать
@@ -1057,6 +1096,13 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                     show_session.search_query = None
                 has_search = True
             else:
+                if func_name == "search_web":
+                    # Молчать об этом нельзя: со стороны это выглядит как модель,
+                    # которая «думает» и ничего не говорит, — а на самом деле она
+                    # в четвёртый раз просит поиск, и ей тихо отказали
+                    refused_search = True
+                    print(f"  🔍 {participant_name}: просит ещё поиск, но лимит "
+                          f"({max_searches}) исчерпан — досказать придётся словами")
                 messages.append({
                     "role": "tool",
                     "tool_name": func_name,
@@ -1067,27 +1113,35 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         if not has_search:
             break
     
+    reason = silence_reason(report, asked_for_search=refused_search)
+
     if (not content or not content.strip()) and not (
             show_session is not None and show_session.moderator_finished):
-        # Пустой content у «думающих» моделей - это почти всегда размышления,
-        # съевшие весь num_predict (done_reason: "length"). Просить финальный
-        # ответ снова С размышлениями бесполезно: они опять займут бюджет.
-        # Поэтому второй запрос идёт с think=False - тогда ответ приходит сразу.
-        print(f"  ⚠️  {participant_name}: пустой ответ (размышления заняли весь бюджет) - "
-              f"прошу финальный ответ без размышлений")
+        # Молчание хода объясняем словами: «пустой ответ» без причины не говорит
+        # ничего ни зрителю, ни тому, кто потом разбирается в настройках
+        # (см. silence_reason)
+        print(f"  ⚠️  {participant_name}: пустой ответ — {reason}. "
+              f"Прошу финальный ответ ещё раз, теперь без поиска")
         messages.append({
             "role": "user",
-            "content": "Дай свой финальный ответ на русском языке.",
+            # Модель, застрявшая на просьбах поискать, должна узнать, что искать
+            # больше нечего: иначе последняя попытка только повторит первую
+            "content": "Поиска больше не будет. Скажи свой финальный ответ "
+                       "обычным текстом, на русском языке.",
             "name": "system"
         })
         
         try:
             # Через общий вход, а не своим запросом: так облачная модель тоже
             # получит последний шанс ответить (у неё размышлений в формате Ollama нет,
-            # но пустой ответ бывает и по своим причинам)
+            # но пустой ответ бывает и по своим причинам).
+            # Инструмент этой попытке не отправляется: у местной модели он был бы
+            # ещё одним кругом, а у облачной — поводом попросить поиск в четвёртый
+            # раз, как это и случилось у gpt-5-nano (см. tools в ask_model_with_tools)
             content, _tool_calls = ask_model_with_tools(model, messages, tool_choice=None,
-                                                        options=options, think=False,
-                                                        on_delta=on_delta, on_thought=on_thought)
+                                                        options=options, think=False, tools=False,
+                                                        on_delta=on_delta, on_thought=on_thought,
+                                                        report=report)
             # И тут просьба о поиске может прийти словами: репликой её считать
             # нельзя, а выполнять уже нечего — ход кончается (см. tooltext)
             content = tooltext.take_calls(content)[0]
@@ -1096,7 +1150,9 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         except Exception as e:
             print(f"  ⚠️  Ошибка финального запроса: {e}")
     
-    return content or "[Модель не дала ответ]", search_count, search_queries
+    # Молчание без объяснения — потерянная улика: в ленте и в стенограмме должно
+    # остаться, ПОЧЕМУ модель не сказала ни слова
+    return content or f"[Модель не дала ответ] — {reason}", search_count, search_queries
 
 def unload_model(model: str):
     try:

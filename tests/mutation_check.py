@@ -13,6 +13,11 @@
 Запуск из папки проекта:
 
     venv/Scripts/python.exe tests/mutation_check.py
+
+А если правка затронула только одно место, незачем ждать весь набор: слова
+в аргументах — это часть имени бага, и подбрасываются только совпавшие
+
+    venv/Scripts/python.exe tests/mutation_check.py молчание
 """
 
 import contextlib
@@ -673,6 +678,28 @@ BUGS = {
          "будет забыт.\\\\n\\\\nТема останется",
          "будет забыт.\\n\\nТема останется"),
     ],
+    # Тот самый ход из жизни (gpt-5-nano, «[Модель не дала ответ]» при трёх
+    # выполненных поисках). Молчание объяснялось ничем, а последняя попытка
+    # была копией неудавшейся: инструмент уезжал снова, и думающая модель
+    # просила четвёртый поиск вместо того, чтобы сказать словами.
+    "последняя попытка снова повторяет неудавшуюся вместе с инструментом": [
+        ("aitheatre/ollama_api.py",
+         "options=options, think=False, tools=False,",
+         "options=options, think=False,"),
+    ],
+    "молчание хода снова объясняется ничем": [
+        ("aitheatre/ollama_api.py",
+         "return content or f\"[Модель не дала ответ] — {reason}\", search_count, search_queries",
+         "return content or \"[Модель не дала ответ]\", search_count, search_queries"),
+    ],
+    "чем ответ кончился и сколько ушло в размышления — снова ниоткуда не видно": [
+        ("aitheatre/cloud.py",
+         "\"finish_reason\": str(choices[0].get(\"finish_reason\") or \"\"),",
+         "\"finish_reason\": \"\","),
+        ("aitheatre/cloud.py",
+         "(\"reasoning_tokens\", details.get(\"reasoning_tokens\"))):",
+         "(\"reasoning_tokens\", None)):"),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,
@@ -733,7 +760,25 @@ def run_suite(project_dir: Path):
     return total, caught
 
 
-def main():
+def selected(wanted):
+    """Баги, которых коснулась правка: без аргументов — все, с ним — по слову в имени.
+
+    Весь набор идёт минуты: на каждый баг — своя копия проекта и целый прогон.
+    После правки в одном месте нужно не это, а «ловят ли новые проверки именно
+    то, что я сломал», и ждать ради двух багов четверть часа незачем.
+    """
+    if not wanted:
+        return BUGS
+    words = [word.lower() for word in wanted]
+    picked = {title: patches for title, patches in BUGS.items()
+              if any(word in title.lower() for word in words)}
+    for word in words:
+        if not any(word in title.lower() for title in picked):
+            print(f"⚠️  По слову «{word}» багов не нашлось")
+    return picked
+
+
+def main(wanted=()):
     ok = True
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -754,7 +799,7 @@ def main():
         original = {relative: (PROJECT_ROOT / relative).read_text(encoding="utf-8")
                     for patches in BUGS.values() for relative, _, _ in patches}
 
-        for title, patches in BUGS.items():
+        for title, patches in selected(wanted).items():
             files = sorted({relative for relative, _, _ in patches})
             changed, broken = {}, False
             for relative, old, new in patches:
@@ -785,4 +830,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
