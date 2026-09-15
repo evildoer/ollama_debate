@@ -68,15 +68,29 @@ def app_module_of(name):
 
 
 def setUpModule():
-    """Набор не должен зависеть от вашего .env.
+    """Набор не должен зависеть от вашего .env и не пишет в проект.
 
     Настройки облака приложение поднимает из .env при импорте, поэтому прогон
     на машине, где включены облачные переключатели, вёл бы себя иначе, чем
     на чистой. Убираем их из окружения — каждая проверка сама решает, что ей
     нужно, а не наследует чужие настройки.
+
+    И второе: стенограмма размышлений пишется на каждом ходу, а прогон не должен
+    оставлять следы в проекте — уводим файл в временную папку на время набора.
     """
     for name in cloud.CLOUD_ENV_NAMES + (settings.CLOUD_KEY_ENV, "CLOUD_KEY_ENV"):
         os.environ.pop(name, None)
+
+    global SCRATCH_DIR, SAVED_THINKING_FILE
+    SCRATCH_DIR = tempfile.TemporaryDirectory()
+    SAVED_THINKING_FILE = settings.THINKING_FILE
+    settings.THINKING_FILE = Path(SCRATCH_DIR.name) / ".theatre_thinking.md"
+
+
+def tearDownModule():
+    """После прогона возвращаем настройки как были и убираем временную папку."""
+    settings.THINKING_FILE = SAVED_THINKING_FILE
+    SCRATCH_DIR.cleanup()
 
 
 def referenced_globals(source, filename):
@@ -677,6 +691,42 @@ class TestStreamingReply(unittest.TestCase):
         self.assertNotIn("Думаю", self.session.posts[0]["content"],
                          "в реплику мыслм не попадают")
         self.assertNotIn("Думаю", self.session.conversation_history[0]["content"])
+        # А вот в самом посте они остаются — свёрнутым блоком: лента живёт, пока
+        # идёт ход, и без этого мысли исчезали бы вместе с черновиком
+        self.assertEqual(self.session.posts[0]["thinking"],
+                         "Думаю о теме... и вот что решил.")
+
+    def test_the_thoughts_are_written_into_the_transcript(self):
+        """Мысли ложатся в стенограмму: после занавеса ленты уже не будет.
+
+        Токены на размышления тратятся настоящие, и единственный их след —
+        этот файл (обычный markdown рядом с проектом, в .gitignore).
+        """
+        folder = Path(tempfile.mkdtemp())
+        transcript = folder / ".theatre_thinking.md"
+
+        def answer(model, messages, participant_name, **kwargs):
+            kwargs["on_thought"]("Сначала взвешу доводы.", True)
+            kwargs["on_delta"]("Вот ответ.", True)
+            return "Вот ответ.", 0, []
+
+        with mock.patch.object(settings, "THINKING_FILE", transcript):
+            show.start_thinking_log("Проверочная тема")
+            with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+                self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+            written = transcript.read_text(encoding="utf-8")
+
+        self.assertIn("Проверочная тема", written, "в стенограмме должна быть тема")
+        self.assertIn("Сначала взвешу доводы.", written)
+        self.assertIn(self._participant()["display_name"], written)
+        self.assertNotIn("Вот ответ.", written, "в стенограмме только мысли, не реплики")
+
+    def test_a_turn_without_thoughts_leaves_the_transcript_alone(self):
+        """Местные модели не размышляют — файла без мыслей быть не должно."""
+        transcript = Path(tempfile.mkdtemp()) / ".theatre_thinking.md"
+        with mock.patch.object(settings, "THINKING_FILE", transcript):
+            self.session.handle_ai_turn(self._participant(), 1, on_draft=self.drafts.append)
+        self.assertFalse(transcript.exists(), "пустые заголовки в стенограмме не нужны")
 
     def test_only_the_tail_of_the_thoughts_is_shown(self):
         """Тысяча знаков размышлений в ленте не нужна — только хвост."""
@@ -691,6 +741,10 @@ class TestStreamingReply(unittest.TestCase):
         brief = show._StreamingReply(self._participant(), 1, lambda draft: None)
         brief.think("короткая мысль", True)
         self.assertEqual(brief.thought_tail(), "короткая мысль")
+
+        # А для поста храним не хвост, а всё: после спектакля обрезать нечего
+        self.assertTrue(reply.thinking_full().startswith("начало"))
+        self.assertIn("самый конец мысли", reply.thinking_full())
 
     def test_pieces_do_not_flood_the_feed(self):
         """Часть шлюзов печатает по букве: на таком потоке лента бы захлебнулась."""
@@ -1456,6 +1510,17 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("element.className = `post post-role-${draft.role || 'participant'} streaming`",
                       self.page)
 
+    def test_the_thoughts_stay_in_the_finished_reply(self):
+        """Готовый пост хранит мысли свёрнутым блоком: читать можно и после занавеса."""
+        self.assertIn("function postThinkingHtml(post)", self.page)
+        self.assertIn("${postThinkingHtml(post)}", self.page)
+        # Свёрнут по умолчанию: лента про сказанное вслух, а мысли открывают сами.
+        # У черновика, наоборот, открыт — там он показывает, что модель ещё думает
+        self.assertIn('<details class="post-thinking"><summary>💭 размышления', self.page)
+        self.assertIn('<details class="post-thinking" open>', self.page)
+        self.assertIn("escapeHtml(thoughts)", self.page,
+                      "мысли показываем текстом, а не разметкой")
+
     def test_the_thoughts_have_their_own_dim_block(self):
         """Мысли — не реплика: у них свой бледный блок над ответом."""
         self.assertIn(".post-thinking { margin: 0 0 18px 0;", self.page)
@@ -1822,6 +1887,64 @@ class TestCloudGateway(unittest.TestCase):
         self.assertNotIn("min_p", sent, "в схеме OpenAI такого поля нет")
         self.assertEqual(sent["tools"][0]["function"]["name"], "search_web")
         self.assertEqual(sent["messages"][0]["name"], "иван")
+
+    def test_the_numbers_of_a_character_are_brought_into_the_vendor_range(self):
+        """Характеры придуманы для Ollama, а у вендора свой диапазон.
+
+        «Мусор на трёх языках сразу» — не характер модели, а температура за её
+        краем: у GLM рабочая температура до 0.99, а в наборе «Хаос» — 2.0.
+        Поэтому число отдаём границей, а не как есть.
+        """
+        self.addCleanup(cloud._LIMIT_WARNED.clear)
+
+        sent = cloud.translate_options({"temperature": 2.0, "top_p": 1.0,
+                                        "presence_penalty": 1.5}, self.MODEL)
+        self.assertEqual(sent["temperature"], 1.0, "за краем диапазона — граница, а не 2.0")
+        self.assertEqual(sent["presence_penalty"], 1.0)
+        self.assertEqual(sent["top_p"], 1.0, "в пределах диапазона число не трогаем")
+
+        os.environ["CLOUD_LIMIT_PARAMS"] = "0"
+        self.addCleanup(os.environ.pop, "CLOUD_LIMIT_PARAMS", None)
+        self.assertEqual(cloud.translate_options({"temperature": 2.0}, self.MODEL)["temperature"],
+                         2.0, "выключатель на месте: без него числа уезжают как есть")
+
+    def test_a_turn_that_never_ends_is_cut_by_the_clock(self):
+        """Зациклившуюся модель останавливает срок на ход целиком.
+
+        Кусочки от неё приходят исправно, поэтому CLOUD_TIMEOUT её не ловит:
+        модель молотит случайные токены полчаса, а спектакль всё стоит.
+        """
+        self.gateway.stream_text = self._sse(self._piece("мусор"))
+        with mock.patch.object(cloud, "turn_limit", mock.Mock(return_value=0.000001)):
+            content, tools = cloud.chat(self.MODEL, [{"role": "user", "content": "?"}],
+                                        on_delta=lambda piece, replace: None)
+
+        self.assertIn("CLOUD_TURN_LIMIT", content, "об обрыве надо сказать вслух")
+        self.assertEqual(tools, [])
+
+    def test_a_cut_turn_keeps_what_was_said(self):
+        """Оборванный по сроку ход отдаёт сказанное: половина реплики лучше ничего."""
+        class SlowStream:
+            """Поток, который приходит по кусочку, а не весь сразу."""
+
+            def __iter__(self):
+                yield self._line("Ска")
+                time.sleep(0.5)      # шлюз «думает» дольше отведённого срока
+                yield self._line("зал.")
+
+            @staticmethod
+            def _line(text):
+                piece = {"choices": [{"delta": {"content": text}}]}
+                return f"data: {json.dumps(piece, ensure_ascii=False)}".encode("utf-8")
+
+        pieces = []
+        answer = cloud._read_stream(SlowStream(),
+                                    lambda piece, replace: pieces.append(piece),
+                                    None, time.monotonic() + 0.05)
+
+        self.assertTrue(answer["cut"], "ход обязан оборваться по сроку")
+        self.assertEqual(answer["content"], "Ска", "сказанное не теряется")
+        self.assertEqual(pieces, ["Ска"], "лента уже показала первый кусок")
 
     @staticmethod
     def _sse(*chunks) -> str:

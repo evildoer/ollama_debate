@@ -52,10 +52,44 @@ def save_theatre_settings():
     except Exception as e:
         print(f"  ⚠️  Не сохраняется {settings.SETTINGS_FILE.name}: {e}")
 
+
+def start_thinking_log(topic: str):
+    """Начинает раздел размышлений этого спектакля в стенограмме.
+
+    В ленте мысли видны только пока идёт ход, и после занавеса они бы пропали.
+    Стенограмма (обычный markdown-файл рядом с проектом) остаётся: её можно
+    прочитать позже — там видно, о чём модель думала на каждом своём ходу.
+    """
+    try:
+        with open(settings.THINKING_FILE, "a", encoding="utf-8") as handle:
+            handle.write(f"\n\n# {time.strftime('%d.%m.%Y %H:%M')} — "
+                         f"{(topic or '').strip() or 'без темы'}\n")
+    except Exception as e:
+        print(f"  ⚠️  Не открывается {settings.THINKING_FILE.name}: {e}")
+
+
+def save_thinking_entry(post: dict):
+    """Складывает размышления хода в стенограмму — по одной записи на реплику.
+
+    Пустые размышления не пишутся: у местных моделей их не бывает вовсе,
+    и файл не должен пухнуть заголовками без единой мысли.
+    """
+    thoughts = (post.get("thinking") or "").strip()
+    if not thoughts:
+        return
+    title = (f"\n### {post.get('timestamp', '')} · {post.get('display_name', '')} "
+             f"({post.get('model_used', '')}) · Акт {post.get('round', '?')}\n\n")
+    try:
+        with open(settings.THINKING_FILE, "a", encoding="utf-8") as handle:
+            handle.write(title + thoughts + "\n")
+    except Exception as e:
+        print(f"  ⚠️  Не сохраняются размышления в {settings.THINKING_FILE.name}: {e}")
+
 def create_post(display_name: str, model_used: str, content: str, round_num: int, 
                 avatar_url: str = None, avatar_emoji: str = None,
                 search_count: int = 0, search_queries: list = None,
-                role: str = "participant", gender: str = "male") -> dict:
+                role: str = "participant", gender: str = "male",
+                thinking: str = "") -> dict:
     """Единая функция создания поста для любого участника (human или AI)"""
     if search_queries is None:
         search_queries = []
@@ -81,6 +115,10 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "avatar_emoji": avatar_emoji or role_icons.get(role, "📣"),
         "content": content,
         "content_html": text.markdown_to_html(content),
+        # Размышления модели — не реплика, но и не мусор: их тратят наши токены.
+        # В ленте они живут свёрнутым блоком, так что прочитать их можно и после
+        # спектакля, а не только пока модель говорит (см. _StreamingReply)
+        "thinking": thinking or "",
         "round": round_num,
         "timestamp": time.strftime("%H:%M"),
         "search_count": search_count,
@@ -113,8 +151,8 @@ class _StreamingReply:
     """
 
     INTERVAL = 0.12          # как часто отправлять набранное, в секундах
-    THOUGHT_LIMIT = 4000     # сколько знаков размышлений держим в памяти
-    THOUGHT_SHOWN = 600      # сколько из них видно в ленте
+    THOUGHT_LIMIT = 20000    # сколько знаков размышлений держим в памяти
+    THOUGHT_SHOWN = 600      # сколько из них видно в ленте, пока модель говорит
 
     def __init__(self, participant: dict, round_num: int, publisher):
         self.publisher = publisher
@@ -179,6 +217,15 @@ class _StreamingReply:
         cut = text[-self.THOUGHT_SHOWN:]
         space = cut.find(" ")
         return "…" + (cut[space + 1:] if space > 0 else cut)
+
+    def thinking_full(self) -> str:
+        """Мысли целиком — то, что останется в посте и в стенограмме.
+
+        В ленте растёт только хвост (см. thought_tail): пока модель говорит,
+        читать тысячи знаков незачем. А после спектакля они — единственный след
+        её рассуждений, поэтому для поста берём их все, что уместились.
+        """
+        return self.thoughts.strip()
 
     def send(self, now: float = None):
         self.started = True
@@ -336,14 +383,15 @@ class DebateSession:
 
     def add_post(self, display_name, model_used, content, round_num,
                  search_count=0, search_queries=None,
-                 is_moderator=False, is_judge=False, gender="male"):
+                 is_moderator=False, is_judge=False, gender="male", thinking=""):
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
 
         role = role_of(is_moderator, is_judge)
 
         post = create_post(display_name, model_used, content, round_num,
-                          avatar_url, avatar_emoji, search_count, search_queries, role, gender)
+                          avatar_url, avatar_emoji, search_count, search_queries, role,
+                          gender, thinking)
         self.posts.append(post)
 
         if content.strip():
@@ -354,6 +402,10 @@ class DebateSession:
                 "is_judge": is_judge,
                 "round": round_num,
             })
+        # Размышления в память спектакля не идут (иначе следующая модель прочитала
+        # бы чужой черновик мыслей как сказанное вслух), а в файл — идут: там
+        # стенограмма, и её читают после занавеса, а не посреди разговора
+        save_thinking_entry(post)
         return post
 
     def current_participant_role(self) -> str:
@@ -715,6 +767,9 @@ class DebateSession:
             # назначить модератором не только живого человека, но и модель
             is_moderator=participant.get("is_moderator", False),
             gender=participant.get("gender", "male"),
+            # Мысли, сказанные по дороге к ответу: в ленте — свёрнутым блоком,
+            # в стенограмме — текстом. Черновик держит их для этого (см. think)
+            thinking=draft.thinking_full() if draft else "",
         )
         self.current_action = None
         time.sleep(0.5)
@@ -1335,6 +1390,8 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     его позвал.
     """
     print(f"🎬 Поток дебатов запущен для темы: {topic}")
+    # Размышления ходов уйдут в стенограмму: после занавеса ленты уже не будет
+    start_thinking_log(topic)
     runtime_participants = session.runtime_participants
     print(f"👥 Участников в сессии: {len(runtime_participants)}")
     

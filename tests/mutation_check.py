@@ -161,8 +161,30 @@ BUGS = {
     ],
     "поток шлюза снова читается как обычный ответ": [
         ("aitheatre/cloud.py",
-         "            if streaming:\n                return _read_stream(response, on_delta, on_thought)",
-         "            if False:\n                return _read_stream(response, on_delta, on_thought)"),
+         "            if streaming:\n"
+         "                return _read_stream(response, on_delta, on_thought, deadline)",
+         "            if False:\n"
+         "                return _read_stream(response, on_delta, on_thought, deadline)"),
+    ],
+    "предел времени на ход снова не соблюдается": [
+        ("aitheatre/cloud.py",
+         "        if not whole and deadline is not None and time.monotonic() >= deadline:",
+         "        if False:"),
+    ],
+    "числа характера снова уезжают за диапазон вендора": [
+        ("aitheatre/cloud.py",
+         "        result[openai_key] = _within_cloud_limits(openai_key, value, model)",
+         "        result[openai_key] = value"),
+    ],
+    "мысли хода снова теряются вместе с черновиком": [
+        ("aitheatre/show.py",
+         '            thinking=draft.thinking_full() if draft else "",',
+         '            thinking="",'),
+    ],
+    "размышления снова не попадают в стенограмму": [
+        ("aitheatre/show.py",
+         "        save_thinking_entry(post)",
+         "        pass"),
     ],
     "части вызова инструмента снова читаются как готовый вызов": [
         ("aitheatre/cloud.py",

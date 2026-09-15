@@ -1459,6 +1459,17 @@ HTML_TEMPLATE = """
             return `<div class="post-header"><div><div class="post-author"><span class="role-badge role-${role}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div>`;
         }
 
+        // Мысли модели в готовой реплике: сворачиваемый блок. Свёрнут по умолчанию
+        // — лента про сказанное вслух, а мысли открывают, когда захочется. Число
+        // знаков здесь не для красоты: это те самые оплаченные токены
+        function postThinkingHtml(post) {
+            const thoughts = (post.thinking || '').trim();
+            if (!thoughts) return '';
+            const size = thoughts.length.toLocaleString('ru-RU');
+            return `<details class="post-thinking"><summary>💭 размышления · ${size} знаков</summary>`
+                + `<div class="thinking-text">${escapeHtml(thoughts)}</div></details>`;
+        }
+
         function addPost(post) {
             const postsDiv = document.getElementById('posts');
             // Черновик, чей ход уже закончился, уступает место настоящему посту:
@@ -1470,7 +1481,7 @@ HTML_TEMPLATE = """
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postThinkingHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
             // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать

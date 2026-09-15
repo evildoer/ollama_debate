@@ -183,6 +183,21 @@ def stream_replies() -> bool:
     return _env_flag("CLOUD_STREAM", settings.CLOUD_STREAM)
 
 
+def limit_params() -> bool:
+    """Приводить ли числа характера к области, которую понимает вендор."""
+    return _env_flag("CLOUD_LIMIT_PARAMS", settings.CLOUD_LIMIT_PARAMS)
+
+
+def turn_limit() -> int:
+    """Сколько секунд может длиться один ход облачной модели целиком.
+
+    CLOUD_TIMEOUT — про один кусочек ответа, а этот срок — про весь ход.
+    Разница важна: «думающая» модель шлёт кусочки исправно, но зацикливается
+    и молотит случайные токены полчаса — спектакль при этом стоит.
+    """
+    return _env_int("CLOUD_TURN_LIMIT", settings.CLOUD_TURN_LIMIT)
+
+
 def show_thinking() -> bool:
     """Показывать ли размышления модели — то, что она говорит сама с собой.
 
@@ -612,7 +627,9 @@ def translate_options(options: dict, model: str = "") -> dict:
             continue
         if openai_key == "max_tokens":
             openai_key = max_tokens_field(model)
-        result[openai_key] = value
+            result[openai_key] = value
+            continue
+        result[openai_key] = _within_cloud_limits(openai_key, value, model)
 
     if pass_extras():
         for extra in ("min_p", "top_k", "repeat_penalty"):
@@ -676,6 +693,40 @@ def _tool_schema() -> list:
 # у части движков — «thinking». Читаем все: имя поля — не принцип, а чей-то выбор.
 # И к тому же «reasoning_details» — те же размышления, но разложенные по частям
 _THINKING_KEYS = ("reasoning", "reasoning_content", "thinking", "reasoning_details")
+
+
+# О каких числах уже сказали, что их пришлось подвинуть: за один спектакль
+# одно и то же предупреждение повторялось бы на каждом ходу
+_LIMIT_WARNED = set()
+
+
+def _within_cloud_limits(field: str, value, model: str = ""):
+    """Привести число к области вендора (и сказать вслух, если пришлось).
+
+    Характеры придуманы для Ollama, где temperature 2.0 — это «Хаос», а
+    presence_penalty 1.5 — «ничего не повторяй». Облачные модели обучены на
+    своём диапазоне (у GLM, например, температура 0.01—0.99), и за его краем
+    начинают сыпать случайными токенами — реплика превращается в мусор
+    на трёх языках сразу. Поэтому число отдаётся границей, а не как есть;
+    выключить это можно настройкой CLOUD_LIMIT_PARAMS.
+    """
+    limits = (settings.CLOUD_PARAM_LIMITS or {}).get(field) if limit_params() else None
+    if not limits:
+        return value
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    low, high = limits
+    if low <= number <= high:
+        return value
+    better = min(high, max(low, number))
+    if (model, field, number) not in _LIMIT_WARNED:
+        _LIMIT_WARNED.add((model, field, number))
+        print(f"  ⚠️  Облако ({bare_model_name(model)}): {field} {number:g} — вендор "
+              f"столько не понимает, шлю {better:g}. Характеры рассчитаны на Ollama: "
+              f"для облака выбирайте поспокойнее")
+    return better
 
 
 def _delta_text(delta: dict) -> str:
@@ -767,7 +818,7 @@ def _glued_calls(calls: dict) -> list:
     return result
 
 
-def _read_stream(response, on_delta, on_thought=None) -> dict:
+def _read_stream(response, on_delta, on_thought=None, deadline: float = None) -> dict:
     """Читает поток шлюза и отдаёт ответ в том же виде, что и обычный.
 
     Строка потока — «data: {кусок}», конец — «data: [DONE]». Кусок текста
@@ -776,6 +827,11 @@ def _read_stream(response, on_delta, on_thought=None) -> dict:
     ответ»: за один ход бывает несколько запросов (модель ответила без поиска,
     а после поиска отвечает заново), и тогда прежний текст больше не в счёт.
 
+    deadline — до какого времени (time.monotonic) ходу позволено длиться.
+    «Думающая» модель умеет зациклиться и молотить случайные токены полчаса:
+    кусочки приходят исправно, поэтому CLOUD_TIMEOUT её не остановит, а спектакль
+    всё стоит. Исчерпался срок — обрываем ход и оставляем сказанное (см. «cut»).
+
     Шлюз может и проигнорировать поток, ответив обычным JSON: разберём и его.
     Просить поток — не повод потерять реплику.
     """
@@ -783,10 +839,16 @@ def _read_stream(response, on_delta, on_thought=None) -> dict:
     thoughts = []
     calls = {}
     usage = {}
+    cut = False     # ход оборван по времени, а не кончился сам
     wants_thinking = on_thought is not None and show_thinking()
     whole = ""      # всё, что не похоже на поток: разберём целиком в конце
 
     for raw in response:
+        # Срок проверяем перед каждой порцией: сказанное остаётся в parts,
+        # и оборванный ход отдаёт то, что модель успела сказать
+        if not whole and deadline is not None and time.monotonic() >= deadline:
+            cut = True
+            break
         line = raw.decode("utf-8", "replace").strip()
         if not line or line.startswith(":"):
             continue                # пустые строки и «сердцебиения» шлюза
@@ -821,7 +883,7 @@ def _read_stream(response, on_delta, on_thought=None) -> dict:
             return {"error": f"шлюз ответил не данными, а текстом: {whole[:200]}"}
 
     return {"content": "".join(parts), "tool_calls": _glued_calls(calls),
-            "thinking": "".join(thoughts), "usage": usage}
+            "thinking": "".join(thoughts), "usage": usage, "cut": cut}
 
 
 def chat(model: str, messages: list, options: dict = None, tool_choice: str = None,
@@ -837,6 +899,11 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     отдельным полем, см. thinking_text). Без них (или когда CLOUD_STREAM выключен)
     ответ приходит целиком, как раньше.
     """
+    # Срок на весь ход считаем до запроса: он про ход целиком, вместе с ожиданием
+    # шлюза, а не про один кусочек. Ноль значит «без предела»
+    seconds = turn_limit()
+    deadline = time.monotonic() + seconds if seconds > 0 else None
+
     # Тело запроса нарочно простое: модель, сообщения и stream. Всё остальное
     # (числа характеров, инструмент поиска, имена отправителей) добавляется только
     # если его включили в настройках — см. CLOUD_SEND_* в settings.py. Так облачный
@@ -863,7 +930,7 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         """Один запрос — с потоком или без: разбор ответа выбирается здесь."""
         def read(response):
             if streaming:
-                return _read_stream(response, on_delta, on_thought)
+                return _read_stream(response, on_delta, on_thought, deadline)
             return _read_answer(response)
         return _request("chat/completions", payload=body, method="POST", read=read)
 
@@ -897,6 +964,14 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         problem = hide_key(answer["error"])
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {problem}")
         return f"[ОШИБКА: {problem}]", []
+
+    if answer.get("cut"):
+        # Не молчим: иначе оборванная реплика выглядела бы свойством модели
+        note = (f"ход длился дольше {seconds:g} с и оборван: модель зациклилась "
+                f"и не перешла к ответу (CLOUD_TURN_LIMIT, 0 — без предела)")
+        print(f"  ⚠️  Облако ({bare_model_name(model)}): {note}")
+        if not (answer.get("content") or "").strip() and not answer.get("tool_calls"):
+            return f"[ОШИБКА: {note}]", []
 
     usage = answer.get("usage") or {}
     if usage:
