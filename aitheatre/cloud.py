@@ -28,6 +28,12 @@ tool_calls с id, в ответе инструмента — tool_call_id. Бе�
 облачный поиск не работал бы: шлюз либо отвечает 400, либо не понимает,
 к какому вызову относится найденное. См. openai_messages.
 
+Ответ умеет приходить потоком ("stream": true): тогда реплика печатается
+в ленте по кускам, пока модель говорит, вместо того чтобы появиться целиком
+в конце. Кусок за куском читает и отдаёт наружу _read_stream, а сам спектакль
+получает готовый текст всё равно одним значением — поэтому остальной код
+о потоке не знает. Выключатель — CLOUD_STREAM.
+
 Про ключ. Он берётся из settings (или переменной окружения) и уходит ТОЛЬКО
 в этом заголовке. Ни в текст ответа, ни в сообщения об ошибках, ни на страницу
 он не попадает: вычистить его из чужого текста — обязанность этого модуля,
@@ -170,6 +176,11 @@ def send_message_names() -> bool:
 def pass_extras() -> bool:
     """Отправлять ли min_p, top_k и repeat_penalty: их понимают не все шлюзы."""
     return _env_flag("CLOUD_PASS_OLLAMA_EXTRAS", settings.CLOUD_PASS_OLLAMA_EXTRAS)
+
+
+def stream_replies() -> bool:
+    """Печатать ли ответ облачной модели в ленте по мере генерации."""
+    return _env_flag("CLOUD_STREAM", settings.CLOUD_STREAM)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -458,7 +469,7 @@ def _wait_before_retry(attempt: int, headers) -> float:
 
 
 def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
-             retries: int = None):
+             retries: int = None, read=None):
     """Один запрос к шлюзу. Возвращает (данные, текст ошибки) — без исключений.
 
     Ключа в тексте ошибки не бывает: сюда его подставляет только этот метод,
@@ -466,6 +477,10 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
 
     Повторяется только 429 и только с задержкой: остальные 4xx — про сам запрос,
     и повторять их бессмысленно (и вредно: серия ошибок уводит ключ в паузу).
+
+    read — как разобрать ответ. Обычный ответ и поток разбираются по-разному,
+    а всё остальное (ключ, повторы, срок ожидания, ошибки) у них общее,
+    поэтому выбор разбора — не повод для второго такого же метода.
     """
     problem = key_problem()
     if problem:
@@ -490,6 +505,8 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
     for attempt in range(attempts):
         try:
             with opener.open(request, timeout=seconds) as response:
+                if read is not None:
+                    return read(response), None
                 body = response.read().decode("utf-8")
             try:
                 return json.loads(body), None
@@ -596,22 +613,147 @@ def _tool_schema() -> list:
     }]
 
 
-def chat(model: str, messages: list, options: dict = None, tool_choice: str = None) -> tuple:
+def _delta_text(delta: dict) -> str:
+    """Кусок текста из потока: у части шлюзов он приходит списком частей."""
+    piece = (delta or {}).get("content")
+    if isinstance(piece, list):
+        return "".join(str(part.get("text", "")) for part in piece if isinstance(part, dict))
+    return "" if piece is None else str(piece)
+
+
+def _message_answer(result: dict) -> dict:
+    """Обычный (не потоковый) ответ шлюза — в том же виде, что и поток."""
+    choices = (result or {}).get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        return {"error": "шлюз вернул ответ без choices"}
+    message = choices[0].get("message") or {}
+    content = message.get("content") or ""
+    if isinstance(content, list):
+        # Некоторые шлюзы отдают текст частями и без потока
+        content = "".join(str(part.get("text", "")) for part in content
+                          if isinstance(part, dict))
+    return {"content": content, "tool_calls": message.get("tool_calls") or [],
+            "usage": (result or {}).get("usage") or {}}
+
+
+def _read_answer(response) -> dict:
+    """Прочитать обычный ответ шлюза и привести его к общему виду."""
+    body = response.read().decode("utf-8")
+    try:
+        return _message_answer(json.loads(body))
+    except ValueError:
+        return {"error": f"шлюз ответил не данными, а текстом: {body[:200]}"}
+
+
+def _accumulate_calls(calls: dict, delta: dict) -> None:
+    """Собирает вызовы инструментов из потока: они приходят кусками.
+
+    У OpenAI вызов разрезан на фрагменты с одним и тем же index, и имя
+    с аргументами приходят частями строки. Прочитать фрагмент как готовый вызов
+    нельзя: получился бы инструмент с половиной имени.
+    """
+    for piece in ((delta or {}).get("tool_calls") or []):
+        if not isinstance(piece, dict):
+            continue
+        index = piece.get("index")
+        index = 0 if index is None else index
+        call = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+        if piece.get("id"):
+            call["id"] = str(piece["id"])
+        function = piece.get("function") or {}
+        if function.get("name"):
+            call["name"] += str(function["name"])
+        if function.get("arguments"):
+            call["arguments"] += str(function["arguments"])
+
+
+def _glued_calls(calls: dict) -> list:
+    """Склеенные куски — в тот же вид, что у обычного ответа."""
+    result = []
+    for index in sorted(calls):
+        call = calls[index]
+        if not call["name"]:
+            continue
+        try:
+            arguments = json.loads(call["arguments"]) if call["arguments"] else {}
+        except ValueError:
+            arguments = {}
+        result.append({"id": call["id"], "type": "function",
+                       "function": {"name": call["name"], "arguments": arguments}})
+    return result
+
+
+def _read_stream(response, on_delta) -> dict:
+    """Читает поток шлюза и отдаёт ответ в том же виде, что и обычный.
+
+    Строка потока — «data: {кусок}», конец — «data: [DONE]». Кусок текста
+    сразу уходит в on_delta: из этих кусков лента и печатает реплику на глазах.
+    Второй аргумент on_delta — «начался новый ответ»: за один ход бывает
+    несколько запросов (модель ответила без поиска, а после поиска отвечает
+    заново), и тогда прежний текст больше не в счёт.
+
+    Шлюз может и проигнорировать поток, ответив обычным JSON: разберём и его.
+    Просить поток — не повод потерять реплику.
+    """
+    parts = []
+    calls = {}
+    usage = {}
+    whole = ""      # всё, что не похоже на поток: разберём целиком в конце
+
+    for raw in response:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line or line.startswith(":"):
+            continue                # пустые строки и «сердцебиения» шлюза
+        if whole or not line.startswith("data:"):
+            whole += line
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            continue                # нечитаемый кусок: остальное важнее
+        usage = chunk.get("usage") or usage
+        for choice in (chunk.get("choices") or []):
+            delta = choice.get("delta") or choice.get("message") or {}
+            piece = _delta_text(delta)
+            if piece:
+                on_delta(piece, not parts)
+                parts.append(piece)
+            _accumulate_calls(calls, delta)
+
+    if whole:
+        try:
+            return _message_answer(json.loads(whole))
+        except ValueError:
+            return {"error": f"шлюз ответил не данными, а текстом: {whole[:200]}"}
+
+    return {"content": "".join(parts), "tool_calls": _glued_calls(calls), "usage": usage}
+
+
+def chat(model: str, messages: list, options: dict = None, tool_choice: str = None,
+         on_delta=None) -> tuple:
     """Один ход облачной модели. Возвращает (текст, вызовы инструментов).
 
     Форма ответа — та же, что у Ollama-пути, поэтому весь остальной код
     (поиск в интернете, разбор ошибок, лента) работает без изменений. Ошибка
     приходит текстом в первом элементе: так же ведёт себя и Ollama-путь.
+
+    on_delta — «получатель» ответа по кускам: пока модель говорит, ему достаётся
+    очередная порция текста. Без него (или когда CLOUD_STREAM выключен) ответ
+    приходит целиком, как раньше.
     """
     # Тело запроса нарочно простое: модель, сообщения и stream. Всё остальное
     # (числа характеров, инструмент поиска, имена отправителей) добавляется только
     # если его включили в настройках — см. CLOUD_SEND_* в settings.py. Так облачный
     # участник сначала просто говорит, а лишние поводы для «400 Bad Request»,
     # от которых ключ уходит в паузу и отвечает 429, остаются за дверью
+    streaming = stream_replies() and on_delta is not None
     payload = {
         "model": bare_model_name(model),
         "messages": openai_messages(messages, keep_names=send_message_names()),
-        "stream": False,
+        "stream": bool(streaming),
     }
     if send_params():
         payload.update(translate_options(options if options is not None else settings.OPTIONS))
@@ -623,7 +765,15 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
             # «any» у Ollama значит «обязан вызвать инструмент», у OpenAI — «required»
             payload["tool_choice"] = "required" if tool_choice == "any" else tool_choice
 
-    result, error = _request("chat/completions", payload=payload, method="POST")
+    def ask(body):
+        """Один запрос — с потоком или без: разбор ответа выбирается здесь."""
+        def read(response):
+            if streaming:
+                return _read_stream(response, on_delta)
+            return _read_answer(response)
+        return _request("chat/completions", payload=body, method="POST", read=read)
+
+    answer, error = ask(payload)
 
     # 400 значит «запрос не понят». Если тот же запрос проходит без инструмента,
     # значит дело было в нём — запоминаем это про модель и больше не предлагаем.
@@ -632,34 +782,28 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     if getattr(error, "code", None) == 400 and uses_tools:
         without_tools = {key: value for key, value in payload.items()
                          if key not in ("tools", "tool_choice")}
-        retry_result, retry_error = _request("chat/completions", payload=without_tools,
-                                            method="POST")
+        retry_answer, retry_error = ask(without_tools)
         if not retry_error:
             _MODELS_WITHOUT_TOOLS.add(model)
             print(f"  ℹ️  Облако: {bare_model_name(model)} не приняла инструмент поиска — "
                   f"дальше говорю с ней без него")
-            result, error = retry_result, retry_error
+            answer, error = retry_answer, retry_error
 
     if error:
         print(f"  ⚠️  Облако ({bare_model_name(model)}): {error}")
         return f"[ОШИБКА: {error}]", []
 
-    choices = result.get("choices") or []
-    if not choices or not isinstance(choices[0], dict):
-        return "[ОШИБКА: шлюз вернул ответ без choices]", []
+    if answer.get("error"):
+        problem = hide_key(answer["error"])
+        print(f"  ⚠️  Облако ({bare_model_name(model)}): {problem}")
+        return f"[ОШИБКА: {problem}]", []
 
-    message = choices[0].get("message") or {}
-    content = message.get("content") or ""
-    if isinstance(content, list):
-        # Некоторые шлюзы отдают текст частями, как в потоковом режиме
-        content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+    usage = answer.get("usage") or {}
+    if usage:
+        print(f"  ☁️  {bare_model_name(model)}: токенов {usage.get('prompt_tokens', '?')} "
+              f"+ {usage.get('completion_tokens', '?')}")
 
-    usages = result.get("usage") or {}
-    if usages:
-        print(f"  ☁️  {bare_model_name(model)}: токенов {usages.get('prompt_tokens', '?')} "
-              f"+ {usages.get('completion_tokens', '?')}")
-
-    return content, (message.get("tool_calls") or [])
+    return answer.get("content") or "", answer.get("tool_calls") or []
 
 
 def fetch_models(force: bool = False, timeout: int = 20) -> tuple:

@@ -92,6 +92,83 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "gender_symbol": "♂" if gender == "male" else "♀"
     }
 
+def role_of(is_moderator: bool, is_judge: bool) -> str:
+    """Роль места в ленте: модератор старше судьи — как и при разборе состава."""
+    if is_moderator:
+        return "moderator"
+    if is_judge:
+        return "judge"
+    return "participant"
+
+class _StreamingReply:
+    """Черновик реплики: то, что модель говорит прямо сейчас.
+
+    Пока ход идёт, в ленте растёт текст — как у живого человека, а не одним
+    куском в конце. Черновик живёт отдельно от постов: он не попадает ни
+    в историю, ни в счёт постов, ни в следующий промпт, а когда ход кончится,
+    его место займёт настоящий пост (см. add_post).
+
+    Отправляем не каждую порцию: лента всё равно не перерисует чаще INTERVAL,
+    а часть шлюзов печатает по букве — на таком потоке лента захлебнулась бы.
+    """
+
+    INTERVAL = 0.12
+
+    def __init__(self, participant: dict, round_num: int, publisher):
+        self.publisher = publisher
+        self.stream_id = f"stream-{uuid.uuid4().hex[:8]}"
+        self.text = ""
+        self.sent_at = 0.0
+        self.started = False
+        self.finished = False
+        name = participant.get("display_name", "")
+        # Вид черновика берём у поста: аватар, роль, значок — то же самое, иначе
+        # черновик и настоящая реплика выглядели бы по-разному
+        self.identity = create_post(
+            display_name=name,
+            model_used=participant.get("model", ""),
+            content="",
+            round_num=round_num,
+            avatar_url=session.avatars.get(name),
+            avatar_emoji=session.avatar_emojis.get(name, "📣"),
+            role=role_of(participant.get("is_moderator", False),
+                         participant.get("is_judge", False)),
+            gender=participant.get("gender", "male"),
+        )
+
+    def feed(self, piece: str, replace: bool = False):
+        """Очередная порция текста. replace — прежний текст больше не в счёт.
+
+        replace приходит на первый кусок каждого запроса: за один ход модель
+        может говорить дважды (сказала без поиска, а после поиска — заново),
+        и тогда в ленте должна остаться вторая реплика, а не склейка двух.
+        """
+        if replace:
+            self.text = ""
+        self.text += piece
+        now = time.monotonic()
+        if replace or now - self.sent_at >= self.INTERVAL:
+            self.send(now)
+
+    def send(self, now: float = None):
+        self.started = True
+        self.sent_at = time.monotonic() if now is None else now
+        self.publisher({**self.identity,
+                        "stream_id": self.stream_id,
+                        "content": self.text,
+                        # Черновик идёт простым текстом: markdown в нём ещё не
+                        # сложился (незакрытая звёздочка — обычное дело), а число
+                        # на каждой порции ничего не стоит
+                        "content_html": None,
+                        "draft": True})
+
+    def finish(self):
+        """Ход кончился: черновик уступает место настоящему посту."""
+        if self.finished or not self.started:
+            return
+        self.finished = True
+        self.publisher({"stream_id": self.stream_id, "draft": True, "done": True})
+
 class DebateSession:
     """
     Инкапсулирует состояние и логику дебатов.
@@ -231,11 +308,7 @@ class DebateSession:
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
 
-        role = "participant"
-        if is_moderator:
-            role = "moderator"
-        elif is_judge:
-            role = "judge"
+        role = role_of(is_moderator, is_judge)
 
         post = create_post(display_name, model_used, content, round_num,
                           avatar_url, avatar_emoji, search_count, search_queries, role, gender)
@@ -571,17 +644,31 @@ class DebateSession:
     # Ход AI
     # ------------------------------------------------------------
 
-    def handle_ai_turn(self, participant: dict, round_num: int) -> tuple:
+    def handle_ai_turn(self, participant: dict, round_num: int, on_draft=None) -> tuple:
         self.current_action = "thinking"
         messages = self.build_messages_for_ai(participant, round_num)
 
-        response, search_count, search_queries = ollama_api.ask_model(
-            model=participant["model"],
-            messages=messages,
-            participant_name=participant["display_name"],
-            options=ollama_api._merge_options(participant),
-            think=ollama_api.resolve_think(participant),
-        )
+        # Черновик реплики: если спектакль умеет показывать её по кускам, текст
+        # растёт в ленте, пока модель говорит (у местных моделей порций не будет —
+        # on_delta до них не доходит, и черновик просто не начнётся)
+        draft = None
+        if on_draft is not None:
+            draft = _StreamingReply(participant, round_num, on_draft)
+
+        try:
+            response, search_count, search_queries = ollama_api.ask_model(
+                model=participant["model"],
+                messages=messages,
+                participant_name=participant["display_name"],
+                options=ollama_api._merge_options(participant),
+                think=ollama_api.resolve_think(participant),
+                on_delta=draft.feed if draft else None,
+            )
+        finally:
+            # Черновик закрываем при любом выходе, в том числе при ошибке: иначе
+            # недописанная реплика осталась бы висеть в ленте навсегда
+            if draft is not None:
+                draft.finish()
 
         self.add_post(
             display_name=participant["display_name"],
@@ -1204,11 +1291,13 @@ load_theatre_settings()
 session.load_new_cast()
 
 
-def run_debate_thread(topic: str, on_post=None):
+def run_debate_thread(topic: str, on_post=None, on_draft=None):
     """
     Играет спектакль акт за актом, пока режиссёр не опустит занавес.
 
     on_post — как сообщить о новой реплике (обычно это Socket.IO из web.py).
+    on_draft — как сообщить о том, что реплика пишется прямо сейчас: пока
+    облачная модель говорит, в ленте растёт черновик (см. _StreamingReply).
     Здесь про Flask не знают: спектакль просто отдаёт готовый пост тому, кто
     его позвал.
     """
@@ -1326,7 +1415,7 @@ def run_debate_thread(topic: str, on_post=None):
                     
                     session.current_action = "thinking"
                     
-                    session.handle_ai_turn(participant, round_num)
+                    session.handle_ai_turn(participant, round_num, on_draft=on_draft)
                     
                     post = session.posts[-1] if session.posts else None
                     if post and on_post:

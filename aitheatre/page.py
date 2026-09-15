@@ -93,6 +93,10 @@ HTML_TEMPLATE = """
         .post-text ul, .post-text ol { margin: 15px 0; padding-left: 30px; }
         .post-text li { margin-bottom: 10px; line-height: 1.7; }
         .post-text li::marker { font-weight: bold; }
+        /* Черновик реплики: пост уже есть, а текст ещё пишется. Мигающий курсор
+           в конце строки и говорит, что реплика не кончилась */
+        .post.streaming .post-text::after { content: '▍'; margin-left: 2px; animation: streamCaret 1s steps(2, start) infinite; }
+        @keyframes streamCaret { to { visibility: hidden; } }
         /* Формулы: LaTeX от сервера, MathML от браузера */
         .post-text .math { font-size: 1.05em; }
         .post-text .math-block { display: block; margin: 14px 0; text-align: center; }
@@ -483,6 +487,9 @@ HTML_TEMPLATE = """
                 socket = io();
                 ['new_post', 'state_update'].forEach(evt =>
                     socket.on(evt, () => { if (debateRunning) updatePosts(); }));
+                // Черновик приходит готовым и целиком: перепрашивать его незачем,
+                // поэтому он не дёргает updatePosts, а рисуется сам
+                socket.on('stream_post', draft => { if (debateRunning) upsertStreamPost(draft); });
             } catch (e) {
                 console.warn('Socket.IO недоступен, обновляемся опросом:', e);
                 socket = null;
@@ -1426,29 +1433,64 @@ HTML_TEMPLATE = """
             applyTheme(saved === null ? systemDark : saved === 'dark');
         })();
         
-        function addPost(post) {
-            const postsDiv = document.getElementById('posts');
+        // Голова реплики — общая у готового поста и у черновика: иначе растущая
+        // реплика выглядела бы другим человеком
+        function postAvatarHtml(post) {
             const emoji = post.avatar_emoji || '📣';
-            let avatarHtml = post.avatar_url ? `<img src="${post.avatar_url}" onclick="showAvatarFull('${post.avatar_url}')">` : `<div class="emoji">${emoji}</div>`;
-            let searchInfo = '';
-            if (post.search_count > 0) { searchInfo = `<div class="search-info"><strong>Источники</strong>${post.search_queries.map(q => `<span class="search-query">"${q}"</span>`).join('')}</div>`; }
-            
-            // Определяем стиль для роли
+            return post.avatar_url
+                ? `<img src="${post.avatar_url}" onclick="showAvatarFull('${post.avatar_url}')">`
+                : `<div class="emoji">${emoji}</div>`;
+        }
+
+        function postHeaderHtml(post) {
             const role = post.role || 'participant';
             const roleIcon = post.role_icon || '🎭';
             const roleName = post.role_name || 'Участник';
-            const roleClass = `role-${role}`;
-            
+            const genderSymbol = post.gender === 'male' ? '♂' : '♀';
+            return `<div class="post-header"><div><div class="post-author"><span class="role-badge role-${role}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div>`;
+        }
+
+        function addPost(post) {
+            const postsDiv = document.getElementById('posts');
+            // Черновик, чей ход уже закончился, уступает место настоящему посту:
+            // так реплика не мелькает и не задваивается
+            postsDiv.querySelectorAll('[data-stream-done]').forEach(el => el.remove());
+            let searchInfo = '';
+            if (post.search_count > 0) { searchInfo = `<div class="search-info"><strong>Источники</strong>${post.search_queries.map(q => `<span class="search-query">"${q}"</span>`).join('')}</div>`; }
+
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
-            postDiv.className = `post post-role-${role}`;
-            const genderSymbol = post.gender === 'male' ? '♂' : '♀';
-            postDiv.innerHTML = `<div class="post-avatar">${avatarHtml}</div><div class="post-content"><div class="post-header"><div><div class="post-author"><span class="role-badge ${roleClass}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div><div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            postDiv.className = `post post-role-${post.role || 'participant'}`;
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
             // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать
             // спектакль снизу вверх не приходится
             postsDiv.insertBefore(postDiv, postsDiv.firstChild);
+        }
+
+        // Черновик реплики: пока облачная модель говорит, текст растёт на глазах
+        function upsertStreamPost(draft) {
+            const postsDiv = document.getElementById('posts');
+            const box = postsDiv.querySelector(`[data-stream-id="${draft.stream_id}"]`);
+            if (draft.done) {
+                // Ход кончился: настоящий пост придёт следующим событием и уберёт
+                // черновик. Если не придёт (связь пропала) — уберём сами
+                if (box) { box.setAttribute('data-stream-done', '1'); setTimeout(() => box.remove(), 3000); }
+                return;
+            }
+            let element = box;
+            if (!element) {
+                element = document.createElement('div');
+                element.className = `post post-role-${draft.role || 'participant'} streaming`;
+                element.setAttribute('data-stream-id', draft.stream_id);
+                element.innerHTML = `<div class="post-avatar">${postAvatarHtml(draft)}</div><div class="post-content">${postHeaderHtml(draft)}<div class="post-text"></div></div>`;
+                postsDiv.insertBefore(element, postsDiv.firstChild);
+            }
+            const postText = element.querySelector('.post-text');
+            // Простым текстом, а не HTML: реплика ещё не дописана, и markdown
+            // на середине (незакрытая звёздочка) выглядел бы мусором
+            if (postText) postText.textContent = draft.content || '';
         }
         
         function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }

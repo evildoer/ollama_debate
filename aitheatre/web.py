@@ -42,6 +42,16 @@ def publish_post(post: dict):
     """
     socketio.emit('new_post', post)
 
+
+def publish_draft(draft: dict):
+    """Реплика, которая пишется прямо сейчас: черновик поста.
+
+    Настоящего поста ещё нет — он придёт, когда ход кончится. Черновик живёт
+    только на этой стороне, у ленты, и только по Socket.IO: опрос носит готовые
+    посты, и черновик в него не попадает (он и не должен — он ещё не реплика).
+    """
+    socketio.emit('stream_post', draft)
+
 # Отключаем логирование GET запросов к /api/status чтобы не засорять консоль
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.WARNING)
@@ -284,7 +294,7 @@ def start():
     print(f"🎭 Состав: {[(p.get('display_name'), p.get('model')) for p in cast]}")
 
     thread = threading.Thread(target=show.run_debate_thread, args=(topic,),
-                              kwargs={"on_post": publish_post})
+                              kwargs={"on_post": publish_post, "on_draft": publish_draft})
     thread.daemon = True
     thread.start()
     # Тему возвращаем: интерфейс показывает в шапке именно то, с чем играем

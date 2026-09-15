@@ -1313,7 +1313,21 @@ class TestRoleMarks(unittest.TestCase):
                       self.page)
 
     def test_post_gets_its_role_class(self):
-        self.assertIn("postDiv.className = `post post-role-${role}`", self.page)
+        self.assertIn("postDiv.className = `post post-role-${post.role || 'participant'}`",
+                      self.page)
+
+    def test_the_growing_reply_is_built_from_the_same_head_as_a_post(self):
+        """Черновик и настоящая реплика — один человек, а не два разных.
+
+        Если у растущей реплики была бы своя разметка шапки, аватар с ролью
+        и цвет полосы разъехались бы со готовым постом — и это выглядело бы
+        как подмена говорящего на середине.
+        """
+        self.assertIn("function postHeaderHtml(post)", self.page)
+        self.assertIn("element.innerHTML = `<div class=\"post-avatar\">${postAvatarHtml(draft)}",
+                      self.page)
+        # Черновик идёт простым текстом: markdown посередине реплики — мусор
+        self.assertIn("postText.textContent = draft.content", self.page)
 
     def test_toggle_is_wired_and_remembered(self):
         self.assertIn('id="rolesBtn"', self.page)
