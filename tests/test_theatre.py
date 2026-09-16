@@ -1031,9 +1031,9 @@ class TestStreamingReply(unittest.TestCase):
         self.assertIn("Сначала взвешу доводы.", written)
         self.assertIn(self._participant()["display_name"], written)
         self.assertIn("Вот ответ.", written, "в ДАМПе ход заканчивается репликой")
-        self.assertIn("### Что вошло в запрос к модели", written,
+        self.assertIn("### 📨 Первый запрос к модели целиком", written,
                       "виден и вход, а не только выход")
-        self.assertIn("### Реплика", written)
+        self.assertIn("### 💬 Реплика, которой ход кончился", written)
 
     def test_the_rewritten_reply_is_kept_as_a_sketch(self):
         """Вторая версия реплики — главная, первая остаётся наброском.
@@ -2583,7 +2583,7 @@ class TestTurnReport(unittest.TestCase):
                 self.session.handle_ai_turn(self._participant(), 1)
             written = dump.read_text(encoding="utf-8")
 
-        self.assertIn("### Что приложение дописало в запрос по ходу дела", written)
+        self.assertIn("### ✍️ Что приложение дописало в запрос", written)
         self.assertIn("0 токенов текста", written,
                       "ноль — это ноль ТЕКСТА, и так и надо писать")
         self.assertIn("тела текста нет", written)
@@ -2791,13 +2791,14 @@ class TestTurnReport(unittest.TestCase):
             written = dump.read_text(encoding="utf-8")
 
         mid = seen.get("mid_turn", "")
-        self.assertIn("### Хронология", mid, "хронология должна начинаться до запроса")
+        self.assertIn("### 🧭 Хронология хода", mid,
+                      "хронология должна начинаться до запроса")
         self.assertIn("запрос 1", mid, "запрос должен быть виден, пока модель думает")
         self.assertIn("Прикидываю доводы.", mid, "размышления должны течь в файл сразу")
-        self.assertNotIn("### Реплика", mid, "реплики в середине хода ещё нет")
+        self.assertNotIn("### 💬 Реплика", mid, "реплики в середине хода ещё нет")
         self.assertIn("Вот ответ.", written)
-        self.assertIn("### Реплика", written)
-        self.assertEqual(written.count("### Что вошло в запрос к модели"), 1,
+        self.assertIn("### 💬 Реплика, которой ход кончился", written)
+        self.assertEqual(written.count("### 📨 Первый запрос к модели целиком"), 1,
                          "ход должен попасть в файл один раз, а не дважды")
         # Строка запроса и шапка мыслей появляются в файле сразу, без итоговых
         # чисел, — а когда числа есть, файл переписывает ту же строку, а не
@@ -2968,10 +2969,62 @@ class TestTurnPanel(unittest.TestCase):
         self.assertIn("body.dark .prompt-step", self.page,
                       "шаги хода — тоже текст, и им тоже нужна тёмная тема")
 
+    def body_html(self) -> str:
+        """Что именно рисуется внутри раскрытого блока о ходе."""
+        start = self.page.index("function turnBodyHtml(")
+        return self.page[start:self.page.index("function loadTurnBox(", start)]
+
+    def test_every_section_is_framed_and_titled(self):
+        """Разделы отчёта отделены друг от друга и названы.
+
+        Раньше это была одна простыня одинаковых серых строк: «Окно говорящего»,
+        «Запрос к модели состоял из», «Хронология» — понять, где кончается одно
+        и начинается другое, было нельзя. Теперь у каждого раздела имя и рамка.
+        """
+        self.assertIn(".prompt-block {", self.page)
+        self.assertIn("body.dark .prompt-block", self.page,
+                      "рамке нужна тёмная тема: белое поле на тёмной сцене уже было")
+        self.assertIn(".prompt-block-title {", self.page)
+        self.assertIn(".prompt-block-purpose {", self.page,
+                      "в разделе с числами без назначения словами они ничего не значат")
+        body = self.body_html()
+        self.assertIn("function turnBlock(", self.page,
+                      "разделы должны собираться одним заведением")
+        self.assertIn('<section class="prompt-block">', self.page)
+        self.assertIn("turnBlock(", body)
+        self.assertGreaterEqual(body.count("turnBlock("), 6,
+                                "разделов должно быть столько же, сколько частей отчёта")
+
+    def test_the_section_frames_are_dark_on_the_dark_stage(self):
+        """Рамка раздела на тёмной сцене — тёмная: белое на белом у нас уже было.
+
+        Проверяется не «строка есть», а сам цвет: светлая рамка на тёмной сцене
+        не ошибка синтаксиса — её просто не видно, и увидит это только зритель.
+        """
+        match = re.search(
+            r"body\.dark \.prompt-block \{ border-color: (#[0-9a-fA-F]{6}); \}",
+            self.page)
+        self.assertIsNotNone(match, "у рамки раздела нет правила для тёмной сцены")
+        color = match.group(1)
+        red, green, blue = (int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16))
+        self.assertLess((red + green + blue) / 3, 80,
+                        f"рамка {color} на тёмной сцене не читается")
+
+    def test_the_sections_are_named_the_same_in_the_page_and_the_dump(self):
+        """Отчёт один — и разделы в нём названы одними словами в обоих местах.
+
+        Читают его и в ленте (раскрытый блок у реплики), и в файле ДАМПа
+        (см. show.TURN_SECTIONS). Разойтись в названиях разделов значит
+        заставить читателя гадать, один это раздел или два разных.
+        """
+        body = self.body_html()
+        for title in show.TURN_SECTIONS.values():
+            words = title.lstrip("#").strip()
+            self.assertIn(words, body, f"на странице нет раздела «{words}»")
+
     def test_the_body_goes_through_the_turn_step_by_step(self):
         """Внутри блока — хронология: шаги, числа, найденное и всё, что вошло."""
-        start = self.page.index("function turnBodyHtml(")
-        body = self.page[start:self.page.index("function loadTurnBox(", start)]
+        body = self.body_html()
         self.assertIn("WINDOW_WORDS", body, "должно быть видно, чьим окном мерили")
         self.assertIn("removed_messages", body)
         self.assertIn("promptRemovedHtml(data.removed)", body)
@@ -5560,6 +5613,95 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("думает 12 с", out[2])
         self.assertNotIn("осталось", out[2], "без срока нет и остатка")
         self.assertEqual(out[3], "", "хода нет — и часов нет")
+
+    @staticmethod
+    def _const_block(name: str) -> str:
+        """`const <имя> = …;` со страницы — даже если он разложен на две строки.
+
+        Словари вида WINDOW_WORDS занимают несколько строк, и по одной строке
+        их в node не отдать (см. _page_constant).
+        """
+        source = page.HTML_TEMPLATE
+        match = re.search(rf"^\s*const {name} = ", source, re.M)
+        if not match:
+            raise AssertionError(f"на странице нет {name}")
+        end = source.index(";", match.end())
+        return f"const {name} = " + source[match.end():end + 1]
+
+    def _render_turn_report(self, payload: str) -> str:
+        """Собрать отчёт о ходе тем же кодом, что уедет в браузер.
+
+        Ни один питоновский тест разметку не исполняет, а разделы отчёта —
+        именно разметка: по исходнику не видно, получился ли раздел с именем
+        и пояснением или строкой без них (см. turnBodyHtml).
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node не найден: настоящую сборку отчёта не с кем сверить")
+        script = "\n".join(self._const_block(name) for name in (
+            "WINDOW_WORDS", "ROLE_WORDS", "SKETCH_HINT", "FINISH_WORDS"))
+        script += "\n" + "\n".join(self._function(name) for name in (
+            "escapeHtml", "tokensText", "durationText", "stepClock", "turnAskText",
+            "promptMessagesHtml", "promptRemovedHtml", "thinkingBlockHtml",
+            "turnBlock", "turnBodyHtml"))
+        script += f"\nconsole.log(turnBodyHtml({payload}));"
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                        encoding="utf-8") as handle:
+            handle.write(script)
+            path = handle.name
+        try:
+            result = subprocess.run([node, path], capture_output=True)
+        finally:
+            os.unlink(path)
+        self.assertEqual(result.returncode, 0,
+                         "отчёт о ходе не собирается:\n"
+                         + result.stderr.decode("utf-8", "replace").strip())
+        return result.stdout.decode("utf-8")
+
+    def test_the_turn_report_renders_as_named_sections(self):
+        """Каждый раздел отчёта рисуется со своим именем и своим назначением.
+
+        Раньше это были строки одинаковой серости в один поток, и понять, где
+        кончается одно и начинается другое, было нельзя. Проверка настоящая:
+        отчёт собирается тем же кодом, что и в браузере.
+        """
+        html = self._render_turn_report(
+            "{who: {name: 'Проверка', model: 'cloud:fake', round: 2, time: '12:00'},"
+            " summary: {messages: 2, tokens: 900, seconds: 12, removed_messages: 1,"
+            " removed_tokens: 50, extra_messages: 2, extra_tokens: 700, asks: 2},"
+            " budget: {kind: 'cloud', window: 32768, reserve: 0, safety: 500,"
+            " system_tokens: 800, available: 24000, messages_after: 0, kept_tokens: 0},"
+            " steps: [{kind: 'ask', n: 1, clock: '12:00:01', limit: 3, tokens_in: 900,"
+            " tokens_out: 40, tools: true},"
+            " {kind: 'search', n: 1, clock: '12:00:02', limit: 3, query: 'проверка',"
+            " results: '1. Найдено', tokens: 30},"
+            " {kind: 'thought', n: 2, clock: '12:00:03', text: 'Думаю.', tokens: 5},"
+            " {kind: 'note', clock: '12:00:04', text: 'Замечание.'}],"
+            " removed: [{speaker: 'Борис', tokens: 50, preview: 'давняя реплика'}],"
+            " added: [{role: 'assistant', name: 'проверка', tokens: 0,"
+            " content: '', note: 'прошу поиск'},"
+            " {role: 'tool', name: 'search', tokens: 30, content: 'Найденное'}],"
+            " messages: [{role: 'system', name: 'system', tokens: 800,"
+            " content: 'Система'},"
+            " {role: 'user', name: 'проверка', tokens: 100, content: '<b>не тег</b>'}],"
+            " sketch: 'Прежняя версия ответа.', answer: 'Вот ответ.'}")
+
+        for title in show.TURN_SECTIONS.values():
+            words = title.lstrip("#").strip()
+            self.assertIn(words, html, f"раздел «{words}» не нарисовался")
+        frames = html.count('<section class="prompt-block">')
+        self.assertGreaterEqual(frames, len(show.TURN_SECTIONS) - 1,
+                                "разделов меньше, чем частей отчёта")
+        self.assertEqual(html.count("prompt-block-title"), frames)
+        self.assertEqual(html.count("prompt-block-purpose"), frames,
+                         "у каждого раздела должно быть сказано, зачем он")
+        # Найденное, размышления и реплика — на месте: разделы не должны
+        # подменить содержание одними заголовками
+        self.assertIn("Найденное", html)
+        self.assertIn("Думаю.", html)
+        self.assertIn("Вот ответ.", html)
+        self.assertIn("&lt;b&gt;не тег&lt;/b&gt;", html,
+                      "тексты разделов должны быть экранированы, а не уехать тегом")
 
 
 if __name__ == "__main__":

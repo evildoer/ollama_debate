@@ -335,6 +335,23 @@ def history_line(summary: dict, budget: dict) -> str:
     return line + "\n"
 
 
+# Имена разделов отчёта о ходе — те же слова, что на странице (см. turnBlock
+# в page.py). Отчёт один: его читают и в ДАМПе, и в ленте, и названия разделов
+# в двух местах не должны расходиться, иначе непонятно, один это раздел или два.
+# Назначение разделов словами есть только на странице: в файле разделяет уже
+# сам заголовок, и повторять под ним пояснение было бы шумом.
+TURN_SECTIONS = {
+    "who": "### 👤 Кто говорит и когда",
+    "place": "### 📐 Место под историю: чьё окно и как оно заполнилось",
+    "request": "### 📨 Первый запрос к модели целиком",
+    "cut": "### ✂️ Что выбросила обрезка",
+    "history": "### 🧭 Хронология хода: что происходило по порядку",
+    "added": "### ✍️ Что приложение дописало в запрос",
+    "sketch": "### 🌱 Сказано раньше: прежняя версия реплики",
+    "answer": "### 💬 Реплика, которой ход кончился",
+}
+
+
 def dump_turn_header(post_id: int, turn: dict) -> str:
     """Начало записи о ходе: кто говорит, чьим окном мерено, что вошло в запрос.
 
@@ -343,6 +360,10 @@ def dump_turn_header(post_id: int, turn: dict) -> str:
     «дописано ходом» здесь нет нарочно: дописанное — это результаты поисков
     и напоминания, и все они видны в хронологии со своим весом. В двух местах
     одни и те же данные — это не полнота, а каша (см. build_turn_report).
+
+    Разделы названы теми же словами, что на странице (см. TURN_SECTIONS):
+    один и тот же отчёт читают и в файле, и в ленте — и разойтись в названиях
+    разделов они не должны.
     """
     who = turn.get("who") or {}
     budget = turn.get("budget") or {}
@@ -350,21 +371,24 @@ def dump_turn_header(post_id: int, turn: dict) -> str:
     out = [f"\n## {post_id} · {who.get('time')} · {who.get('name')} · "
            f"{who.get('model')} · {who.get('role_name') or who.get('role')} "
            f"· Акт {who.get('round')}\n"]
+    out.append(TURN_SECTIONS["who"] + "\n")
     out.append(f"**Кто:** {who.get('name')} · {who.get('model')} · "
                f"{who.get('role_name') or who.get('role')} · {who.get('time')}\n")
+    # Окно и то, что в него вошло, — один раздел: это два взгляда на одно место
+    out.append(TURN_SECTIONS["place"] + "\n")
     out.append(window_line(budget))
     out.append(history_line(summary, budget))
-    out.append("### Что вошло в запрос к модели\n")
+    out.append(TURN_SECTIONS["request"] + "\n")
     for index, message in enumerate(turn.get("messages") or [], 1):
         out.append(message_line(index, message))
         if message.get("content"):
             out.append(quoted(message.get("content")))
     if summary.get("removed_messages"):
-        out.append("\n**Что выбросила обрезка (самое раннее):**")
+        out.append("\n" + TURN_SECTIONS["cut"] + "\n")
         for gone in turn.get("removed") or []:
             out.append(f"- {gone.get('speaker')} · {numbers_word(gone.get('tokens'))} токенов · "
                        f"{gone.get('preview')}")
-    out.append("\n### Хронология\n")
+    out.append("\n" + TURN_SECTIONS["history"] + "\n")
     return "\n".join(out) + "\n"
 
 
@@ -392,15 +416,15 @@ def dump_turn_tail(post: dict, turn: dict) -> str:
         out.append(f"\n**Ход длился:** {duration_words(summary['seconds'])}"
                    f" — от начала обрезки истории до готовой реплики\n")
     if turn.get("added"):
-        out.append("\n### Что приложение дописало в запрос по ходу дела\n")
+        out.append("\n" + TURN_SECTIONS["added"] + "\n")
         out.append("Полных текстов здесь нет нарочно: найденное стоит в хронологии "
                    "выше, вместе с формулировкой запроса и своим весом.\n")
         for index, message in enumerate(turn["added"], 1):
             out.append(message_line(index, message))
     if post.get("sketch"):
-        out.append("\n### Сказано раньше — прежняя версия реплики\n")
+        out.append("\n" + TURN_SECTIONS["sketch"] + "\n")
         out.append(quoted(post["sketch"]))
-    out.append("\n### Реплика\n")
+    out.append("\n" + TURN_SECTIONS["answer"] + "\n")
     out.append(quoted(post.get("content")))
     return "\n".join(out) + "\n"
 

@@ -1018,6 +1018,29 @@ BUGS = {
          "            return Number(contentHeight) - Number(padding || 0) > line * CLAMPED_TEXT_LINES + 2;",
          "            return Number(contentHeight) > line * CLAMPED_TEXT_LINES + 2;"),
     ],
+    "разделы отчёта снова слились в простыню без имён": [
+        ("aitheatre/page.py",
+         """            return `<section class="prompt-block">`
+                + `<div class="prompt-block-title">${escapeHtml(title)}</div>`
+                + (purpose ? `<div class="prompt-block-purpose">${escapeHtml(purpose)}</div>` : '')
+                + inner + `</section>`;""",
+         "            return inner;"),
+    ],
+    "назначение раздела снова пропало": [
+        ("aitheatre/page.py",
+         "                + (purpose ? `<div class=\"prompt-block-purpose\">${escapeHtml(purpose)}</div>` : '')",
+         "                + ''"),
+    ],
+    "рамки разделов снова остались белыми на тёмной сцене": [
+        ("aitheatre/page.py",
+         "        body.dark .prompt-block { border-color: #2c2c2c; }",
+         "        body.dark .prompt-block { border-color: #ffffff; }"),
+    ],
+    "файл и страница снова называют разделы по-разному": [
+        ("aitheatre/show.py",
+         '    "history": "### 🧭 Хронология хода: что происходило по порядку",',
+         '    "history": "### Хронология",'),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,

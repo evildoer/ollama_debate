@@ -152,6 +152,14 @@ HTML_TEMPLATE = """
         .prompt-note code { background: #f3efe6; padding: 0 3px; border-radius: 3px; }
         .prompt-removed { font-size: 13px; line-height: 1.5; color: #999999; }
         .prompt-removed b { color: #777777; }
+        /* Разделы отчёта хода: у каждого своё имя и своя рамка. Без рамок четыре
+           разные вещи («кто», «сколько было места», «что происходило», «что
+           уехало в запрос») шли сплошным полотном одинаковых строк, и где
+           кончается одно и начинается другое — видно не было (см. turnBlock) */
+        .prompt-block { border: 1px solid #e6e6e6; border-radius: 6px; padding: 10px 12px 12px; margin: 0 0 12px; }
+        .prompt-block:last-child { margin-bottom: 0; }
+        .prompt-block-title { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: #7d92a4; margin-bottom: 6px; }
+        .prompt-block-purpose { font-size: 12px; line-height: 1.5; color: #9a9a9a; margin: 0 0 8px; }
         body.dark .post-prompt { border-left-color: #35485c; }
         body.dark .post-prompt summary { color: #8399ad; }
         body.dark .prompt-line { color: #8a8a8a; }
@@ -166,6 +174,9 @@ HTML_TEMPLATE = """
         body.dark .prompt-note code { background: #2a2620; }
         body.dark .prompt-removed { color: #7a7a7a; }
         body.dark .prompt-removed b { color: #9a9a9a; }
+        body.dark .prompt-block { border-color: #2c2c2c; }
+        body.dark .prompt-block-title { color: #8399ad; }
+        body.dark .prompt-block-purpose { color: #7a7a7a; }
         /* Формулы: LaTeX от сервера, MathML от браузера */
         .post-text .math { font-size: 1.05em; }
         .post-text .math-block { display: block; margin: 14px 0; text-align: center; }
@@ -1778,27 +1789,42 @@ HTML_TEMPLATE = """
                 + ` · ${tokensText(r.tokens)} токенов · ${escapeHtml(r.preview || '')}</div>`).join('');
         }
 
+        // Раздел отчёта хода: имя, назначение словами и рамка вокруг. Имён у разделов
+        // раньше не было вовсе, и строка «Окно говорящего» выглядела такой же строкой,
+        // как хронология, — всё сливалось в одну простыню. Назначение пишется тут же:
+        // в разделе с числами без него непонятно, что именно эти числа значат
+        // (см. TURN_HINT)
+        function turnBlock(title, purpose, inner) {
+            return `<section class="prompt-block">`
+                + `<div class="prompt-block-title">${escapeHtml(title)}</div>`
+                + (purpose ? `<div class="prompt-block-purpose">${escapeHtml(purpose)}</div>` : '')
+                + inner + `</section>`;
+        }
+
         function turnBodyHtml(data) {
             const s = data.summary || {};
             const b = data.budget || {};
             const who = data.who || {};
             const parts = [];
-            parts.push(`<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> · `
+            parts.push(turnBlock('👤 Кто говорит и когда',
+                'Дальше всё, что случилось за этот ход: чьё было место под историю, '
+                + 'что происходило по порядку и чем ход кончился.',
+                `<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> · `
                 + `${escapeHtml(who.model || '')} · Акт ${who.round} · ${escapeHtml(who.time || '')}`
-                + (s.seconds ? ` · ход длился ${durationText(s.seconds)}` : '') + `</div>`);
+                + (s.seconds ? ` · ход длился ${durationText(s.seconds)}` : '') + `</div>`));
             // Четыре числа окна — не украшение, а ответ на «куда делись токены»
             // Ноль в запасе — не «ноль токенов на ответ», а «ответ не ограничиваем»:
             // именно это значит CLOUD_MAX_TOKENS = 0, и писать иначе — врать
             const answerSeat = Number(b.reserve || 0) > 0
                 ? `${tokensText(b.reserve)} оставлено на ответ модели`
                 : 'на ответ ничего не зарезервировано (CLOUD_MAX_TOKENS = 0 — ответ не ограничиваем)';
-            parts.push(`<div class="prompt-line"><b>Окно говорящего:</b> ${WINDOW_WORDS[b.kind] || 'окно модели'} ${tokensText(b.window)} токенов целиком`
+            const placeHtml = [`<div class="prompt-line"><b>Окно говорящего:</b> ${WINDOW_WORDS[b.kind] || 'окно модели'} ${tokensText(b.window)} токенов целиком`
                 + ` — ${answerSeat}, ${tokensText(b.safety)} — технический запас,`
-                + ` на историю оставалось ${b.available === null ? 'без предела' : tokensText(b.available)}</div>`);
+                + ` на историю оставалось ${b.available === null ? 'без предела' : tokensText(b.available)}</div>`];
             // У каждого числа — своё имя: раньше тут стояло «уехало 3 сообщ. из 1»,
             // где первое считало все сообщения запроса, а второе — только сцену
             const tasks = Math.max(0, (s.messages || 0) - 1 - (b.messages_after || 0));
-            parts.push(`<div class="prompt-line"><b>Запрос к модели состоял из:</b> ${s.messages} сообщ. `
+            placeHtml.push(`<div class="prompt-line"><b>Запрос к модели состоял из:</b> ${s.messages} сообщ. `
                 + `(${tokensText(s.tokens)} токенов) — системный промпт ${tokensText(b.system_tokens)} токенов, `
                 + `из сцены ${b.messages_after} сообщ. (${tokensText(b.kept_tokens)} токенов)`
                 + (tasks ? `, и ещё ${tasks} — задания хода` : '')
@@ -1806,54 +1832,84 @@ HTML_TEMPLATE = """
                     ? `. Обрезка выбросила ${s.removed_messages} сообщ. (${tokensText(s.removed_tokens)} токенов)`
                     : '. Обрезка ничего не тронула: сцена влезла в окно целиком')
                 + `</div>`);
+            // Окно и то, что в него вошло, — один раздел: это два взгляда на одно место
+            parts.push(turnBlock('📐 Место под историю: чьё окно и как оно заполнилось',
+                'Окно — сколько токенов вообще было у говорящего; запас на ответ — '
+                + 'сколько из него оставлено модели на её реплику; остаток — сколько '
+                + 'после этого досталось сцене. Ниже — из чего состоял первый запрос '
+                + 'и что из сцены пришлось выкинуть, чтобы он влез.',
+                placeHtml.join('')));
             // Одна хронология на всё: запросы, размышления и поиски идут в том
             // порядке, как случились, — со временем и весом. Отдельных разделов
             // под поиск и размышления нет нарочно: те же данные дважды — это
             // не полнота, а каша
             const steps = data.steps || [];
-            parts.push('<div class="prompt-line"><b>Хронология хода</b> — события в том порядке, как шли:</div>');
+            const stepsHtml = [];
             if (!steps.length) {
-                parts.push('<div class="prompt-step">шагов не записано: ход не оставил следов</div>');
+                stepsHtml.push('<div class="prompt-step">шагов не записано: ход не оставил следов</div>');
             }
             steps.forEach(step => {
                 const clock = stepClock(step);
                 if (step.kind === 'ask') {
-                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span><b>запрос ${step.n}</b> — ${turnAskText(step)}</div>`);
+                    stepsHtml.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span><b>запрос ${step.n}</b> — ${turnAskText(step)}</div>`);
                 } else if (step.kind === 'search') {
-                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span><b>поиск ${step.n}</b> (лимит ${step.limit}): `
+                    stepsHtml.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span><b>поиск ${step.n}</b> (лимит ${step.limit}): `
                         + `«${escapeHtml(step.query || '')}» — принесено ${tokensText(step.tokens)} токенов</div>`
                         + `<pre class="prompt-text">${escapeHtml(step.results || '')}</pre>`);
                 } else if (step.kind === 'thought') {
-                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>💭 <b>размышления</b> (к запросу ${step.n}) — `
+                    stepsHtml.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>💭 <b>размышления</b> (к запросу ${step.n}) — `
                         + `${tokensText(step.tokens)} токенов, в реплику не попали</div>`
                         + `<pre class="prompt-text">${escapeHtml(step.text || '')}</pre>`);
                 } else {
                     const marks = {refused: '⛔', silence: '⚠️', force: '🔍', money: '💰', note: '·'};
                     const mark = marks[step.kind] || '🔍';
-                    parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>${mark} ${escapeHtml(step.text || '')}</div>`);
+                    stepsHtml.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>${mark} ${escapeHtml(step.text || '')}</div>`);
                 }
             });
-            parts.push(thinkingBlockHtml('🌱 ' + SKETCH_HINT, data.sketch));
+            parts.push(turnBlock('🧭 Хронология хода: что происходило по порядку',
+                'Запросы к модели, поиски, размышления и заминки — в том порядке, '
+                + 'как шли, со временем и весом. Других мест, где ход перечислен '
+                + 'по порядку, в отчёте нет.',
+                stepsHtml.join('')));
+            const sketch = thinkingBlockHtml(SKETCH_HINT, data.sketch);
+            if (sketch) {
+                parts.push(turnBlock('🌱 Сказано раньше: прежняя версия реплики',
+                    'Модель сказала это до того, как попросила поиск, и потом сказала '
+                    + 'заново. Оплачены обе версии — поэтому обе и остаются.', sketch));
+            }
             if (s.removed_messages) {
-                parts.push('<div class="prompt-line">✂️ что выбросила обрезка — самое раннее:</div>'
-                    + promptRemovedHtml(data.removed));
+                parts.push(turnBlock('✂️ Что выбросила обрезка',
+                    'Самое раннее из сцены: этим пожертвовали, чтобы ход влез в окно '
+                    + 'говорящего. В самом запросе этих реплик уже нет.',
+                    promptRemovedHtml(data.removed)));
             }
             if ((data.added || []).length) {
                 // Не «ход дописал», а кто и что: дописывает та самая пара
                 // «прошу поиск + найденное», и делает это приложение, а не модель.
-                // Полных текстов здесь нет нарочно — они в хронологии выше
-                parts.push(`<div class="prompt-line">🔍 после первого запроса приложение дописало в этот ход <b>${data.added.length}</b> `
-                    + `сообщ. (${tokensText(s.extra_tokens)} токенов) — по паре на каждый поиск, плюс напоминания. `
-                    + `Текстов здесь нет нарочно: найденное стоит в хронологии выше, со своим весом</div>`);
-                parts.push(promptMessagesHtml(data.added));
+                // Полные тексты здесь есть, и это не ошибка: найденное приходит
+                // модели именно таким сообщением (кроме текста у него ничего нет),
+                // и в этом разделе видно, сколько оно весило в запросе. В хронологии
+                // выше тот же поиск назван своими словами — с запросом и весом
+                parts.push(turnBlock('✍️ Что приложение дописало в запрос',
+                    'После первого запроса приложение дописало модели '
+                    + `${data.added.length} сообщ. (${tokensText(s.extra_tokens)} токенов) — по паре на каждый поиск, плюс напоминания. `
+                    + 'Это те же поиски, что в хронологии выше, только со стороны протокола: '
+                    + 'просьба вызвать инструмент и ответ на неё.',
+                    promptMessagesHtml(data.added)));
             } else if (s.extra_messages) {
-                parts.push(`<div class="prompt-line">🔍 после первого запроса приложение дописало в этот ход ещё <b>${s.extra_messages}</b> `
-                    + `сообщ. (${tokensText(s.extra_tokens)} токенов) — все они видны в хронологии со своим весом</div>`);
+                parts.push(turnBlock('✍️ Что приложение дописало в запрос',
+                    `После первого запроса приложение дописало модели ещё ${s.extra_messages} сообщ. `
+                    + `(${tokensText(s.extra_tokens)} токенов) — все они названы в хронологии выше, со своим весом.`,
+                    ''));
             }
-            parts.push('<div class="prompt-line"><b>Что вошло в запрос к модели целиком</b> — в том порядке, как это читала модель, и ровно так, как ход начинался (дальше приложение дописало найденное — см. хронологию):</div>');
-            parts.push(promptMessagesHtml(data.messages));
-            parts.push('<div class="prompt-line"><b>Реплика, которой ход кончился:</b></div>'
-                + `<pre class="prompt-text">${escapeHtml(data.answer || '')}</pre>`);
+            parts.push(turnBlock('📨 Первый запрос к модели целиком',
+                'Тем самым порядком, как читала модель: системный промпт, сцена и '
+                + 'задания хода. Это только начало хода — найденное приложение '
+                + 'дописало уже после него (см. раздел выше).',
+                promptMessagesHtml(data.messages)));
+            parts.push(turnBlock('💬 Реплика, которой ход кончился',
+                'То же, что в ленте этой репликой ниже: здесь — чтобы ход читался до конца, не отрываясь.',
+                `<pre class="prompt-text">${escapeHtml(data.answer || '')}</pre>`));
             return parts.join('');
         }
 
