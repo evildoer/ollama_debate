@@ -4192,6 +4192,80 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(len(queries), 10)
         self.assertEqual(content, "Сыктывкар — столица Коми.")
 
+    def _search_call(self, query: str = "Сыктывкар") -> str:
+        """Ответ шлюза: модель не говорит ни слова, а просит поиск."""
+        return json.dumps({"choices": [{"message": {"content": "", "tool_calls": [
+            {"id": "call-1", "type": "function",
+             "function": {"name": "search_web",
+                          "arguments": json.dumps({"query": query})}}]}}]})
+
+    def test_a_model_that_searched_and_said_nothing_is_asked_for_the_reply(self):
+        """Модель искала и промолчала — её просят сказать реплику, а не искать.
+
+        Так вёл себя Дмитрий на qwen3.8-flash: поиск делал охотно, а слов
+        не сказал ни одного, и ход кончался «Модель не дала ответ». Просить
+        у него поиск не за что — он его только что сделал, зато найденное
+        у него уже есть, и не хватает ровно одного: реплики словами.
+        И от MIN_SEARCHES это не зависит: здесь он 0, то есть искать
+        не заставляем вовсе — а про молчание после поиска всё равно говорим.
+        """
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        cloud_setting(self, "MIN_SEARCHES", 0)
+        cloud_setting(self, "MAX_SEARCH_ATTEMPTS", 1)
+        self.gateway.texts = [
+            self._search_call(),
+            json.dumps({"choices": [{"message": {"content": ""}}]}),
+            json.dumps({"choices": [{"message": {"content": "Сыктывкар — столица Коми."}}]}),
+        ]
+
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")):
+            content, count, _queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Что нового?"}],
+                participant_name="Дмитрий")
+
+        self.assertEqual(count, 1, "поиск был ровно один")
+        self.assertEqual(content, "Сыктывкар — столица Коми.")
+        self.assertEqual(len(self.gateway.requests), 3,
+                         "промолчавшую модель обязаны спросить ещё раз")
+        again = self.gateway.requests[2]["body"]
+        self.assertIn("Поиск уже выполнен", again["messages"][-1]["content"],
+                      "в просьбе надо назвать, что искать больше нечего")
+        self.assertNotIn("tool_choice", again,
+                         "требовать вызов инструмента тут не за что: поиск уже был")
+
+    def test_the_reply_is_asked_for_only_as_many_times_as_allowed(self):
+        """Поправок молчащей модели — ровно столько, сколько в настройке.
+
+        Каждая поправка — это ещё один оплаченный запрос к шлюзу, поэтому
+        бесконечно просить нельзя. После разрешённых попыток остаётся та же
+        последняя попытка без инструмента, что и была, — и молчание
+        называется молчанием, а не выдаётся за реплику.
+        """
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        cloud_setting(self, "MIN_SEARCHES", 0)
+        cloud_setting(self, "MAX_SEARCH_ATTEMPTS", 2)
+        silent = json.dumps({"choices": [{"message": {"content": ""}}]})
+        self.gateway.texts = [self._search_call(), silent, silent, silent, silent]
+
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")):
+            content, count, _queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Что нового?"}],
+                participant_name="Дмитрий")
+
+        # Считаем не упоминания в истории (она растёт), а сами просьбы:
+        # просьба — это последнее сообщение того запроса, которым её отправили
+        asked = sum(1 for request in self.gateway.requests
+                    if "Поиск уже выполнен"
+                    in str(request["body"]["messages"][-1].get("content") or ""))
+        self.assertEqual(count, 1)
+        self.assertEqual(asked, 2, "поправок должно быть ровно по настройке")
+        self.assertEqual(len(self.gateway.requests), 5,
+                         "поиск, две поправки и последняя попытка — и ни одного лишнего круга")
+        self.assertNotIn("tools", self.gateway.requests[-1]["body"],
+                         "последняя попытка идёт без инструмента")
+        self.assertTrue(content.startswith("[Модель не дала ответ]"),
+                        f"молчание надо назвать, а не выдать за реплику: {content!r}")
+
     def test_a_search_buys_the_turn_more_time(self):
         """Состоявшийся поиск добавляет ходу времени — но у срока есть предел.
 

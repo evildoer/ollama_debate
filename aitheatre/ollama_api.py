@@ -1049,7 +1049,8 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
     # сам (см. settings, группа «ПОИСК В ИНТЕРНЕТЕ»)
     min_searches, max_searches, max_results_setting, max_forced_attempts = search_limits()
     # Кругов хода должно хватать на всё, что разрешено настройками: требуемые
-    # поиски, все разрешённые, попытки «поищи, пожалуйста» и финальный ответ.
+    # поиски, все разрешённые, попытки поправить молчащую модель («поищи,
+    # пожалуйста» и «скажи уже саму реплику») и финальный ответ.
     # Иначе потолок поисков молча упирался бы в потолок кругов: режиссёр поднял
     # MAX_SEARCHES, а ход кончился бы на том же месте, и почему — не понять
     max_iterations = max(8, min_searches + max_searches + max_forced_attempts + 2)
@@ -1147,6 +1148,33 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             return content, search_count, search_queries
         
         if not tool_calls:
+            # Модель искала и промолчала: найденное у неё уже есть, не хватает
+            # только слов. Раньше этот случай доставался последней попытке в конце
+            # хода — общему вопросу на все молчания сразу, да ещё и без инструмента
+            # в руках. А это своё молчание: искать не надо, надо сказать. Поэтому
+            # просим именно реплику и просим в кругу хода, пока инструмент при ней
+            # (сколько раз — решает MAX_SEARCH_ATTEMPTS, см. settings).
+            # От MIN_SEARCHES это не зависит намеренно: он про «заставить искать»,
+            # а тут искать уже нечего — модель только что это и делала
+            if ((content or "").strip() == "" and search_count > 0
+                    and forced_attempts < max_forced_attempts):
+                forced_attempts += 1
+                print(f"  🔍 {participant_name}: поиск был ({search_count}), а слов "
+                      f"нет — прошу саму реплику "
+                      f"(попытка {forced_attempts}/{max_forced_attempts})...")
+                journal_note(report, f"поиск был ({search_count}), а слов нет — прошу "
+                                     f"саму реплику (попытка {forced_attempts} "
+                                     f"из {max_forced_attempts})", kind="force")
+                # Пустую реплику ассистента в историю не кладём: у вендора такое
+                # сообщение может считаться негодным, а сказать в нём было нечего —
+                # история уже получила и вызов модели, и найденное по нему
+                messages.append({
+                    "role": "user",
+                    "content": "Поиск уже выполнен, найденное — выше. Скажи теперь "
+                               "саму реплику обычным текстом, на русском языке.",
+                    "name": "system"
+                })
+                continue
             break
         
         # Вызов, пришедший текстом, отправляем обратно текстом же: протокол

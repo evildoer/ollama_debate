@@ -275,6 +275,27 @@ BUGS = {
          "        if not tool_calls and is_answer(content):",
          "        if not tool_calls and content and content.strip():"),
     ],
+    # Из жизни: модель искала охотно, а слов не сказала ни одного — и ход
+    # кончался «Модель не дала ответ», хотя искать было уже нечего
+    "модель снова молчит после поиска без просьбы сказать реплику": [
+        ("aitheatre/ollama_api.py",
+         "            if ((content or \"\").strip() == \"\" and search_count > 0\n"
+         "                    and forced_attempts < max_forced_attempts):",
+         "            if False:"),
+    ],
+    "просьба сказать реплику снова привязана к MIN_SEARCHES": [
+        ("aitheatre/ollama_api.py",
+         "            if ((content or \"\").strip() == \"\" and search_count > 0\n"
+         "                    and forced_attempts < max_forced_attempts):",
+         "            if ((content or \"\").strip() == \"\" and search_count > 0\n"
+         "                    and search_count < min_searches\n"
+         "                    and forced_attempts < max_forced_attempts):"),
+    ],
+    "молчащую модель снова просят без счёта попыток": [
+        ("aitheatre/ollama_api.py",
+         "                    and forced_attempts < max_forced_attempts):",
+         "                    and forced_attempts >= 0):"),
+    ],
     "мысли хода снова теряются вместе с черновиком": [
         ("aitheatre/show.py",
          '            thinking=draft.thinking_full() if draft else "",',
