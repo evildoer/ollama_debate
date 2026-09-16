@@ -228,6 +228,17 @@ HTML_TEMPLATE = """
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.95); cursor: pointer; }
         .modal-content { margin: auto; display: block; max-width: 90%; max-height: 90%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 1px solid #000000; filter: grayscale(100%); }
         .modal-close { position: absolute; top: 20px; right: 40px; color: white; font-size: 40px; font-weight: bold; cursor: pointer; }
+        /* Меню эмодзи-аватара: то же затемнение, что у полного портрета,
+           но внутри — набор значков, а не одна картинка */
+        .emoji-menu { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #ffffff; border: 1px solid #000000; padding: 20px; max-width: 90vw; max-height: 80vh; overflow: auto; cursor: default; }
+        .emoji-menu-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; }
+        .emoji-menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 8px; }
+        .emoji-choice { display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; font-size: 30px; border: 1px solid #000000; cursor: pointer; background: #ffffff; }
+        .emoji-choice:hover { border-width: 2px; }
+        .emoji-choice.current { background: #e8e8e8; border-width: 2px; }
+        body.dark .emoji-menu { background: #101010; border-color: #3a3a3a; color: #e8e8e8; }
+        body.dark .emoji-choice { background: #141414; border-color: #3a3a3a; }
+        body.dark .emoji-choice.current { background: #242424; }
         .footer { text-align: center; color: #000000; padding: 30px 0; font-size: 14px; border-top: 1px solid #000000; margin-top: 40px; font-style: italic; letter-spacing: 1px; }
         /* Нулевой раздел (готовность): метка о проблемах видна и в свёрнутом виде */
         .ready-badge { margin-left: 8px; font-size: 11px; font-weight: bold; letter-spacing: 1px; color: #b00020; }
@@ -491,6 +502,12 @@ HTML_TEMPLATE = """
         <span class="modal-close">&times;</span>
         <img class="modal-content" id="avatarModalImg">
     </div>
+    <div id="emojiModal" class="modal" onclick="closeEmojiPicker()">
+        <div class="emoji-menu" onclick="event.stopPropagation()">
+            <div class="emoji-menu-title" id="emojiMenuTitle"></div>
+            <div class="emoji-menu-grid" id="emojiMenuGrid"></div>
+        </div>
+    </div>
     <!-- Клиент Socket.IO лежит рядом с проектом: свежие посты приходят сразу,
          а опрос /api/status остаётся страховкой -->
     <script src="/static/socket.io.min.js"></script>
@@ -505,6 +522,9 @@ HTML_TEMPLATE = """
         // Состав спектакля. У сервера он один и тот же и до старта, и на сцене,
         // поэтому страница не держит вторую (свою) копию настроек
         let cast = [];
+        // Наборы эмодзи-аватаров приходят с сервера (см. show.set_participant_emoji):
+        // меню должно предлагать только то, что действительно можно поставить
+        let EMOJIS = {male: [], female: [], neutral: []};
         let models = [];               // скачанные модели Ollama для выбора в составе
         let cloudModels = [];          // модели облачного шлюза, с префиксом «cloud:»
         let cloudHint = '';            // почему облачных моделей нет: нет ключа или шлюз молчит
@@ -553,6 +573,7 @@ HTML_TEMPLATE = """
                     // Список характеров держит сервер: тот же набор он разыгрывает
                     // случайно при подъёме занавеса
                     if (data.characters) CHARACTERS = data.characters;
+                    if (data.emojis) EMOJIS = data.emojis;
                     renderCastEditor();
                     renderModelsWarning(data.models_status);
                     renderVramWarning(data.vram_status);
@@ -1267,8 +1288,93 @@ HTML_TEMPLATE = """
             }).catch(err => { console.error('Ошибка поиска аватара:', err); preview.innerHTML = '❌'; setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); btn.disabled = false; btn.textContent = '🔍 Найти аватар'; });
         }
         
-        function openAvatarModal(idx) { const u = cast[idx] && cast[idx].avatar_url; if (u) { document.getElementById('avatarModalImg').src = u; document.getElementById('avatarModal').style.display = 'block'; } }
+        // Клик по аватару в составе: у картинки — полный размер, у эмодзи —
+        // набор значков. Это и есть действие по умолчанию для эмодзи-аватара:
+        // смешное лицо хочется поменять именно там, где на него смотришь
+        function openAvatarModal(idx) {
+            const u = cast[idx] && cast[idx].avatar_url;
+            if (u) {
+                document.getElementById('avatarModalImg').src = u;
+                document.getElementById('avatarModal').style.display = 'block';
+                return;
+            }
+            openEmojiPicker({index: idx});
+        }
         function closeAvatarModal() { document.getElementById('avatarModal').style.display = 'none'; }
+
+        // ── Меню эмодзи-аватара ──────────────────────────────────────────
+        // Клик по эмодзи (в ленте или в составе) открывает набор значков.
+        // В составе выбор только правит форму — применит его кнопка «Применить
+        // состав». В ленте выбор уходит на сервер сразу: там идёт спектакль,
+        // и «поменял, но не применил» значило бы, что лицо не сменилось.
+        let emojiSpot = null;
+
+        function emojiChoices(gender) {
+            const own = gender === 'female' ? EMOJIS.female : EMOJIS.male;
+            return [...new Set([...(own || []), ...(EMOJIS.neutral || [])])];
+        }
+
+        function openEmojiPicker(spot) {
+            const person = typeof spot.index === 'number'
+                ? cast[spot.index]
+                : cast.find(p => p.display_name === spot.name);
+            const name = (person && person.display_name) || spot.name || '';
+            emojiSpot = person ? {index: cast.indexOf(person), name: name} : {name: name};
+            const choices = emojiChoices(person && person.gender);
+            const current = (person && person.avatar_emoji) || '';
+            document.getElementById('emojiMenuTitle').textContent =
+                choices.length ? `Аватар-эмодзи: ${name}` : `Набор эмодзи пуст — ${name}`;
+            document.getElementById('emojiMenuGrid').innerHTML = choices.map(one =>
+                `<div class="emoji-choice${one === current ? ' current' : ''}" data-emoji="${one}" title="${one}">${one}</div>`
+            ).join('');
+            document.getElementById('emojiModal').style.display = 'block';
+        }
+
+        function closeEmojiPicker() {
+            emojiSpot = null;
+            document.getElementById('emojiModal').style.display = 'none';
+        }
+
+        function chooseEmoji(emoji) {
+            const spot = emojiSpot;
+            if (!spot) return;
+            const person = spot.name ? cast.find(p => p.display_name === spot.name) : null;
+            if (person) person.avatar_emoji = emoji;
+            // В составе — только форма: спектакль поменяет состав целиком,
+            // и сохранится всё разом
+            if (typeof spot.index === 'number' && !runningShow()) {
+                closeEmojiPicker();
+                renderCastEditor();
+                return;
+            }
+            // Из ленты (и по ходу спектакля) — сразу на сервер
+            fetch('/api/participant/emoji', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: spot.name, emoji: emoji})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { alert('⚠️ ' + (data.error || 'не удалось сменить аватар')); return; }
+                if (data.participants) cast = data.participants;
+                if (typeof spot.index === 'number') renderCastEditor();
+                else refreshAvatars(spot.name, emoji);
+                updateSidebarParticipants();
+            })
+            .catch(err => alert('⚠️ ' + err.message))
+            .finally(() => closeEmojiPicker());
+        }
+
+        function runningShow() {
+            return debateRunning && !showFinished;
+        }
+
+        // Смена лица у всех реплик участника: реплики в ленте перерисовывать
+        // незачем — они уже нарисованы, а лицо у них одно и то же
+        function refreshAvatars(name, emoji) {
+            document.querySelectorAll('[data-emoji-for]').forEach(spot => {
+                if (spot.dataset.emojiFor === name) spot.textContent = emoji;
+            });
+        }
         
         // Тема в шапке: пустой рамки с прочерком быть не должно — пока темы нет,
         // блока просто не видно. Тема, применённая раньше, остаётся на месте,
@@ -1321,8 +1427,15 @@ HTML_TEMPLATE = """
                 debateRunning = true;
                 showFinished = false;
                 finishRequested = false;
-                lastPostCount = 0;
-                document.getElementById('posts').innerHTML = '';
+                if (data.resumed) {
+                    // Спектакль доигрывается: прежние реплики уже в ленте, и стирать
+                    // их значило бы начать с чистого листа после согласия продолжить
+                    // (см. show.start_show)
+                    lastPostCount = data.total_posts || 0;
+                } else {
+                    lastPostCount = 0;
+                    document.getElementById('posts').innerHTML = '';
+                }
                 // Тему в шапке берём из ответа сервера: он знает, с какой играет
                 setTopicDisplay(data.topic || topic);
                 // Спектакль пошёл: убираем баннер с прошлой неудачной попытки
@@ -1631,9 +1744,14 @@ HTML_TEMPLATE = """
         // реплика выглядела бы другим человеком
         function postAvatarHtml(post) {
             const emoji = post.avatar_emoji || '📣';
+            // Лицо — свойство участника, а не реплики (см. show.post_view), поэтому
+            // и менять его можно там, где оно видно: клик по эмодзи открывает набор
+            // эмодзи-аватаров. Картинка по клику, как и раньше, разворачивается целиком.
+            // Имя уезжает в data-атрибут, а не в onclick: имена — текст режиссёра,
+            // и кавычка в имени ломала бы обработчик
             return post.avatar_url
                 ? `<img src="${post.avatar_url}" onclick="showAvatarFull('${post.avatar_url}')">`
-                : `<div class="emoji">${emoji}</div>`;
+                : `<div class="emoji" data-emoji-for="${escapeHtml(post.display_name)}" title="Клик — сменить эмодзи-аватар">${emoji}</div>`;
         }
 
         function postHeaderHtml(post) {
@@ -2658,6 +2776,18 @@ HTML_TEMPLATE = """
             if (el) el.parentElement.remove();
         }
         
+        // Эмодзи-аватар: клик по значку в ленте открывает набор (сам значок
+        // появляется и пропадает вместе с репликами, поэтому слушаем ленту,
+        // а не каждый значок по отдельности)
+        document.getElementById('posts').addEventListener('click', function(ev) {
+            const spot = ev.target.closest('[data-emoji-for]');
+            if (spot) openEmojiPicker({name: spot.dataset.emojiFor});
+        });
+        document.getElementById('emojiMenuGrid').addEventListener('click', function(ev) {
+            const one = ev.target.closest('.emoji-choice');
+            if (one) chooseEmoji(one.dataset.emoji);
+        });
+
         document.getElementById('topicInput').addEventListener('keydown', function(e) { if (e.ctrlKey && e.key === 'Enter') startDebate(); });
         document.getElementById('moderatorInput').addEventListener('keydown', function(e) { if (e.ctrlKey && e.key === 'Enter') sendModeratorMessage(); });
         const now = new Date();

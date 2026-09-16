@@ -1070,8 +1070,39 @@ BUGS = {
     ],
     "чужой формат записи снова читается как свой": [
         ("aitheatre/show.py",
-         "    if version != DUMP_FORMAT:\n        return None\n",
+         "    if not tolerant and version not in DUMP_FORMATS_READABLE:\n"
+         "        return None\n",
          ""),
+    ],
+    "под-версия записи снова стала нечитаемой": [
+        ("aitheatre/show.py",
+         "DUMP_FORMATS_READABLE = (4, 3)",
+         "DUMP_FORMATS_READABLE = (DUMP_FORMAT,)"),
+    ],
+    "о чужом формате снова не спрашивают, а догадываются": [
+        ("aitheatre/show.py",
+         '        mode = "read" if readable else ask_about_dump(version)',
+         '        mode = "read"'),
+    ],
+    "чужую запись снова читают наполовину — без реплик": [
+        ("aitheatre/show.py",
+         "                                   _last_quoted(body) or _section_text(body),",
+         "                                   _section_text(body),"),
+    ],
+    "продолжение спектакля снова стирает прежние реплики": [
+        ("aitheatre/show.py",
+         "        if not resume:\n            self.posts = []",
+         "        if True:\n            self.posts = []"),
+    ],
+    "эмодзи снова ставится без проверки набора": [
+        ("aitheatre/show.py",
+         '    if emoji not in settings.AVATAR_EMOJIS:\n        return "Такого эмодзи в наборе нет"\n',
+         ""),
+    ],
+    "лицо реплики снова берут из поста, а не из состава": [
+        ("aitheatre/show.py",
+         '    url, emoji = participant_face(post.get("display_name"))',
+         '    url, emoji = "", ""'),
     ],
     "«Новый спектакль» снова оставляет прежний ДАМП на диске": [
         ("aitheatre/show.py",
@@ -1105,8 +1136,25 @@ BUGS = {
     ],
     "портрет участника снова не попадает в запись": [
         ("aitheatre/show.py",
-         "    out.append(avatar_line((turn.get(\"who\") or {}).get(\"avatar\")))",
-         ""),
+         '            str(p.get("avatar_url") or "").strip() or "—",',
+         '            "—",'),
+    ],
+    "клик по эмодзи-аватару в ленте снова не работает": [
+        ("aitheatre/page.py",
+         """
+                : `<div class="emoji" data-emoji-for="${escapeHtml(post.display_name)}" title="Клик — сменить эмодзи-аватар">${emoji}</div>`;""",
+         """
+                : `<div class="emoji">${emoji}</div>`;"""),
+    ],
+    "меню эмодзи снова предлагает один набор всем": [
+        ("aitheatre/page.py",
+         "            const own = gender === 'female' ? EMOJIS.female : EMOJIS.male;",
+         "            const own = EMOJIS.male;"),
+    ],
+    "смена эмодзи снова остаётся только на странице": [
+        ("aitheatre/show.py",
+         "            session.sync_cast_media()\n            save_theatre_settings()\n            return \"\"",
+         "            return \"\""),
     ],
     "портрет, за которым нет файла, снова берётся на слово": [
         ("aitheatre/show.py",

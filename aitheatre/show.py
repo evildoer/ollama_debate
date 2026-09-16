@@ -13,6 +13,7 @@ import copy
 import json
 import random
 import re
+import sys
 import threading
 import time
 import traceback
@@ -406,9 +407,20 @@ SKETCH_HINT = "Так бывает, когда модель сначала от�
 
 # Формат записи ДАМПа. Читается первым делом при чтении файла: по нему новый
 # процесс решает, можно ли вернуть прежний спектакль (см. parse_dump). Меняется
-# вместе с тем, как запись устроена, — и тогда прежний ДАМП честно называется
-# нечитаемым, а не читается наполовину
-DUMP_FORMAT = 3
+# вместе с тем, как запись устроена.
+#
+# Под-версии: пока меняется только то, ЧТО в записи лежит (лицо участника
+# переехало из реплики в состав), прошлый номер остаётся читаемым и живёт
+# в списке ниже. Как только меняется сама запись — разделы, шапка, порядок, —
+# номер уходит из списка, и тогда о расхождении спрашивают вслух
+# (см. ask_about_dump): прочитать чужую запись можно, но обещать этого нельзя
+DUMP_FORMAT = 4
+DUMP_FORMATS_READABLE = (4, 3)
+
+# Что отвечают на тот вопрос: сцена пустая, прежний спектакль только на чтение
+# или он же — с продолжением (см. load_play_from_dump)
+DUMP_CHOICES = (("ч", "read"), ("читать", "read"), ("r", "read"),
+                ("п", "continue"), ("продолжить", "continue"), ("c", "continue"))
 
 
 def turn_summary_line(summary: dict) -> str:
@@ -490,16 +502,55 @@ def who_line(turn: dict) -> str:
             f"{who.get('model') or ''} · Акт {who.get('round')} · {who.get('time') or ''}\n")
 
 
-def avatar_line(avatar_url) -> str:
-    """Где лежит портрет говорившего — строкой, только если портрет есть.
+def cast_line() -> str:
+    """Состав одной строкой — лицо, роль, модель — для шапки ДАМПа.
 
-    У поста в ленте вместо эмодзи может стоять картинка, и в записи она названа
-    своим адресом: по записи реплика собирается назад, и после возврата
-    из ДАМПа лицо должно остаться тем же. Эмодзи тут не нужен: он и так стоит
-    рядом с именем в шапке записи (см. cast_field).
+    Лицо участника — свойство места, а не реплики: портрет и эмодзи правятся
+    в пульте, и тогда лицо меняется у всех его реплик, включая уже сказанные
+    (см. post_view). Поэтому лицо лежит в записи одно на спектакль, а не
+    строкой «Аватар» в каждой реплике: в файле — то же, что на странице.
+
+    Места разделены « ‖ », поля внутри места — « · »: одним «·» не обойтись,
+    он уже стоит между полями (см. parse_cast_line).
     """
-    path = str(avatar_url or "").strip()
-    return f"**Аватар:** {path}\n" if path else ""
+    places = []
+    for p in session.runtime_participants:
+        name = str(p.get("display_name") or "").strip()
+        if not name:
+            continue
+        places.append(" · ".join([
+            cast_field(p.get("avatar_emoji"), name, p.get("gender")),
+            ROLE_NAMES.get(cast_role(p), "Участник"),
+            str(p.get("model") or "—"),
+            str(p.get("avatar_url") or "").strip() or "—",
+        ]))
+    return " ‖ ".join(places)
+
+
+def participant_face(name: str) -> tuple:
+    """Лицо участника из состава: портрет и эмодзи ("", "") — такого места нет."""
+    name = str(name or "")
+    if not name or name not in session.avatar_emojis:
+        return "", ""
+    return session.avatars.get(name), session.avatar_emojis.get(name, "")
+
+
+def post_view(post: dict) -> dict:
+    """Реплика для ленты: лицо берётся у состава, а не хранится в реплике.
+
+    Аватар — свойство участника. Пока место стоит в пульте, его портрет и эмодзи
+    и есть лицо всех его реплик: поменяли в составе и применили — сменилось
+    и в новых, и в уже сказанных. У реплик того, кого в составе больше нет,
+    остаётся лицо, с которым он говорил: это и есть та единственная память
+    о портрете, ради которой его стоит хранить в посте.
+    """
+    url, emoji = participant_face(post.get("display_name"))
+    if not url and not emoji:
+        return post
+    view = dict(post)
+    view["avatar_url"] = _avatar_that_exists(url) or None
+    view["avatar_emoji"] = emoji or post.get("avatar_emoji") or "📣"
+    return view
 
 
 def added_purpose(summary: dict, added: list) -> str:
@@ -587,7 +638,6 @@ def dump_turn_header(post_id: int, turn: dict) -> str:
     out = ["\n" + turn_heading(post_id, turn) + "\n"]
     out.append(TURN_SECTIONS["who"] + "\n")
     out.append(who_line(turn))
-    out.append(avatar_line((turn.get("who") or {}).get("avatar")))
     # Окно и то, что в него вошло, — один раздел: это два взгляда на одно место
     out.append(TURN_SECTIONS["place"] + "\n")
     out.append(window_line(turn.get("budget") or {}))
@@ -638,7 +688,6 @@ def dump_human_markdown(post: dict) -> str:
                        str(post.get("model_used") or ""),
                        str(post.get("role_name") or ""), f"Акт {post.get('round')}"])
     return (f"\n{head}\n\n"
-            + avatar_line(post.get("avatar_url"))
             + f"Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
             + quoted(post.get("content")) + "\n")
 
@@ -862,27 +911,40 @@ def close_dump_turn(post: dict, turn: dict) -> None:
             pass
 
 
-def start_dump(topic: str) -> None:
+def start_dump(topic: str, keep: bool = False) -> None:
     """Начать ДАМП спектакля — заново, а не дописать к прежнему.
 
     Файл переписывается целиком на каждом спектакле: ДАМП — про последний
     спектакль, а не летопись. Иначе он рос бы вечно, а читают его всегда ради
-    разбора свежего случая — так и было со стенограммой, которая никого не
-    чистилась и после десятков спектаклей стала мегабайтами.
+    разбора свежего случая — так и было со стенограммой, которая никого
+    не чистилась и после десятков спектаклей стала мегабайтами.
 
     И это же тот файл, из которого прежний спектакль возвращается в ленту
-    после перезапуска (см. parse_dump): тема, формат записи и все реплики
-    с их ходами лежат здесь целиком, а не только в памяти процесса.
+    после перезапуска (см. parse_dump): тема, формат записи, состав и все
+    реплики в их ходами лежат здесь целиком, а не только в памяти процесса.
+
+    keep=True — спектакль продолжается, а не начинается: файл не переписывается,
+    и прежние реплики остаются в нём там, где были (запись о продолжении только
+    дописывается). Так бывает, когда спектакль вернули из ДАМПа чужого формата
+    и решили доиграть (см. load_play_from_dump).
     """
+    if keep and Path(settings.DUMP_FILE).exists():
+        # Состав записывается заново: доигрывать можно другим составом,
+        # а лицо участника — часть записи (см. cast_line)
+        when = time.strftime("%d.%m.%Y %H:%M")
+        dump_write(f"\n\n**Продолжение спектакля:** {when}\n\n**Состав:** {cast_line()}\n\n")
+        return
     _dump_reset()               # на всякий случай: прошлый файл больше не наш
     when = time.strftime("%d.%m.%Y %H:%M")
     header = (
         f"# ДАМП · {when} · порт {settings.PORT}\n\n"
         f"Формат записи: {DUMP_FORMAT}\n\n"
         f"**Тема:**\n{quoted((topic or '').strip())}\n\n"
+        f"**Состав:** {cast_line()}\n\n"
         f"Спектакль целиком, реплика за репликой: что вошло в каждый запрос\n"
         f"к модели, что она попросила, что ей принесли и что она сказала —\n"
-        f"со временем и числами токенов.\n"
+        f"со временем и числами токенов. Лицо говорящего берётся из состава\n"
+        f"выше, а не хранится в каждой реплике: аватар — свойство участника.\n"
         f"Пишется по ходу дела, заново на каждый новый спектакль: по этому же\n"
         f"файлу прежний спектакль возвращается в ленту после перезапуска.\n\n"
         f"Каждая запись начинается шапкой «## номер · время · имя · модель ·\n"
@@ -1004,6 +1066,23 @@ def _section_text(lines: list) -> str:
     while start < len(lines) and not lines[start].startswith(">"):
         start += 1
     return _quoted_block(lines[start:])[0]
+
+
+def _last_quoted(lines: list) -> str:
+    """Последний «> »-текст записи — обратный взгляд тому, что делает _section_text.
+
+    Нужен для записи, разделы которой незнакомы (см. ask_about_dump): реплика
+    там — последний раздел, а значит последний текст в кавычках. Без этого
+    попытка прочитать чужой файл давала реплики без слов — а это выглядело бы
+    как «модель промолчала», то есть прямая неправда.
+    """
+    start = None
+    for index, line in enumerate(lines):
+        if line.startswith(">"):
+            start = index
+        elif line.strip() and start is not None:
+            start = None
+    return _quoted_block(lines[start:])[0] if start is not None else ""
 
 
 def _split_sections(lines: list) -> dict:
@@ -1291,25 +1370,30 @@ def restored_summary(turn: dict, seconds=None, spent=None) -> dict:
 
 
 def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str,
-               summary, queries: list) -> dict:
+               summary, queries: list, faces: dict = None) -> dict:
     """Реплика ленты из разобранной записи — теми же полями, что create_post.
 
-    Аватар берётся у состава, который сейчас в пульте: имя то же — значит и
-    лицо то же. Если такого имени в составе больше нет, остаётся значок: по нему
-    видно хотя бы роль.
+    Лицо берётся у состава из шапки файла (см. parse_cast_line), а если имени
+    там нет — у состава, который сейчас в пульте: имя то же — значит и лицо то же.
+    Если файла за адресом уже нет, остаётся эмодзи: пустая рамка вместо лица
+    хуже значка.
     """
+    faces = faces or {}
     role = who.get("role") or "participant"
     name = who.get("name") or ""
     gender = who.get("gender") or "male"
+    dump_avatar, dump_emoji = faces.get(name, (None, None))
     return {
         "id": post_id,
         "display_name": name,
         "model_used": who.get("model") or "",
-        # Портрет — из записи, а если файла уже нет (или в записи его не было) —
-        # из состава, который сейчас в пульте: лицо то же, пока имя то же
+        # Портрет — из состава в шапке записи (у прежнего формата — из строки
+        # «Аватар» самой реплики), а если файла уже нет — из пульта
         "avatar_url": (_avatar_that_exists(who.get("avatar"))
+                       or _avatar_that_exists(dump_avatar)
                        or _avatar_that_exists(session.avatars.get(name)) or None),
-        "avatar_emoji": (who.get("emoji") or session.avatar_emojis.get(name)
+        "avatar_emoji": (who.get("emoji") or dump_emoji
+                         or session.avatar_emojis.get(name)
                          or ROLE_ICONS.get(role, "📣")),
         "content": content,
         "content_html": text.markdown_to_html(content),
@@ -1328,7 +1412,7 @@ def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str
     }
 
 
-def _parse_record(post_id: int, rest: str, body: list) -> dict:
+def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> dict:
     """Одна запись ДАМПа → реплика ленты и, если ход был машинным, отчёт о нём."""
     who, seconds, spent = _parse_heading(rest)
     sections = _split_sections(body)
@@ -1339,9 +1423,13 @@ def _parse_record(post_id: int, rest: str, body: list) -> dict:
     who["role"] = ROLE_BY_NAME.get(who.get("role_name") or "", "participant")
     who["avatar"] = _avatar_from(body)
     who["topic"] = ""
-    if not sections:
-        # Реплика человека: ни запросов, ни поиска, поэтому и разделов нет
-        return {"post": _post_dict(post_id, who, _section_text(body), "", "", None, []),
+    if not [key for key in sections if key]:
+        # Ни одного знакомого раздела: либо реплика человека (у неё запросов
+        # и поиска нет, поэтому и разделов нет), либо запись другой версии
+        # театра — тогда реплика там последним разделом (см. _last_quoted)
+        return {"post": _post_dict(post_id, who,
+                                   _last_quoted(body) or _section_text(body),
+                                   "", "", None, [], faces),
                 "turn": None}
     steps = _parse_steps(sections.get("history") or [])
     turn = {
@@ -1362,58 +1450,93 @@ def _parse_record(post_id: int, rest: str, body: list) -> dict:
         turn, seconds if seconds is not None else _record_seconds(body), spent)
     queries = [step.get("query") or "" for step in steps if step.get("kind") == "search"]
     post = _post_dict(post_id, who, turn["answer"], turn["sketch"], turn["thinking"],
-                      turn["summary"], queries)
+                      turn["summary"], queries, faces)
     return {"post": post, "turn": turn}
 
 
-def _add_record(current: tuple, body: list, posts: list, turns: dict) -> None:
+def _add_record(current: tuple, body: list, posts: list, turns: dict,
+                faces: dict = None) -> None:
     """Одна запись — в спектакль: реплика всегда, отчёт о ходе — если он был."""
     post_id, rest = current
-    record = _parse_record(post_id, rest, body)
+    record = _parse_record(post_id, rest, body, faces)
     posts.append(record["post"])
     if record["turn"]:
         turns[int(post_id)] = record["turn"]
 
 
-def parse_dump(written: str) -> dict:
-    """Прочитать ДАМП обратно — прежний спектакль целиком.
+def dump_version(written: str) -> int:
+    """Номер формата из шапки файла (0 — номер не назван вовсе).
 
-    None значит «файл не наш»: другой формат записи (см. DUMP_FORMAT), пусто
-    или ни одной записи. Половина спектакля хуже, чем никакого: непрочитанная
-    реплика в ленте выглядела бы как «модель промолчала в этом ходу».
+    Ноль — это не «старый формат», а «файл не наш»: так выглядит чужой файл
+    или ДАМП времён, когда номера ещё не было (см. DUMP_FORMAT).
     """
-    lines = str(written or "").splitlines()
-    version = 0
-    for line in lines[:12]:
+    for line in str(written or "").splitlines()[:12]:
         found = re.match(r"^Формат записи: (\d+)$", line.strip())
         if found:
-            version = int(found.group(1))
-            break
-    if version != DUMP_FORMAT:
+            return int(found.group(1))
+    return 0
+
+
+def parse_cast_line(text) -> dict:
+    """Состав из шапки — обратно тому, что пишет cast_line: имя → (портрет, эмодзи)."""
+    faces = {}
+    for place in str(text or "").split(" ‖ "):
+        fields = [field.strip() for field in place.split(" · ")]
+        if len(fields) < 4:
+            continue
+        emoji, name = _split_emoji(fields[0])
+        name, _ = _split_gender(name)
+        if name:
+            faces[name] = ("" if fields[3] == "—" else fields[3], emoji)
+    return faces
+
+
+def parse_dump(written: str, tolerant: bool = False) -> dict:
+    """Прочитать ДАМП обратно — прежний спектакль целиком.
+
+    None — значит «файл не наш»: другой формат записи (см. DUMP_FORMAT), пусто
+    или ни одной записи. Половина спектакля хуже, чем никакого: непрочитанная
+    реплика в ленте выглядела бы как «модель промолчала в этом ходу».
+
+    tolerant=True — согласие читать чужой формат (см. ask_about_dump): так тоже
+    может получиться толк, но обещать нечего. Записи узнаются по своему началу
+    («## номер · …»), поэтому даже файл без номера формата читается по строкам —
+    а вот если записей в нём нет вовсе, читать и вправду нечего.
+    """
+    lines = str(written or "").splitlines()
+    version = dump_version(written)
+    if not tolerant and version not in DUMP_FORMATS_READABLE:
         return None
     topic = ""
     for index, line in enumerate(lines):
         if line.strip() == "**Тема:**":
             topic = _section_text(lines[index + 1:])
             break
+    # Состав берётся последним из записанных: спектакль мог продолжаться,
+    # и тогда лицо участника менялось уже во второй записи (см. start_dump)
+    faces = {}
+    for line in lines:
+        if line.startswith("**Состав:** "):
+            faces = parse_cast_line(line[len("**Состав:** "):])
     posts, turns = [], {}
     current, body = None, []
     for line in lines:
         found = _RECORD_RE.match(line)
         if found:
             if current is not None:
-                _add_record(current, body, posts, turns)
+                _add_record(current, body, posts, turns, faces)
             current, body = (int(found.group(1)), found.group(2)), []
             continue
         if current is not None:
             body.append(line)
     if current is not None:
-        _add_record(current, body, posts, turns)
+        _add_record(current, body, posts, turns, faces)
     if not posts:
         return None
     return {
         "format": version,
         "topic": topic,
+        "cast": faces,
         "posts": posts,
         "turns": turns,
         "round": max(int(post.get("round") or 0) for post in posts),
@@ -1423,12 +1546,48 @@ def parse_dump(written: str) -> dict:
     }
 
 
-def load_play_from_dump() -> int:
+def ask_about_dump(version: int) -> str:
+    """Спросить, что делать с ДАМПом незнакомого формата.
+
+    Формат меняется вместе с тем, как устроена запись, и обещать совместимость
+    нельзя: файл может прочитаться наполовину — а непрочитанная реплика
+    в ленте выглядела бы как «модель промолчала в этом ходу». Поэтому решает
+    режиссёр: отказаться от прежнего спектакля, открыть его только на чтение
+    или открыть и доиграть. Без консоли (запуск из IDE, из службы) спрашивать
+    некого — тогда прежний спектакль просто не трогается.
+    """
+    known = ", ".join(str(v) for v in sorted(DUMP_FORMATS_READABLE))
+    print(f"  ⚠️  {settings.DUMP_FILE.name} записан форматом "
+          f"{version or 'без номера'}, а этот театр читает {known}.")
+    print("   Формат — это устройство записи: прочитать чужую можно, но что-то")
+    print("   в ней может оказаться не тем, чем было записано.")
+    print("   [Enter] отменить — сцена останется пустой (а новый спектакль")
+    print("            перепишет файл, как и всегда)")
+    print("   [ч] открыть только на чтение")
+    print("   [п] открыть и доиграть прежним составом")
+    if not (sys.stdin and sys.stdin.isatty()):
+        print("   Консоли нет, спросить некого — оставляю как есть.")
+        return "skip"
+    try:
+        answer = input("   Ваш выбор: ").strip().lower()
+    except (EOFError, OSError, KeyboardInterrupt):
+        print()
+        return "skip"
+    for key, mode in DUMP_CHOICES:
+        if answer == key:
+            return mode
+    return "skip"
+
+
+def load_play_from_dump(mode: str = None) -> int:
     """Вернуть в ленту прежний спектакль — по ДАМПу прошлого запуска.
 
     Раньше ДАМП был только для чтения глазами: реплики жили в памяти процесса,
     и перезапуск означал пустую сцену. Теперь файл — это и есть спектакль,
     и новый процесс (с новой вёрсткой) показывает прежние реплики с их ходами.
+
+    mode — что делать с чужим форматом: None значит «спросить» (см. ask_about_dump),
+    "skip" — не трогать, "read" — только на чтение, "continue" — ещё и доиграть.
     Возвращает число возвращённых реплик: 0 — возвращать нечего.
     """
     try:
@@ -1439,7 +1598,16 @@ def load_play_from_dump() -> int:
     # предупреждением нечем, а вот в чужом формате признаться надо
     if not written.strip():
         return 0
-    play = parse_dump(written)
+    version = dump_version(written)
+    readable = version in DUMP_FORMATS_READABLE
+    if mode is None:
+        mode = "read" if readable else ask_about_dump(version)
+    if mode == "skip":
+        if not readable:
+            print(f"  ⚠️  Прежний спектакль не возвращается: {settings.DUMP_FILE.name} "
+                  f"остался как был, сцена пустая")
+        return 0
+    play = parse_dump(written, tolerant=not readable)
     if not play:
         print(f"  ⚠️  Прежний спектакль не возвращается: {settings.DUMP_FILE.name} "
               f"записан не нашим форматом (ожидается {DUMP_FORMAT}), сцена будет пустой")
@@ -1453,11 +1621,20 @@ def load_play_from_dump() -> int:
     session.running = False
     session.waiting_for_human = False
     session.restored = True
+    # Лица участников, которых в составе уже нет, остаются в самих репликах,
+    # а те, кто есть, берутся из пульта: имя то же — лицо то же (см. post_view)
     if not session.topic and play.get("topic"):
         session.topic = play["topic"]
+    # «Доиграть» — значит во время старта прежние реплики останутся в ленте,
+    # а историей для моделей станет то же, что уже сказано (см. start_show)
+    session.resume_ready = mode == "continue"
+    if readable and version != DUMP_FORMAT:
+        print(f"  ℹ️  {settings.DUMP_FILE.name} записан форматом {version} — "
+              f"читаю как есть, это под-версия записи")
     print(f"🗒  Вернулся прежний спектакль из {settings.DUMP_FILE.name}: "
           f"реплик {len(play['posts'])}, актов {play['round']}, "
-          f"цена {money(play['spent'])}")
+          f"цена {money(play['spent'])}"
+          + (", доиграем прежним составом" if session.resume_ready else ""))
     return len(play["posts"])
 
 
@@ -1474,6 +1651,8 @@ def forget_play() -> None:
     session.spent = 0.0
     session.money_told = False
     session.restored = False
+    # Прежний спектакль прощён — и доигрывать его тоже больше нечего
+    session.resume_ready = False
     _dump_reset()
     try:
         settings.DUMP_FILE.unlink()
@@ -2075,6 +2254,13 @@ class DebateSession:
         # Вернулся ли этот спектакль из ДАМПа прошлого запуска: по этому
         # признаку в ленте видно, что занавес был не сейчас (см. status_payload)
         self.restored = False
+        # Прежний спектакль вернулся с разрешением доиграть: по этому признаку
+        # старт не начинает с чистого листа, а продолжает прежний — со своими
+        # репликами в ленте, своей историей для моделей и с той же ценой
+        # (см. start_show). Ставит его тот, кто читал ДАМП (см. load_play_from_dump)
+        self.resume_ready = False
+        # А это — про этот запуск: продолжает ли спектакль только что сыгранный
+        self.resumed = False
         # Сцена: места состава без имён, аватаров и личных инструкций — роли,
         # модели, порядок и числа. None значит «своей сцены нет»: места берутся
         # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
@@ -2156,11 +2342,15 @@ class DebateSession:
         Старт спектакля. Состав, правила, инструкции и тема уже лежат в сессии -
         начинаем с них, а не пересылаем всё заново из формы.
         """
+        # Спектакль мог вернуться из ДАМПа с разрешением доиграть: тогда
+        # прежние реплики остаются в ленте, историей для моделей становится
+        # то же самое, а акт и цена продолжаются — это всё один спектакль
+        resume = bool(self.resume_ready)
+        self.resume_ready = False
+        self.resumed = resume
         self.running = True
         self.session_id = uuid.uuid4().hex[:8]
         self.topic = topic
-        self.posts = []
-        self.current_round = 0
         self.current_participant = None
         self.current_action = None
         self.search_query = None
@@ -2168,13 +2358,33 @@ class DebateSession:
         self.waiting_for_human = False
         self.moderator_message = None
         self.moderator_finished = False
-        self.conversation_history = []
-        # Счёт за спектакль начинается заново: это про этот вечер, а не про
-        # все, что были (см. _note_money)
-        self.spent = 0.0
-        self.money_told = False
-        # Новый спектакль — новые реплики: отчёты прежних ходов к ним не подходят
-        self.turn_log = {}
+        # Спектакль играется сейчас: слова «прежний, возвращённый из ДАМПа»
+        # после этого уже неверны, а доигранный когда-то спектакль не должен
+        # выдавать себя за прежний после перезапуска (см. status_payload)
+        self.restored = False
+        if not resume:
+            self.posts = []
+            self.current_round = 0
+            self.conversation_history = []
+            # Счёт за спектакль начинается заново: это про этот вечер, а не про
+            # все, что были (см. _note_money)
+            self.spent = 0.0
+            self.money_told = False
+            # Новый спектакль — новые реплики: отчёты прежних ходов к ним не подходят
+            self.turn_log = {}
+        else:
+            # Прежние реплики — это и есть история для моделей: продолжение
+            # не начинается с чистого листа, иначе модель отвечала бы не на то,
+            # что говорилось на сцене, а в пустоту
+            self.conversation_history = [
+                {"display_name": post.get("display_name", ""),
+                 "content": post.get("content", ""),
+                 "is_moderator": post.get("role") == "moderator",
+                 "is_judge": post.get("role") == "judge",
+                 "round": int(post.get("round") or 0)}
+                for post in self.posts if str(post.get("content") or "").strip()]
+            # Цена продолжения — вся цена спектакля: он всё ещё тот же
+            self.money_told = bool(self.spent)
         self.sync_cast_media()
 
     def new_show(self):
@@ -3295,6 +3505,26 @@ def draft_cast_entry(role: str = "participant") -> dict:
     return build_cast_entry(template, used_from_cast(session.runtime_participants))
 
 
+def set_participant_emoji(name: str, emoji: str) -> str:
+    """Поставить участнику другой эмодзи-аватар — из ленты или из состава.
+
+    Эмодзи — свойство места в составе, поэтому правка идёт в состав и сохраняется
+    в файле пульта: в ленте и на странице состава это одно и то же лицо
+    (см. post_view), и поменянное лицо видно у всех реплик участника —
+    и у тех, что уже сказаны.
+    """
+    emoji = str(emoji or "").strip()
+    if emoji not in settings.AVATAR_EMOJIS:
+        return "Такого эмодзи в наборе нет"
+    for place in session.runtime_participants:
+        if place.get("display_name") == str(name or ""):
+            place["avatar_emoji"] = emoji
+            session.sync_cast_media()
+            save_theatre_settings()
+            return ""
+    return f"Участника «{name}» в составе нет"
+
+
 def apply_cast_patch(incoming: list) -> str:
     """
     Применяет состав целиком: имена, пол, роли, модели, ключевые слова, аватар,
@@ -3560,8 +3790,10 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     """
     print(f"🎬 Поток дебатов запущен для темы: {topic}")
     # Хронология ходов уйдёт в ДАМП: после занавеса ленты уже не будет,
-    # а по ДАМПу можно разобрать любой ход — от промпта до токенов
-    start_dump(topic)
+    # а по ДАМПу можно разобрать любой ход — от промпта до токенов.
+    # Продолжение спектакля пишется в тот же файл: прежние реплики —
+    # это его же начало, и сносить их, чтобы записать заново, нечего
+    start_dump(topic, keep=session.resumed)
     print(f"  🗒  ДАМП спектакля: {settings.DUMP_FILE} (пишется заново на каждый спектакль)")
     runtime_participants = session.runtime_participants
     print(f"👥 Участников в сессии: {len(runtime_participants)}")

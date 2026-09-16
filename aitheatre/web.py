@@ -42,9 +42,11 @@ def publish_post(post: dict):
     """Новая реплика уходит в ленту сразу, не дожидаясь следующего опроса.
 
     Спектакль (show.py) про Socket.IO ничего не знает — он получает эту
-    функцию колбэком.
+    функцию колбэком. Лицо подставляет show: аватар — свойство участника,
+    и у реплики оно берётся из состава, а не хранится в самой реплике
+    (см. show.post_view).
     """
-    socketio.emit('new_post', post)
+    socketio.emit('new_post', show.post_view(post))
 
 
 def publish_draft(draft: dict):
@@ -81,7 +83,8 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         "finished": show.session.finished,
         "session_id": show.session.session_id,
         "topic": show.session.topic,
-        "new_posts": show.session.posts[max(0, last_post_count):] if with_posts else [],
+        "new_posts": ([show.post_view(p) for p in show.session.posts[max(0, last_post_count):]]
+                      if with_posts else []),
         "total_posts": len(show.session.posts),
         # Пришли ли вместе с состоянием сами реплики. Нужно странице: в рассылке
         # по сокету их нет, и по счётчику она не должна решить, что уже всё
@@ -119,7 +122,7 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
     }
     # Для внешних клиентов (и для события подключения) — те же поля, но реплики целиком
     if with_posts:
-        payload["posts"] = show.session.posts
+        payload["posts"] = [show.post_view(p) for p in show.session.posts]
     return payload
 
 
@@ -257,6 +260,24 @@ def cast_payload() -> list:
     return cast
 
 
+@app.route('/api/participant/emoji', methods=['POST'])
+def set_participant_emoji():
+    """Сменить эмодзи-аватар участника — кликом по нему в ленте или в составе.
+
+    Эмодзи — свойство места в составе, поэтому он живёт в составе и сохраняется
+    вместе с ним: поменянное лицо сразу видно у всех реплик участника —
+    и в новых, и в уже сказанных (см. show.post_view).
+    """
+    data = request.get_json(silent=True) or {}
+    error = show.set_participant_emoji(str(data.get("name", "") or ""),
+                                       str(data.get("emoji", "") or ""))
+    if error:
+        return jsonify({"success": False, "error": error})
+    print(f"🎭 {data.get('name')}: аватар-эмодзи сменён на {data.get('emoji')}")
+    publish_status()
+    return jsonify({"success": True, "participants": cast_payload()})
+
+
 @app.route('/api/participants', methods=['GET', 'POST'])
 def participants():
     """
@@ -287,6 +308,12 @@ def participants():
     return jsonify({
         "participants": cast_payload(),
         "option_keys": list(settings.PER_PARTICIPANT_OPTION_KEYS),
+        # Наборы эмодзи-аватаров: их выбирает клик по скруглённому значку —
+        # и в ленте, и в составе. Списки держит сервер: иначе меню предлагало бы
+        # не то, что действительно можно поставить (см. show.set_participant_emoji)
+        "emojis": {"male": list(settings.AVATAR_EMOJIS_MALE),
+                   "female": list(settings.AVATAR_EMOJIS_FEMALE),
+                   "neutral": list(settings.AVATAR_EMOJIS_NEUTRAL)},
         # «Характер»: список и его числа держит сервер, чтобы пульт и случайный
         # розыгрыш на новый спектакль опирались на один и тот же набор
         "characters": {
@@ -416,8 +443,14 @@ def start():
     thread.start()
     # Спектакль пошёл — состояние начинает идти в браузер само, раз в секунду
     start_status_pusher()
-    # Тему возвращаем: интерфейс показывает в шапке именно то, с чем играем
-    return jsonify({"success": True, "session_id": show.session.session_id, "topic": show.session.topic})
+    # Тему возвращаем: интерфейс показывает в шапке именно то, с чем играем.
+    # А с продолжением (см. show.resume_ready) — ещё и «прежние реплики в ленте
+    # уже есть»: страница не должна их стирать, иначе продолжение выглядело бы
+    # как новый спектакль с чистого листа
+    return jsonify({"success": True, "session_id": show.session.session_id,
+                    "topic": show.session.topic,
+                    "resumed": show.session.resumed,
+                    "total_posts": len(show.session.posts)})
 
 @app.route('/api/reset', methods=['POST'])
 def reset():

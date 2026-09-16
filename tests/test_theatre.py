@@ -47,6 +47,7 @@ import shutil
 import socket
 import subprocess
 import symtable
+import sys
 import tempfile
 import threading
 import time
@@ -3021,13 +3022,19 @@ class TestPlayKeptInDump(unittest.TestCase):
                 cloud.journal_push(kwargs["report"], step)
             return "Вот ответ.", 1, ["Сыктывкар население"]
 
-        # Портрет у участников бывает: в ленте на месте эмодзи стоит картинка,
-        # и в записи она названа — иначе после возврата из ДАМПа лицо пропадёт
+        # Портрет у участников бывает: в ленте на месте эмодзи стоит картинка.
+        # Аватар — свойство участника, а не реплики (см. show.post_view), поэтому
+        # лицо лежит в составе, а в записи — одной строкой на весь спектакль
+        # (см. show.cast_line): иначе после возврата из ДАМПа лицо пропадёт
         face = self.FACE
         (Path(folder) / "test_face_1.jpg").write_bytes(b"")
         participant = dict(self._participant(), avatar_url=face)
-        self.session.avatars[participant["display_name"]] = face
-        self.session.avatars["Живой"] = face
+        self.session.runtime_participants.extend([
+            dict(participant),
+            {"display_name": "Живой", "model": "human", "gender": "female",
+             "avatar_emoji": "📣", "avatar_url": face},
+        ])
+        self.session.sync_cast_media()
 
         with mock.patch.object(settings, "DUMP_FILE", dump), \
                 mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
@@ -3124,26 +3131,166 @@ class TestPlayKeptInDump(unittest.TestCase):
         self.assertIsNone(show.parse_dump("# ДАМП · 01.09.2026 12:00 · прежний\n\nход\n"),
                           "прежний ДАМП без номера формата тоже не наш")
 
-    def test_the_portrait_comes_back_with_the_reply(self):
-        """У вернувшейся реплики то же лицо: портрет назван в самой записи.
+    # Прежняя запись того же семейства: формат 3 — лицо говорящего лежало
+    # в каждой реплике, а строки состава в шапке не было вовсе (см. cast_line)
+    OLD_SUBVERSION = (
+        "# ДАМП · 01.09.2026 12:00 · порт 5000\n\n"
+        "Формат записи: 3\n\n"
+        "**Тема:**\n> Прежняя тема\n\n"
+        "## 1 · 10:00 · 🦊 Мария ♀ · fake-model · Участник · Акт 1\n\n"
+        "### 👤 Кто говорит и когда\n\n"
+        "**Кто:** **Мария** ♀ · fake-model · Акт 1 · 10:00\n"
+        "**Аватар:** /avatars/test_face_1.jpg\n\n"
+        "### 💬 Реплика, которой ход кончился\n\n"
+        "> Сказано раньше.\n")
 
-        У поста в ленте вместо эмодзи может стоять картинка, и взять её
-        из состава нельзя: имя за время между спектаклями уходит, а лицо —
-        часть «кто говорит», а не настройка пульта.
+    def test_an_older_sub_version_is_read_as_is(self):
+        """Под-версия записи читается без вопросов: менялось только содержимое.
+
+        Формат растёт по-разному: пока меняется то, что лежит в записи (лицо
+        участника переехало из реплики в состав), прошлый номер остаётся
+        в списке читаемых (см. DUMP_FORMATS_READABLE) — и спрашивать не о чем.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "test_face_1.jpg").write_bytes(b"")
+            with mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
+                play = show.parse_dump(self.OLD_SUBVERSION)
+
+        self.assertIsNotNone(play, "под-версия записи должна читаться как есть")
+        self.assertEqual(play["format"], 3)
+        self.assertEqual(play["topic"], "Прежняя тема")
+        self.assertEqual(play["posts"][0]["avatar_url"], self.FACE,
+                         "у прежнего формата лицо лежало в самой реплике")
+        self.assertIn(3, show.DUMP_FORMATS_READABLE)
+
+    def test_a_foreign_record_gives_back_its_reply_not_silence(self):
+        """Чужую запись читают по строкам: реплика там — последний текст.
+
+        Разделы прежних версий театра назывались иначе, и знакомых среди них нет.
+        Взять из такой записи пустоту значило бы показать реплику без слов —
+        то есть соврать про молчание модели (см. _last_quoted).
+        """
+        stranger = (
+            "# ДАМП · 01.09.2026 12:00 · порт 5000\n\n"
+            "## 1 · 10:00 · 🦊 Мария ♀ · fake-model · Участник · Акт 1\n\n"
+            "### Что вошло в запрос к модели\n\n"
+            "- №1 · system · system · 12 токенов\n"
+            "> Ты — Мария, участник обсуждения.\n\n"
+            "### Реплика\n\n"
+            "> А вот и мой ответ.\n")
+        play = show.parse_dump(stranger, tolerant=True)
+
+        self.assertIsNotNone(play, "терпимое чтение должно пробовать, а не сдаваться")
+        self.assertEqual(len(play["posts"]), 1)
+        self.assertEqual(play["posts"][0]["content"], "А вот и мой ответ.",
+                         "реплика чужой записи — последний текст, а не пустота")
+        self.assertIsNone(show.parse_dump(stranger),
+                          "строго чужой формат по-прежнему не читается")
+
+    def test_a_foreign_format_is_asked_about_and_not_guessed(self):
+        """Расхождение форматов — вопрос, а не догадка, и решает его режиссёр.
+
+        Прочитать чужую запись можно, но обещать нечего: непрочитанная реплика
+        в ленте выглядела бы как «модель промолчала». Поэтому без ответа ничего
+        не трогается, зато варианты называются вслух (см. ask_about_dump).
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            _, dump = self._play(folder)
+            stranger = dump.read_text(encoding="utf-8").replace(
+                f"Формат записи: {show.DUMP_FORMAT}", "Формат записи: 7")
+            dump.write_text(stranger, encoding="utf-8")
+            self.session.posts = []
+            shown = io.StringIO()
+            with mock.patch.object(settings, "DUMP_FILE", dump), \
+                    mock.patch.object(sys, "stdin", io.StringIO("")), \
+                    mock.patch.object(sys, "stdout", shown):
+                self.assertEqual(show.load_play_from_dump(), 0)
+            self.assertEqual(self.session.posts, [],
+                             "без ответа сцена должна остаться пустой")
+            for option in ("[ч]", "[п]", "[Enter]"):
+                self.assertIn(option, shown.getvalue(), "варианты должны быть названы")
+            # А с согласием — читается: это и есть «попытаться открыть»
+            with mock.patch.object(settings, "DUMP_FILE", dump), \
+                    mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
+                self.assertEqual(show.load_play_from_dump("read"), 2,
+                                 "согласие читать чужую запись должно вернуть реплики")
+
+    def test_the_answer_to_the_question_decides_the_mode(self):
+        """Ответ режиссёра и есть выбор: отменить, читать или доиграть."""
+        for answer, expected in (("ч", "read"), ("п", "continue"), ("", "skip"),
+                                 ("продолжить", "continue"), ("не знаю", "skip")):
+            with mock.patch.object(sys, "stdin",
+                                   mock.Mock(isatty=mock.Mock(return_value=True))), \
+                    mock.patch.object(sys, "stdout", io.StringIO()), \
+                    mock.patch.object(builtins, "input", mock.Mock(return_value=answer)):
+                self.assertEqual(show.ask_about_dump(7), expected, answer)
+
+    def test_a_play_returned_for_continuation_starts_from_its_own_replies(self):
+        """«Доиграть» — значит не начинать с чистого листа.
+
+        Прежние реплики остаются в ленте и становятся историей для моделей,
+        а акт и цена продолжаются: это всё тот же спектакль (см. start_show).
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            _, dump = self._play(folder)
+            played = [p["display_name"] for p in self.session.posts]
+            price = self.session.spent
+            self.session.posts = []
+            self.session.turn_log = {}
+            self.session.finished = False
+            self.session.restored = False
+            with mock.patch.object(settings, "DUMP_FILE", dump):
+                self.assertEqual(show.load_play_from_dump("continue"), 2)
+                self.assertTrue(self.session.resume_ready,
+                                "«доиграть» — это разрешение, а не согласие смотреть")
+                self.session.start_show("Продолжение")
+
+        self.assertEqual([p["display_name"] for p in self.session.posts], played,
+                         "продолжение стёрло прежние реплики")
+        self.assertEqual(len(self.session.conversation_history), 2,
+                         "прежние реплики должны стать историей для моделей")
+        self.assertTrue(self.session.resumed)
+        self.assertFalse(self.session.restored, "спектакль идёт сейчас, а не был раньше")
+        self.assertEqual(self.session.spent, price,
+                         "цена продолжения — вся цена спектакля")
+
+    def test_reading_without_continuation_still_starts_an_empty_lane(self):
+        """Без согласия доиграть старт всё равно с чистого листа."""
+        with tempfile.TemporaryDirectory() as folder:
+            _, dump = self._play(folder)
+            with mock.patch.object(settings, "DUMP_FILE", dump):
+                show.load_play_from_dump("read")
+                self.assertEqual(len(self.session.posts), 2)
+                self.session.start_show("Новый")
+
+        self.assertEqual(self.session.posts, [])
+        self.assertEqual(self.session.conversation_history, [])
+        self.assertFalse(self.session.resumed)
+
+    def test_the_portrait_comes_back_with_the_reply(self):
+        """У вернувшейся реплики то же лицо: портрет назван в составе записи.
+
+        Аватар — свойство участника, а не реплики, поэтому в файле он лежит один
+        на весь спектакль, строкой «Состав» (см. cast_line). По ней лицо
+        и возвращается — даже если в пульте состав уже другой: место может
+        уйти из труппы, а лицо его реплик остаться тем же.
         """
         with tempfile.TemporaryDirectory() as folder:
             written, dump = self._play(folder)
-            self.assertIn(f"**Аватар:** {self.FACE}", written,
-                          "адрес портрета должен быть в записи")
-            # Состав мог смениться: имена другие — лица в нём нет вовсе
+            head = next(line for line in written.splitlines()
+                        if line.startswith("**Состав:** "))
+            self.assertIn(f"🦊 Проверка ♀ · Участник · fake-model · {self.FACE}", head,
+                          "адрес портрета должен быть в строке состава")
+            # Состав мог смениться: имена другие — лиц в нём нет вовсе
             self.session.avatars = {}
             self.session.avatar_emojis = {}
+            self.session.runtime_participants = []
             with mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
                 play = show.parse_dump(dump.read_text(encoding="utf-8"))
 
         self.assertEqual([p["avatar_url"] for p in play["posts"]],
                          [self.FACE, self.FACE],
-                         "портрет должен вернуться из записи, а не из состава")
+                         "портрет должен вернуться из состава в записи, а не из пульта")
 
     def test_a_portrait_that_is_gone_falls_back_to_the_emoji(self):
         """Портрет, за которым нет файла, — не лицо: у поста остаётся эмодзи.
@@ -5599,6 +5746,57 @@ class TestRoutes(unittest.TestCase):
                 self.assertIn("effective_options", person)
                 self.assertIn("model_defaults", person)
 
+    def test_the_emoji_choice_goes_into_the_cast_and_the_menu_lists_real_ones(self):
+        """Выбор эмодзи — правка состава, а меню предлагает только существующие."""
+        person = non_judge_ai(self.session)
+        name = person["display_name"]
+        emoji = (settings.AVATAR_EMOJIS_FEMALE[0] if person.get("gender") == "female"
+                 else settings.AVATAR_EMOJIS_MALE[0])
+        data = self.client.post("/api/participant/emoji",
+                                json={"name": name, "emoji": emoji}).get_json()
+        self.assertTrue(data["success"], data.get("error"))
+        stored = next(p for p in data["participants"] if p["display_name"] == name)
+        self.assertEqual(stored["avatar_emoji"], emoji)
+
+        bad = self.client.post("/api/participant/emoji",
+                               json={"name": name, "emoji": "🚀"}).get_json()
+        self.assertFalse(bad["success"], "чужой значок ставить нельзя")
+
+        listing = self.client.get("/api/participants").get_json()
+        for pool in ("male", "female", "neutral"):
+            self.assertTrue(listing["emojis"][pool], f"набор {pool} пуст")
+
+    def test_the_lane_carries_the_face_of_the_cast(self):
+        """Лицо реплики берётся из состава и в том же виде уезжает в ленту.
+
+        Статус и событие сокета собираются одной функцией (см. status_payload):
+        раньше именно тут лица и расходились с тем, что показывал пульт.
+        """
+        person = non_judge_ai(self.session)
+        name = person["display_name"]
+        self.session.posts.append(show.create_post(
+            name, person.get("model", ""), "Реплика", 1, None, "🐺",
+            gender=person.get("gender")))
+        # Режиссёр поменял лицо в пульте и применил состав
+        person["avatar_emoji"] = "👩‍🔬"
+        self.session.sync_cast_media()
+
+        data = self.client.get("/api/status").get_json()
+        post = next(p for p in data["posts"] if p["display_name"] == name)
+        self.assertEqual(post["avatar_emoji"], "👩‍🔬",
+                         "в ленте должно стоять лицо из состава, а не из реплики")
+
+    def test_start_reports_that_the_play_is_being_continued(self):
+        """Страница не должна стирать ленту, если спектакль доигрывается."""
+        self.session.posts.append(show.create_post(
+            "Живой", "human", "Сказано раньше.", 1, gender="male"))
+        self.session.resume_ready = True
+        data = self.client.post("/api/start", json={"topic": "Продолжение"}).get_json()
+
+        self.assertTrue(data["success"], data.get("error"))
+        self.assertTrue(data["resumed"], "странице надо знать, что прежние реплики — свои")
+        self.assertEqual(data["total_posts"], 1)
+
     def test_participants_get_explains_effective_options(self):
         data = self.client.get("/api/participants").get_json()
         self.assertIn("characters", data)
@@ -5607,6 +5805,88 @@ class TestRoutes(unittest.TestCase):
         for person in data["participants"]:
             if person.get("model") != "human":
                 self.assertIn("effective_options", person)
+
+
+# ---------------------------------------------------- лицо участника
+
+class TestAvatarBelongsToTheCast(unittest.TestCase):
+    """Аватар — свойство участника, а не реплики: лицо берётся из состава.
+
+    Ради этого портрет и переехал в состав: место в пульте может получить другое
+    лицо, и оно должно смениться у всех его реплик — и у новых, и у сказанных.
+    А у того, кто из состава ушёл, лицо остаётся с его репликами: это и есть та
+    память о портрете, ради которой его стоит держать в посте.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.session.runtime_participants = [
+            {"cast_id": "cast-a", "display_name": "Мария", "model": "fake-model",
+             "gender": "female", "avatar_emoji": "🦊", "avatar_url": None},
+            {"cast_id": "cast-b", "display_name": "Пётр", "model": "fake-model",
+             "gender": "male", "avatar_emoji": "🐺", "avatar_url": None},
+        ]
+        self.session.sync_cast_media()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(folder.name)
+        # Смена эмодзи сохраняет состав: без подмены тест переписал бы
+        # настоящий файл пульта проекта
+        patcher = mock.patch.object(settings, "SETTINGS_FILE",
+                                    self.folder / "settings.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def said(self, name: str = "Мария") -> dict:
+        """Сказанная реплика участника — тем же create_post, что и в спектакле."""
+        return show.create_post(name, "fake-model", "Привет", 1, None,
+                                self.session.avatar_emojis.get(name, "📣"),
+                                gender="female")
+
+    def test_the_face_of_a_said_reply_follows_the_cast(self):
+        """Применили новый состав — сменилось лицо и у сказанных реплик."""
+        post = self.said()
+        self.assertEqual(show.post_view(post)["avatar_emoji"], "🦊")
+        self.session.runtime_participants[0]["avatar_emoji"] = "👩‍🔬"
+        self.session.sync_cast_media()
+
+        self.assertEqual(show.post_view(post)["avatar_emoji"], "👩‍🔬",
+                         "портрет места должен смениться и у сказанных реплик")
+        self.assertEqual(post["avatar_emoji"], "🦊",
+                         "в самой реплике лицо не переписывается — рисуют её копию")
+
+    def test_a_face_of_the_one_who_left_the_cast_stays(self):
+        """Ушедший из труппы остаётся со своим лицом в прежних репликах."""
+        post = self.said()
+        self.session.runtime_participants = self.session.runtime_participants[1:]
+        self.session.sync_cast_media()
+        self.assertEqual(show.post_view(post)["avatar_emoji"], "🦊",
+                         "у ушедшего лицо остаётся с его репликами")
+
+    def test_a_face_that_is_gone_from_disk_is_not_a_face(self):
+        """За адресом портрета нет файла — лицом считается эмодзи."""
+        self.session.runtime_participants[0]["avatar_url"] = \
+            "/avatars/no_such_face_at_all.jpg"
+        self.session.sync_cast_media()
+        view = show.post_view(self.said())
+        self.assertIsNone(view["avatar_url"], "пустая рамка вместо лица хуже эмодзи")
+        self.assertEqual(view["avatar_emoji"], "🦊")
+
+    def test_the_picked_emoji_goes_into_the_cast_and_stays(self):
+        """Выбранный эмодзи — правка состава, и она сохраняется вместе с ним."""
+        self.assertEqual(show.set_participant_emoji("Мария", "👩‍🔬"), "")
+        self.assertEqual(self.session.avatar_emojis["Мария"], "👩‍🔬")
+        stored = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+        saved = next(p for p in stored["cast"] if p["display_name"] == "Мария")
+        self.assertEqual(saved["avatar_emoji"], "👩‍🔬",
+                         "эмодзи — часть состава, и он сохраняется")
+
+    def test_a_foreign_emoji_is_refused(self):
+        """Набор значков держит сервер: чужое значение в состав не попадает."""
+        self.assertIn("набор", show.set_participant_emoji("Мария", "🚀"))
+        self.assertIn("нет", show.set_participant_emoji("Никто", "🦊"))
+        self.assertEqual(self.session.avatar_emojis["Мария"], "🦊")
 
 
 # ---------------------------------------------------------------- сообщения
@@ -6208,6 +6488,45 @@ class TestPageScript(unittest.TestCase):
         self.assertNotIn("по паре", html, "пара — привычный случай, а не счёт")
         self.assertNotIn("напоминания", html,
                          "напоминаний в ходу не было, а слово обещало бы их")
+
+    def test_the_emoji_menu_offers_ones_of_the_sex_plus_the_common_ones(self):
+        """Меню эмодзи: свои для пола плюс общие — точно как их раздаёт сервер.
+
+        Меню и проверка на сервере должны сходиться: клик предлагает только то,
+        что действительно можно поставить (см. show.set_participant_emoji),
+        иначе половина значков не приживалась бы после выбора.
+        """
+        setup = ("EMOJIS = {male: ['🤴', '🧔'], female: ['👰', '💃'],"
+                 " neutral: ['🦊', '🎭']}; return emojiChoices")
+        out = self._run_page(("emojiChoices",),
+                             f"(() => {{ {setup}('female'); }})()",
+                             f"(() => {{ {setup}('male'); }})()")
+        self.assertEqual(out[0], ["👰", "💃", "🦊", "🎭"],
+                         "значки своего пола идут первыми, потом общие")
+        self.assertEqual(out[1], ["🤴", "🧔", "🦊", "🎭"])
+
+    def test_the_emoji_avatar_is_clickable_and_the_name_is_not_in_the_handler(self):
+        """По эмодзи в ленте можно кликнуть — и имя уезжает в данные, а не в код.
+
+        Имя — текст режиссёра: кавычка или апостроф в нём сломали бы обработчик,
+        нарисованный строкой (см. postAvatarHtml), а вместе с ним и все кнопки
+        ленты — как уже бывало с toggleTheme.
+        """
+        avatar = self._function("postAvatarHtml")
+        self.assertIn("data-emoji-for=", avatar)
+        self.assertNotIn("onclick=\"openEmojiPicker", avatar,
+                         "имя в обработчике — это сломанный скрипт на кавычке в имени")
+        self.assertIn("avatar_url", avatar, "у картинки остаётся прежний клик")
+
+        source = page.HTML_TEMPLATE
+        self.assertIn('id="emojiMenuGrid"', source, "меню значков должно быть в разметке")
+        self.assertIn("[data-emoji-for]", source, "лента слушает клик по эмодзи")
+        self.assertIn("'emojiMenuGrid'", source, "выбор значка обрабатывается меню")
+        self.assertIn(".emoji-choice", source)
+        # В составе: у картинки — полный размер, у эмодзи — набор значков
+        editor = self._function("openAvatarModal")
+        self.assertIn("openEmojiPicker", editor)
+        self.assertIn("avatarModalImg", editor)
 
 
 if __name__ == "__main__":
