@@ -808,6 +808,22 @@ def _steps_count(steps, kind: str) -> int:
     return sum(1 for step in (steps or []) if step.get("kind") == kind)
 
 
+def _input_tokens_total(steps) -> int:
+    """Сколько ВСЕГО уехало к модели на ввод за ход — по всем его запросам.
+
+    Одним числом «токенов на ввод» ход не описать: поиск — это ещё один круг,
+    и вся история уезжает к модели заново, поэтому за ход с пятью поисками
+    она оплачивается шесть раз. Число вендора, если он его назвал, важнее
+    нашего счёта — берём тем же порядком, что и в строке запроса.
+    """
+    total = 0
+    for step in (steps or []):
+        if step.get("kind") != "ask":
+            continue
+        total += int(step.get("tokens_in") or step.get("tokens_in_est") or 0)
+    return total
+
+
 def _as_number(value, fallback: int) -> int:
     """Число из отчёта, а если его там нет — запасное: ноль тоже число."""
     try:
@@ -852,6 +868,10 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     # одно слово «что-то было», а отказ в поиске и молчание модели — разные вещи
     summary["search_refusals"] = _steps_count(steps, "refused")
     summary["silences"] = _steps_count(steps, "silence")
+    # А это — сколько уехало на ввод за ход ЦЕЛИКОМ, по всем запросам: именно
+    # эту сумму видно в кабинете шлюза, и именно она объясняет, почему при
+    # пяти поисках вход выглядит втрое больше первой истории (см. _input_tokens_total)
+    summary["tokens_in_total"] = _input_tokens_total(steps)
     turn["added"] = extra
 
 

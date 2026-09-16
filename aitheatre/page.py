@@ -1865,7 +1865,16 @@ HTML_TEMPLATE = """
             const parts = [`запросов ${info.asks || 0}`];
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
             if (info.thought_steps) parts.push(`размышлений ${info.thought_steps}`);
-            parts.push(`${tokensText(info.tokens)} токенов на ввод`);
+            // Ввод — по ВСЕМ запросам хода, когда их было несколько: поиск
+            // это ещё один круг, и вся история уезжает к модели заново, поэтому
+            // ход с пятью поисками оплачивается шесть раз. Одно число «токенов
+            // на ввод» (это первый запрос) и путало: в кабинете шлюза видны
+            // все запросы, и сумма там втрое больше (см. _input_tokens_total)
+            if (info.asks > 1 && info.tokens_in_total) {
+                parts.push(`на ввод всего ${tokensText(info.tokens_in_total)} токенов`);
+            } else {
+                parts.push(`${tokensText(info.tokens)} токенов на ввод`);
+            }
             // Сколько ход длился — рядом с ценой: время здесь такая же плата,
             // и без него видно, сколько реплика стоила, но не видно, чего
             // она стоила зрителю (см. refresh_turn_report)

@@ -2173,6 +2173,29 @@ class TestTurnReport(unittest.TestCase):
             self.session.handle_ai_turn(participant, 1)
         return self.session.posts[-1]
 
+    def test_the_input_of_a_turn_is_counted_over_all_its_requests(self):
+        """Ввод хода — это все его запросы, а не только первый.
+
+        Поиск — ещё один круг, и вся история уезжает к модели заново: за ход
+        с пятью поисками она оплачивается шесть раз. Одним числом «токенов
+        на ввод» (это первый запрос) ход не описать — отсюда и расхождение
+        с кабинетом шлюза, где видны все запросы.
+        """
+        steps = [
+            {"kind": "ask", "n": 1, "tokens_in": 2871},
+            {"kind": "search", "n": 1, "query": "раз", "results": "нашлось",
+             "limit": 5},
+            {"kind": "ask", "n": 2, "tokens_in": 5189},
+            # Вендор чисел не назвал — считаем своим весом, иначе в сумме
+            # была бы дыра там, где запрос был
+            {"kind": "ask", "n": 3, "tokens_in_est": 6400},
+        ]
+        post = self._turn(steps=steps)
+
+        self.assertEqual(post["turn"]["asks"], 3)
+        self.assertEqual(post["turn"]["tokens_in_total"], 2871 + 5189 + 6400,
+                         "сумма по всем запросам хода, а не по первому")
+
     def test_the_two_kinds_of_trouble_are_counted_apart(self):
         """Отказ в поиске и молчание — разные заминки, и в сводке они врозь.
 
@@ -5212,9 +5235,13 @@ class TestPageScript(unittest.TestCase):
         """
         out = self._run_in_node(
             "turnSummaryParts({asks: 2, search_rounds: 1, tokens: 2254, seconds: 135,"
-            " spent: 1.89, search_refusals: 1, silences: 0})",
+            " spent: 1.89, search_refusals: 1, silences: 0, tokens_in_total: 14158})",
             "turnSummaryParts({asks: 1, tokens: 10, silences: 2})")
         quiet, mute = " · ".join(out[0]), " · ".join(out[1])
+
+        # Ввод назван по всем запросам хода: один запрос — и число одно
+        self.assertIn("на ввод всего 14\u00a0158 токенов", quiet)
+        self.assertIn("10 токенов на ввод", mute)
 
         self.assertIn("⏱ 2 мин 15 с", quiet)
         self.assertIn("1,89 ₽", quiet, "цена хода должна остаться в сводке")

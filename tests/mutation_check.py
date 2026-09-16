@@ -907,6 +907,14 @@ BUGS = {
          '    summary["silences"] = _steps_count(steps, "silence")',
          '    summary["silences"] = 0'),
     ],
+    # Из жизни: в кабинете шлюза вход был втрое больше, чем «токенов на ввод»
+    # в сводке хода — потому что поиск это ещё один круг, и вся история уезжает
+    # к модели заново, а сводка считала только первый запрос
+    "ввод хода снова считают по одному первому запросу": [
+        ("aitheatre/show.py",
+         '    summary["tokens_in_total"] = _input_tokens_total(steps)',
+         '    summary["tokens_in_total"] = int(summary.get("tokens") or 0)'),
+    ],
     "часы страницы снова молчат про надбавку": [
         ("aitheatre/page.py",
          "                if (data.turn_extra) {",
