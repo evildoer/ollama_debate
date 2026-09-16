@@ -490,6 +490,18 @@ def who_line(turn: dict) -> str:
             f"{who.get('model') or ''} · Акт {who.get('round')} · {who.get('time') or ''}\n")
 
 
+def avatar_line(avatar_url) -> str:
+    """Где лежит портрет говорившего — строкой, только если портрет есть.
+
+    У поста в ленте вместо эмодзи может стоять картинка, и в записи она названа
+    своим адресом: по записи реплика собирается назад, и после возврата
+    из ДАМПа лицо должно остаться тем же. Эмодзи тут не нужен: он и так стоит
+    рядом с именем в шапке записи (см. cast_field).
+    """
+    path = str(avatar_url or "").strip()
+    return f"**Аватар:** {path}\n" if path else ""
+
+
 def added_purpose(summary: dict, added: list) -> str:
     """Из чего сложился дописанный хвост — теми же словами, что в ленте.
 
@@ -575,6 +587,7 @@ def dump_turn_header(post_id: int, turn: dict) -> str:
     out = ["\n" + turn_heading(post_id, turn) + "\n"]
     out.append(TURN_SECTIONS["who"] + "\n")
     out.append(who_line(turn))
+    out.append(avatar_line((turn.get("who") or {}).get("avatar")))
     # Окно и то, что в него вошло, — один раздел: это два взгляда на одно место
     out.append(TURN_SECTIONS["place"] + "\n")
     out.append(window_line(turn.get("budget") or {}))
@@ -625,7 +638,8 @@ def dump_human_markdown(post: dict) -> str:
                        str(post.get("model_used") or ""),
                        str(post.get("role_name") or ""), f"Акт {post.get('round')}"])
     return (f"\n{head}\n\n"
-            f"Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
+            + avatar_line(post.get("avatar_url"))
+            + f"Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
             + quoted(post.get("content")) + "\n")
 
 
@@ -944,6 +958,7 @@ _CUT_LINE_RE = re.compile(
     rf"^- (?P<speaker>.*?) · (?P<tokens>{_GROUPED}) токенов · (?P<preview>.*)$")
 _MESSAGE_RE = re.compile(
     r"^- №(?P<index>\d+)/(?P<total>\d+) · (?P<role>[^·]*) · (?P<rest>.*)$")
+_AVATAR_RE = re.compile(r"^\*\*Аватар:\*\* (?P<path>\S+)$")
 
 
 def _as_int(raw) -> int:
@@ -1179,6 +1194,35 @@ def _split_emoji(field: str) -> tuple:
     return "", str(field or "").strip()
 
 
+def _avatar_from(lines: list) -> str:
+    """Портрет говорившего из записи — обратно тому, что пишет avatar_line.
+
+    Ищется по всей записи, а не только в разделе «кто»: у реплики человека
+    разделов нет вовсе, а портрет у неё такой же (см. dump_human_markdown).
+    Чужого тут оказаться не может: в записи портрет назван один раз, а тексты
+    моделей и системный промпт идут в кавычках (см. quoted).
+    """
+    for line in lines or []:
+        found = _AVATAR_RE.match(line)
+        if found:
+            return found.group("path")
+    return ""
+
+
+def _avatar_that_exists(url) -> str:
+    """Адрес портрета, если сам файл ещё на месте (пустая строка — нет его).
+
+    Записи в ДАМПе живут дольше картинок: портрет можно удалить или подобрать
+    заново, и тогда адрес из файла уже никуда не ведёт. Пустая рамка вместо
+    лица хуже эмодзи, поэтому адрес проверяется, а не берётся на слово.
+    """
+    path = str(url or "").strip()
+    if not path:
+        return ""
+    name = path.rstrip("/").split("/")[-1]
+    return path if name and (settings.AVATAR_DIR / name).exists() else ""
+
+
 def _split_gender(name: str) -> tuple:
     """Имя и пол из «Элина ♀» — обратно тому, что пишет cast_field."""
     written = str(name or "").strip()
@@ -1261,7 +1305,10 @@ def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str
         "id": post_id,
         "display_name": name,
         "model_used": who.get("model") or "",
-        "avatar_url": session.avatars.get(name),
+        # Портрет — из записи, а если файла уже нет (или в записи его не было) —
+        # из состава, который сейчас в пульте: лицо то же, пока имя то же
+        "avatar_url": (_avatar_that_exists(who.get("avatar"))
+                       or _avatar_that_exists(session.avatars.get(name)) or None),
         "avatar_emoji": (who.get("emoji") or session.avatar_emojis.get(name)
                          or ROLE_ICONS.get(role, "📣")),
         "content": content,
@@ -1290,6 +1337,7 @@ def _parse_record(post_id: int, rest: str, body: list) -> dict:
         who["gender"] = ("female" if "♀" in "\n".join(sections.get("who") or [])
                           else "male")
     who["role"] = ROLE_BY_NAME.get(who.get("role_name") or "", "participant")
+    who["avatar"] = _avatar_from(body)
     who["topic"] = ""
     if not sections:
         # Реплика человека: ни запросов, ни поиска, поэтому и разделов нет
@@ -1598,10 +1646,15 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         "who": {
             "name": participant.get("display_name", ""),
             "model": participant.get("model", ""),
-            # Значок и пол — тоже часть «кто говорит»: в ленте они рядом с именем,
-            # и в записи о ходе (см. who_line) должны быть там же
+            # Значок, пол и портрет — тоже часть «кто говорит»: в ленте они рядом
+            # с именем, и в записи о ходе (см. who_line и avatar_line) — там же.
+            # Портрет пишется путём, а не картинкой: у поста в ленте на этом месте
+            # и стоит снимок (см. postAvatarHtml), и без пути после возврата
+            # из ДАМПа лицо пропало бы
             "emoji": participant.get("avatar_emoji")
                      or session.avatar_emojis.get(participant.get("display_name", ""), ""),
+            "avatar": participant.get("avatar_url")
+                      or session.avatars.get(participant.get("display_name", ""), ""),
             "gender": participant.get("gender", "male"),
             "role": role_of(participant.get("is_moderator", False),
                             participant.get("is_judge", False)),

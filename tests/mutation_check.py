@@ -1103,6 +1103,17 @@ BUGS = {
          '    return (f"**Кто:** **{who.get(\'name\') or \'\'}** {gender_symbol(who.get(\'gender\'))} · "',
          '    return (f"**Кто:** **{who.get(\'name\') or \'\'}** · "'),
     ],
+    "портрет участника снова не попадает в запись": [
+        ("aitheatre/show.py",
+         "    out.append(avatar_line((turn.get(\"who\") or {}).get(\"avatar\")))",
+         ""),
+    ],
+    "портрет, за которым нет файла, снова берётся на слово": [
+        ("aitheatre/show.py",
+         "    name = path.rstrip(\"/\").split(\"/\")[-1]\n"
+         "    return path if name and (settings.AVATAR_DIR / name).exists() else \"\"",
+         "    return path"),
+    ],
     "время хода и его цена снова не читаются из шапки": [
         ("aitheatre/show.py",
          "    for part in fields[5:]:\n"

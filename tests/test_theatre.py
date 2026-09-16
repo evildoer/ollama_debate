@@ -2963,6 +2963,9 @@ class TestPlayKeptInDump(unittest.TestCase):
     что их и пишут.
     """
 
+    # Портрет участника: у поста в ленте на этом месте стоит картинка
+    FACE = "/avatars/test_face_1.jpg"
+
     def setUp(self):
         self.session = make_session()
         strip_session_patch(self, self.session)
@@ -3018,10 +3021,19 @@ class TestPlayKeptInDump(unittest.TestCase):
                 cloud.journal_push(kwargs["report"], step)
             return "Вот ответ.", 1, ["Сыктывкар население"]
 
-        with mock.patch.object(settings, "DUMP_FILE", dump):
+        # Портрет у участников бывает: в ленте на месте эмодзи стоит картинка,
+        # и в записи она названа — иначе после возврата из ДАМПа лицо пропадёт
+        face = self.FACE
+        (Path(folder) / "test_face_1.jpg").write_bytes(b"")
+        participant = dict(self._participant(), avatar_url=face)
+        self.session.avatars[participant["display_name"]] = face
+        self.session.avatars["Живой"] = face
+
+        with mock.patch.object(settings, "DUMP_FILE", dump), \
+                mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
             show.start_dump("Возвращённая тема")
             with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
-                self.session.handle_ai_turn(self._participant(), 1,
+                self.session.handle_ai_turn(participant, 1,
                                             on_draft=self.drafts.append)
             # И живая реплика — тоже часть спектакля: у неё нет ни запросов,
             # ни поиска, но в ленте она стоит между машинными
@@ -3038,7 +3050,10 @@ class TestPlayKeptInDump(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as folder:
             written, _ = self._play(folder)
-            play = show.parse_dump(written)
+            # Портреты лежат в avatars/, и в проверке — свой, временный: файл,
+            # за которым ничего нет, лицом не считается (см. _avatar_that_exists)
+            with mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
+                play = show.parse_dump(written)
 
         self.assertIsNotNone(play, "свой же ДАМП не читается")
         self.assertEqual(play["topic"], "Возвращённая тема")
@@ -3047,7 +3062,7 @@ class TestPlayKeptInDump(unittest.TestCase):
                          [p["display_name"] for p in played])
         for original, restored in zip(played, play["posts"]):
             for key in ("content", "round", "role", "role_name", "gender",
-                        "gender_symbol", "model_used", "timestamp"):
+                        "gender_symbol", "model_used", "timestamp", "avatar_url"):
                 self.assertEqual(restored[key], original[key], key)
 
         machine = played[0]["id"]
@@ -3108,6 +3123,44 @@ class TestPlayKeptInDump(unittest.TestCase):
         self.assertIsNone(show.parse_dump(older))
         self.assertIsNone(show.parse_dump("# ДАМП · 01.09.2026 12:00 · прежний\n\nход\n"),
                           "прежний ДАМП без номера формата тоже не наш")
+
+    def test_the_portrait_comes_back_with_the_reply(self):
+        """У вернувшейся реплики то же лицо: портрет назван в самой записи.
+
+        У поста в ленте вместо эмодзи может стоять картинка, и взять её
+        из состава нельзя: имя за время между спектаклями уходит, а лицо —
+        часть «кто говорит», а не настройка пульта.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            written, dump = self._play(folder)
+            self.assertIn(f"**Аватар:** {self.FACE}", written,
+                          "адрес портрета должен быть в записи")
+            # Состав мог смениться: имена другие — лица в нём нет вовсе
+            self.session.avatars = {}
+            self.session.avatar_emojis = {}
+            with mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
+                play = show.parse_dump(dump.read_text(encoding="utf-8"))
+
+        self.assertEqual([p["avatar_url"] for p in play["posts"]],
+                         [self.FACE, self.FACE],
+                         "портрет должен вернуться из записи, а не из состава")
+
+    def test_a_portrait_that_is_gone_falls_back_to_the_emoji(self):
+        """Портрет, за которым нет файла, — не лицо: у поста остаётся эмодзи.
+
+        Записи живут дольше картинок: портрет можно удалить или подобрать заново.
+        Пустая рамка вместо лица хуже эмодзи, поэтому адрес из записи проверяется.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            written, _ = self._play(folder)
+        empty = tempfile.mkdtemp()
+        with mock.patch.object(settings, "AVATAR_DIR", Path(empty)):
+            play = show.parse_dump(written)
+
+        self.assertEqual([p["avatar_url"] for p in play["posts"]], [None, None],
+                         "адрес портрета, за которым нет файла, — не лицо")
+        self.assertTrue(all(p["avatar_emoji"] for p in play["posts"]),
+                        "без портрета у поста должен остаться эмодзи")
 
     def test_the_heading_carries_the_time_and_the_price_back(self):
         """Время хода и его цена — в шапке записи, и читаются обратно.
