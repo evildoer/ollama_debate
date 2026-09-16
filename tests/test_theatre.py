@@ -118,6 +118,7 @@ CLOUD_DEFAULTS = (
     ("CLOUD_STREAM", True), ("CLOUD_SHOW_THINKING", True),
     ("CLOUD_LIMIT_PARAMS", True), ("CLOUD_NUM_CTX", 32768),
     ("CLOUD_MAX_TOKENS", 0), ("CLOUD_TURN_LIMIT", 120),
+    ("CLOUD_SEARCH_TIME", 60),
     ("MAX_SEARCHES", 3), ("SEARCH_MAX_RESULTS", 5), ("MAX_SEARCH_ATTEMPTS", 2),
     # Цена хода читается у шлюза, а у прогона шлюза нет: пустой путь значит
     # «не спрашивать вовсе» — иначе набор ходил бы в интернет за балансом.
@@ -4008,6 +4009,49 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(count, 10, "разрешённые поиски должны состояться все")
         self.assertEqual(len(queries), 10)
         self.assertEqual(content, "Сыктывкар — столица Коми.")
+
+    def test_a_search_buys_the_turn_more_time(self):
+        """Состоявшийся поиск добавляет ходу времени — но у срока есть предел.
+
+        Поиск — это ещё один круг: модель попросила искать, получила найденное
+        и отвечает заново. Пока срок считался внутри каждого запроса, у хода
+        с десятью поисками срока не было вовсе — десять раз по CLOUD_TURN_LIMIT.
+        А «свежий срок на каждый поиск» — та же беда с другого конца: ход,
+        который ищет, не кончился бы никогда. Поэтому поиск даёт надбавку.
+        """
+        cloud_setting(self, "CLOUD_TURN_LIMIT", 100)
+        cloud_setting(self, "CLOUD_SEARCH_TIME", 60)
+        left = cloud.turn_deadline() - time.monotonic()
+        self.assertAlmostEqual(left, 100, delta=3,
+                               msg="основа срока — предел хода, без надбавок")
+
+        deadlines = []
+
+        def one_search_then_answer(*_args, **kwargs):
+            deadlines.append(kwargs.get("deadline"))
+            if len(deadlines) == 1:
+                return "", [{"id": "call-1", "type": "function",
+                             "function": {"name": "search_web",
+                                          "arguments": json.dumps({"query": "погода"})}}]
+            return "Готово.", []
+
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        cloud_setting(self, "MAX_SEARCHES", 1)
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")), \
+                mock.patch.object(cloud, "chat", side_effect=one_search_then_answer):
+            content, count, _queries = ollama_api.ask_model(
+                self.MODEL, [{"role": "user", "content": "Что нового?"}],
+                participant_name="Роман")
+
+        self.assertEqual(count, 1)
+        self.assertEqual(content, "Готово.")
+        self.assertEqual(len(deadlines), 2, "поиск — это ещё один запрос к модели")
+        self.assertIsNotNone(deadlines[0], "у облачного хода срок обязан быть")
+        self.assertIsNotNone(deadlines[1],
+                             "срок, посчитанный в начале хода, должен доехать "
+                             "до каждого его запроса, а не считаться заново")
+        self.assertAlmostEqual(deadlines[1] - deadlines[0], 60, delta=3,
+                               msg="состоявшийся поиск даёт ходу ещё времени")
 
     def test_an_error_is_not_taken_for_an_answer(self):
         """Текст ошибки — не реплика: поиск за ним не просят.

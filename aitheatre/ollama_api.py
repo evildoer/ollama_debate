@@ -781,7 +781,7 @@ def _merge_options(participant: dict) -> dict:
     return opts
 
 
-def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None, think=None, on_delta=None, on_thought=None, tools=None, report: dict = None) -> tuple:
+def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True, tool_choice: str = None, options: dict = None, think=None, on_delta=None, on_thought=None, tools=None, report: dict = None, deadline: float = None) -> tuple:
     """
     Отправляет запрос к модели. Автоматически определяет поддержку tools.
     
@@ -810,7 +810,7 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         # (см. ask_model)
         return cloud.chat(model, messages, options=options, tool_choice=tool_choice,
                           on_delta=on_delta, on_thought=on_thought, use_tools=tools,
-                          report=report)
+                          report=report, deadline=deadline)
 
     # Проверяем кэш поддержки tools
     if model not in MODELS_TOOLS_SUPPORT:
@@ -1053,6 +1053,10 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
     # Иначе потолок поисков молча упирался бы в потолок кругов: режиссёр поднял
     # MAX_SEARCHES, а ход кончился бы на том же месте, и почему — не понять
     max_iterations = max(8, min_searches + max_searches + max_forced_attempts + 2)
+    # Срок на ход облачной модели — один на все её запросы, и он живёт здесь,
+    # а не внутри запроса: круг поиска — это ещё один запрос, и брать на него
+    # свежий срок значило бы не иметь срока вовсе (см. cloud.turn_deadline)
+    deadline = cloud.turn_deadline() if cloud.is_cloud_model(model) else None
     force_tool_use = False  # Флаг для принудительного использования инструмента через tool_choice
     forced_attempts = 0     # Счётчик попыток принудительного поиска
     content = ""
@@ -1090,7 +1094,8 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         
         content, tool_calls = ask_model_with_tools(model, messages, tool_choice=current_tool_choice,
                                                    options=options, think=think, on_delta=on_delta,
-                                                   on_thought=take_thought, report=report)
+                                                   on_thought=take_thought, report=report,
+                                                   deadline=deadline)
         tool_calls = tool_calls or []
 
         # Модель может попросить поиск не протоколом, а словами: напечатать
@@ -1192,6 +1197,13 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                 # по нему нашлось, лежали рядом — со временем и весом
                 journal_search(report, search_count, query, result, max_searches,
                                started=started)
+                # Состоявшийся поиск добавляет ходу времени: на его круг уйдёт
+                # ещё один запрос к модели, и он должен успеть состояться.
+                # Именно надбавка, а не новый срок: у хода всё равно остаётся
+                # предел — иначе модель, ищущая в десятый раз, продлевала бы себе
+                # ход бесконечно (см. cloud.per_search_seconds)
+                if deadline is not None:
+                    deadline += cloud.per_search_seconds()
                 
                 if tc.get("textual"):
                     # Найденное — обычным сообщением: с этой моделью мы говорим
@@ -1266,7 +1278,7 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
             content, _tool_calls = ask_model_with_tools(model, messages, tool_choice=None,
                                                         options=options, think=False, tools=False,
                                                         on_delta=on_delta, on_thought=take_thought,
-                                                        report=report)
+                                                        report=report, deadline=deadline)
             # И тут просьба о поиске может прийти словами: репликой её считать
             # нельзя, а выполнять уже нечего — ход кончается (см. tooltext)
             content = tooltext.take_calls(content)[0]

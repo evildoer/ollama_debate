@@ -267,8 +267,39 @@ def turn_limit() -> int:
     CLOUD_TIMEOUT — про один кусочек ответа, а этот срок — про весь ход.
     Разница важна: «думающая» модель шлёт кусочки исправно, но зацикливается
     и молотит случайные токены полчаса — спектакль при этом стоит.
+    Ноль или меньше — без предела, и превращать его в одну секунду нельзя:
+    тогда оборвался бы вообще каждый запрос (см. turn_deadline).
     """
-    return max(1, int(settings.CLOUD_TURN_LIMIT))
+    try:
+        return int(settings.CLOUD_TURN_LIMIT)
+    except (TypeError, ValueError):
+        return 180
+
+
+def per_search_seconds() -> int:
+    """Сколько секунд добавляет ходу каждый состоявшийся поиск."""
+    try:
+        return max(0, int(settings.CLOUD_SEARCH_TIME))
+    except (TypeError, ValueError):
+        return 0
+
+
+def turn_deadline():
+    """Когда ходу пора кончаться — без надбавки за поиски.
+
+    Срок считается на ход целиком, а не на каждый запрос: у модели, которая
+    ищет, запросов за ход столько же, сколько поисков, — по одному на круг.
+    Пока срок брался в каждом запросе заново, у хода с десятью поисками не было
+    срока вовсе: десять раз по CLOUD_TURN_LIMIT секунд.
+
+    Надбавку за состоявшиеся поиски ведёт тот, кто ведёт ход: он один знает,
+    сколько их было (см. per_search_seconds и ollama_api.ask_model). Здесь
+    вычитается только основа — так у срока есть и начало, и предел: ход с десятью
+    поисками длится 180 + 10 × CLOUD_SEARCH_TIME, а не десять раз по 180.
+    """
+    if turn_limit() <= 0:
+        return None
+    return time.monotonic() + turn_limit()
 
 
 def show_thinking() -> bool:
@@ -1356,7 +1387,8 @@ def messages_tokens(messages: list) -> int:
 
 
 def chat(model: str, messages: list, options: dict = None, tool_choice: str = None,
-         on_delta=None, on_thought=None, use_tools=None, report: dict = None) -> tuple:
+         on_delta=None, on_thought=None, use_tools=None, report: dict = None,
+         deadline: float = None) -> tuple:
     """Один ход облачной модели. Возвращает (текст, вызовы инструментов).
 
     Форма ответа — та же, что у Ollama-пути, поэтому весь остальной код
@@ -1377,10 +1409,12 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     кончился, сколько токенов ушло в размышления): по нему ход объясняет своё
     молчание словами (см. _turn_notes).
     """
-    # Срок на весь ход считаем до запроса: он про ход целиком, вместе с ожиданием
-    # шлюза, а не про один кусочек. Ноль значит «без предела»
+    # Срок на ход приходит готовым от того, кто ведёт ход: там же он растёт
+    # с каждым поиском (см. turn_deadline и ollama_api.ask_model). Прямому
+    # вызову считать не у кого — считаем сами: один вызов и есть ход
+    if deadline is None:
+        deadline = turn_deadline()
     seconds = turn_limit()
-    deadline = time.monotonic() + seconds if seconds > 0 else None
 
     # Тело запроса нарочно простое: модель, сообщения и stream. Всё остальное
     # (числа характеров, инструмент поиска, имена отправителей) добавляется только
@@ -1495,8 +1529,9 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         # Не молчим: иначе оборванная реплика выглядела бы свойством модели.
         # И называем настоящее число, а не «0 — без предела»: сколько именно
         # терпения не хватило, видно потом и в логе, и в ДАМПе
-        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT) и оборван: "
-                f"модель так и не перешла к ответу")
+        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT, плюс время "
+                f"за состоявшиеся поиски) и оборван: модель так и не перешла "
+                f"к ответу")
         if not uses_tools and settings.ENABLE_SEARCH:
             note += (", а инструмент поиска ей не отправлен — при правилах про "
                      "поиск в промпте это частая причина такой петли")

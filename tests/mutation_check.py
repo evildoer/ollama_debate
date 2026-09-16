@@ -867,8 +867,22 @@ BUGS = {
     ],
     "обрыв хода снова валят на «без предела»": [
         ("aitheatre/cloud.py",
-         '        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT) и оборван: "',
-         '        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT, 0 — без предела) и оборван: "'),
+         '        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT, плюс время "',
+         '        note = (f"ход длился дольше {seconds:g} с (CLOUD_TURN_LIMIT, 0 — без предела "'),
+    ],
+    # Из жизни: MAX_SEARCHES подняли до десяти, а срок хода считался внутри
+    # каждого запроса — и у хода с десятью поисками срока не было вовсе
+    "срок хода снова считают заново в каждом запросе": [
+        ("aitheatre/ollama_api.py",
+         "    deadline = cloud.turn_deadline() if cloud.is_cloud_model(model) else None",
+         "    deadline = None"),
+    ],
+    "состоявшийся поиск снова не даёт ходу времени": [
+        ("aitheatre/ollama_api.py",
+         "                if deadline is not None:\n"
+         "                    deadline += cloud.per_search_seconds()",
+         "                if False:\n"
+         "                    deadline += cloud.per_search_seconds()"),
     ],
     "ДАМП снова растёт от спектакля к спектаклю": [
         ("aitheatre/show.py",
