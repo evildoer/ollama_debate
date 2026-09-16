@@ -223,7 +223,22 @@ def ask_line(step: dict) -> str:
 
 # Каким значком помечать строку хронологии: шаг — он и есть шаг, а вот заминки
 # и отказы должны отличаться от обычного запроса с первого взгляда
-STEP_MARKS = {"refused": "⛔", "force": "🔍", "silence": "⚠️", "note": "·"}
+STEP_MARKS = {"refused": "⛔", "force": "🔍", "silence": "⚠️", "note": "·",
+              "money": "💰"}
+
+
+def money(value) -> str:
+    """Рубли с копейками: «2,46 ₽» — как на ценнике, а не «2.46 RUB».
+
+    Прочерк вместо выдуманного числа: если шлюз остатка не дал, цены у нас нет,
+    и подставлять ноль значило бы сказать «бесплатно».
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "— ₽"
+    text = f"{number:,.2f}".replace(",", "\u00a0").replace(".", ",")
+    return f"{text} ₽"
 
 
 def step_markdown(step: dict, with_text: bool = True) -> str:
@@ -702,7 +717,7 @@ def _as_number(value, fallback: int) -> int:
 
 
 def refresh_turn_report(turn: dict, added: list, search_count: int,
-                        journal: dict = None) -> None:
+                        journal: dict = None, spent: float = None) -> None:
     """Дописать в отчёт то, что стало известно только к концу хода.
 
     Отчёт собирается до запроса к модели (см. build_turn_report), а к концу надо
@@ -721,6 +736,9 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     summary["extra_messages"] = len(extra)
     summary["extra_tokens"] = sum(m["tokens"] for m in extra)
     summary["search_rounds"] = int(search_count or 0)
+    # Цена хода — по разнице остатков на ключе, а не по тарифам (см. _note_money).
+    # Не знаем — так и говорим молчанием: ноль означал бы «бесплатно»
+    summary["spent"] = spent
     summary["asks"] = sum(1 for step in steps if step.get("kind") == "ask")
     # Размышления — тоже шаг хронологии, и о них стоит сказать в свёрнутой
     # строке: иначе о том, что модель что-то говорила сама с собой, и не узнать
@@ -984,6 +1002,12 @@ class DebateSession:
         self.moderator_finished = False
         self.runtime_participants = []
         self.conversation_history = []
+        # Сколько стоил спектакль: сумма цен ходов, а каждая из них — разница
+        # остатков на ключе (см. cloud.balance_spent). Тарифов мы не знаем —
+        # а это факт со счёта
+        self.spent = 0.0
+        # Сказали ли уже вслух, что остатка нет и цены не будет
+        self.money_told = False
         # Отчёты ходов по номеру реплики: что именно уехало в модель, что
         # происходило по порядку и чем кончилось. В памяти — за весь
         # спектакль: читают это ради разбора свежего случая, а новый спектакль
@@ -1079,6 +1103,10 @@ class DebateSession:
         self.moderator_message = None
         self.moderator_finished = False
         self.conversation_history = []
+        # Счёт за спектакль начинается заново: это про этот вечер, а не про
+        # все, что были (см. _note_money)
+        self.spent = 0.0
+        self.money_told = False
         # Новый спектакль — новые реплики: отчёты прежних ходов к ним не подходят
         self.turn_log = {}
         self.sync_cast_media()
@@ -1547,6 +1575,55 @@ class DebateSession:
 
         return messages
 
+    def _note_money(self, journal: dict, before, before_error: str = "") -> float:
+        """Цена хода по остатку на ключе — и шаг об этом в хронологию.
+
+        Тарифов шлюза приложение не знает и знать не может: они в его каталоге,
+        в рублях за 1 000 000 токенов, и меняются без спроса. Зато остаток шлюз
+        отдаёт сам, и разница «до хода» и «после хода» — это не оценка, а факт
+        со счёта: размышления, поиски и кэш в неё входят так же, как в списание.
+
+        Возвращает цену хода (None — не знаем: шлюз остатка не дал, разрешения
+        нет, или остаток вырос — пополнение посреди хода). Ход из-за этого
+        не останавливается и не падает: не знать — допустимо, выдумывать — нет.
+        """
+        if not cloud.balance_url():
+            return None
+        if before is None:
+            # Шлюз остатка не дал: сказать об этом надо один раз за спектакль,
+            # а не на каждом ходу — иначе в хронологии утонет всё остальное
+            if before_error and not self.money_told:
+                self.money_told = True
+                detail = (f"цену ходов показать не могу — {before_error}")
+                print(f"  💰 {detail}")
+                cloud.journal_push(journal, {"kind": "money", "t": time.time(),
+                                             "text": detail})
+            return None
+        after, error = cloud.balance(force=True)
+        first = cloud.balance_number(before)
+        second = cloud.balance_number(after)
+        if first is None or second is None:
+            cloud.journal_push(journal, {
+                "kind": "note", "t": time.time(),
+                "text": ("цену хода не узнать: остаток на ключе прочитать не удалось"
+                         + (f" — {error}" if error else "")),
+            })
+            return None
+
+        spent = cloud.balance_spent(before, after)
+        if spent is None:
+            text = (f"баланс ключа: до хода {money(first)} → после {money(second)} — "
+                    f"списания за этот ход не видно (счёт не изменился или был "
+                    f"пополнен)")
+            print(f"  💰 Остаток ключа: {money(second)}, а списания за ход не видно")
+        else:
+            text = (f"баланс ключа: до хода {money(first)} → после {money(second)} — "
+                    f"за этот ход списано {money(spent)}")
+            print(f"  💰 За ход списано {money(spent)} (остаток {money(second)})")
+            self.spent = float(self.spent or 0.0) + spent
+        cloud.journal_push(journal, {"kind": "money", "text": text, "t": time.time()})
+        return spent
+
     # ------------------------------------------------------------
     # Ход AI
     # ------------------------------------------------------------
@@ -1566,6 +1643,15 @@ class DebateSession:
         # размышления модели. Тот же журнал дописывается в ДАМП, причём каждое
         # событие уходит в файл в тот момент, когда случилось
         journal = {"steps": []}
+        # Остаток на ключе — ДО хода: цену хода даёт разница остатков, а не
+        # тарифы, которых мы не знаем (см. cloud.balance и _note_money). Нет
+        # настроенного запроса баланса — нет и цены: токены всё равно точные.
+        # И только для облачного участника: у местной модели платить не за что,
+        # и спрашивать остаток на её ходу значило бы два запроса впустую
+        cloud_turn = cloud.is_cloud_model(participant.get("model", ""))
+        money_before, money_error = (cloud.balance(force=True)
+                                     if cloud_turn and cloud.balance_url()
+                                     else (None, ""))
         # Отчёт собирается ДО запроса к модели: ДАМП надо открыть и записать
         # «что уехало» раньше, чем модель начнёт думать — иначе у хода,
         # зациклившегося на две минуты, в файле не осталось бы вообще ничего
@@ -1599,7 +1685,8 @@ class DebateSession:
 
         # То, что стало известно к концу хода: сколько он дописал сам и сколько
         # раз просил поиск. Шаги при этом уже в отчёте — журнал у них общий
-        refresh_turn_report(turn, messages[len(sent):], search_count, journal)
+        spent = self._note_money(journal, money_before, money_error) if cloud_turn else None
+        refresh_turn_report(turn, messages[len(sent):], search_count, journal, spent)
         # Размышления, не попавшие в хронологию шагами (модель без потока, шлюз,
         # отдавший размышления одним куском): мысли оплачены, и это единственный
         # след того, чем модель занималась, — терять его нельзя

@@ -523,6 +523,120 @@ _NAMED_FIELD_RE = re.compile(
 _EASE_ROUNDS = 6
 
 
+# ── ОСТАТОК НА КЛЮЧЕ ───────────────────────────────────────────────────────
+# Цена хода берётся не из тарифов, а из разницы остатков: тарифов мы не знаем,
+# а остаток шлюз отдаёт сам (см. settings.CLOUD_BALANCE_PATH). Читается он
+# дважды на ход — до запроса и после — поэтому кэш короткий и только для показа
+_BALANCE_CACHE = {"at": 0.0, "data": None}
+
+# Про отказ в этом запросе (403) надо сказать словами, и один раз: остальное
+# — отказы на каждом ходу. Но сам запрос повторяется: разрешение «Запрос
+# баланса» включается в кабинете ключа, и заставлять перезапускать театр
+# ради этого не надо — со следующего хода цена появится сама
+_BALANCE_TOLD = {"refused": False}
+
+_BALANCE_403 = ("шлюз не разрешает ключу спрашивать баланс (403): разрешение "
+                "«Запрос баланса» включается в настройках ключа в кабинете шлюза. "
+                "Без него цену хода показать нельзя — токены остаются точными")
+
+
+def balance_url() -> str:
+    """Адрес остатка. У ProxyAPI он на том же хосте, но вне /v1.
+
+    Пустая строка — не спрашивать вовсе (см. CLOUD_BALANCE_PATH): у другого
+    шлюза этого запроса может не быть, и выдумывать за него нечего.
+    """
+    path = str(getattr(settings, "CLOUD_BALANCE_PATH", "") or "")
+    if not path:
+        return ""
+    base = str(settings.CLOUD_BASE_URL or "").rstrip("/")
+    if not base:
+        return ""
+    host = base.split("/v1")[0].rstrip("/")
+    return host + (path if path.startswith("/") else "/" + path)
+
+
+def balance_refused() -> bool:
+    """Уже сказали вслух, что ключу нельзя спрашивать баланс."""
+    return bool(_BALANCE_TOLD.get("refused"))
+
+
+def balance_told(refused: bool) -> None:
+    """Пометить, что о запрете на баланс уже сказано (чтобы не повторяться)."""
+    _BALANCE_TOLD["refused"] = bool(refused)
+
+
+def balance(force: bool = False) -> tuple:
+    """Остаток на ключе — (словарь с balance/budget, текст ошибки).
+
+    Кэш короткий и только для показа: цена хода считается по разнице остатков,
+    поэтому там остаток читается заново (force=True). Отвечает ли шлюз — его
+    дело: этот запрос есть у не каждого, и ошибка здесь никого не останавливает.
+    """
+    url = balance_url()
+    if not url:
+        return None, ""
+    ttl = max(0, int(getattr(settings, "CLOUD_BALANCE_TTL", 0) or 0))
+    fresh = time.monotonic() - float(_BALANCE_CACHE.get("at") or 0) < ttl
+    if not force and _BALANCE_CACHE.get("data") is not None and fresh:
+        return _BALANCE_CACHE["data"], ""
+    problem = key_problem()
+    if problem:
+        return None, problem
+
+    # Свой открыватель без прокси — как у остальных запросов к шлюзу: он сам
+    # прокси до вендоров, и вести его через локальный прокси значило бы сломать
+    request = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {api_key()}"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=timeout_seconds()) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        if e.code == 403:
+            return None, _BALANCE_403
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8")[:200]
+        except Exception:
+            detail = ""
+        return None, _error_text(e.code, str(getattr(e, "reason", "")), detail)
+    except Exception as e:
+        return None, hide_key(str(e))
+    if not isinstance(data, dict):
+        return None, "шлюз ответил про баланс чем-то, чего мы не поняли"
+    if _BALANCE_TOLD.get("refused"):
+        # Разрешение включили по ходу — и остаток пошёл: сказать об этом стоит
+        _BALANCE_TOLD["refused"] = False
+        print(f"  💰 Шлюз отдаёт остаток — цену ходов показываю (тарифы для этого не нужны)")
+    _BALANCE_CACHE.update({"at": time.monotonic(), "data": data})
+    return data, ""
+
+
+def balance_number(reading) -> float:
+    """Число остатка из ответа шлюза (None — в ответе его нет)."""
+    if not isinstance(reading, dict):
+        return None
+    try:
+        return float(reading.get("balance"))
+    except (TypeError, ValueError):
+        return None
+
+
+def balance_spent(before, after) -> float:
+    """Сколько списано за ход: разница остатков (None — не знаем).
+
+    Рост остатка — это не отрицательная цена, а пополнение посреди хода: тогда
+    честнее промолчать о цене хода, чем показать минус.
+    """
+    first = balance_number(before)
+    second = balance_number(after)
+    if first is None or second is None:
+        return None
+    spent = first - second
+    return spent if spent > 0 else None
+
+
 def dropped_params(model: str) -> set:
     """Поля, которых эта модель больше не увидит: шлюз назвал их лишними."""
     return _DROPPED_PARAMS.get(model, set())

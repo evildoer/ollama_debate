@@ -595,6 +595,31 @@ BUGS = {
          '        meaning = finish_meaning(step["finish_reason"])',
          '        meaning = ""'),
     ],
+    # Цена хода — факт со счёта шлюза, а не оценка: тарифов мы не знаем,
+    # а остаток шлюз отдаёт сам
+    "цену хода снова считают по тарифам, которых мы не знаем": [
+        ("aitheatre/cloud.py",
+         "    spent = first - second\n    return spent if spent > 0 else None",
+         "    spent = first - first\n    return spent if spent > 0 else None"),
+    ],
+    # У местной модели платить не за что: два запроса впустую на каждом её ходу
+    "остаток снова спрашивают и на ходу местной модели": [
+        ("aitheatre/show.py",
+         '        cloud_turn = cloud.is_cloud_model(participant.get("model", ""))',
+         '        cloud_turn = True'),
+    ],
+    "остаток на ключе снова читается один раз на ход": [
+        ("aitheatre/show.py",
+         '        after, error = cloud.balance(force=True)\n'
+         '        first = cloud.balance_number(before)',
+         '        after, error = before, ""\n'
+         '        first = cloud.balance_number(before)'),
+    ],
+    "цена хода снова не доезжает до ленты": [
+        ("aitheatre/show.py",
+         '    summary["spent"] = spent',
+         '    summary["spent"] = None'),
+    ],
     "кругов хода снова жёстко восемь, а поисков разрешено больше": [
         ("aitheatre/ollama_api.py",
          "    max_iterations = max(8, min_searches + max_searches + max_forced_attempts + 2)",

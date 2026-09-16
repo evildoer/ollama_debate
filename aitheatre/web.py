@@ -88,6 +88,10 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         "current_participant": show.session.current_participant,
         "current_action": show.session.current_action,
         "search_query": show.session.search_query,
+        # Сколько стоил спектакль: сумма разниц остатка на ключе. Считает её
+        # ход (см. show._note_money), а не страница: тарифов не знает никто,
+        # а остаток знает только шлюз
+        "spent": round(float(show.session.spent or 0.0), 2),
         "waiting_for_human": show.session.waiting_for_human,
         "current_participant_is_moderator": show.session.current_participant_is_moderator(),
         # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя

@@ -1693,6 +1693,13 @@ HTML_TEMPLATE = """
             return Number(n || 0).toLocaleString('ru-RU');
         }
 
+        // Рубли с копейками — как на ценнике. Цена хода берётся из остатка
+        // на ключе, а не из тарифов: тарифов мы не знаем, остаток знает шлюз
+        function moneyText(n) {
+            return Number(n || 0).toLocaleString('ru-RU', {minimumFractionDigits: 2,
+                                                          maximumFractionDigits: 2}) + ' ₽';
+        }
+
         const WINDOW_WORDS = {cloud: 'окно облака', local: 'окно модели',
                               unbounded: 'окно не ограничено (CLOUD_NUM_CTX = 0)'};
         // «Уехало» ничего не говорило: ни кто, ни куда. Здесь сказано прямо,
@@ -1773,7 +1780,8 @@ HTML_TEMPLATE = """
                         + `${tokensText(step.tokens)} токенов, в реплику не попали</div>`
                         + `<pre class="prompt-text">${escapeHtml(step.text || '')}</pre>`);
                 } else {
-                    const mark = step.kind === 'refused' ? '⛔' : step.kind === 'silence' ? '⚠️' : '🔍';
+                    const marks = {refused: '⛔', silence: '⚠️', force: '🔍', money: '💰', note: '·'};
+                    const mark = marks[step.kind] || '🔍';
                     parts.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>${mark} ${escapeHtml(step.text || '')}</div>`);
                 }
             });
@@ -1829,6 +1837,9 @@ HTML_TEMPLATE = """
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
             if (info.thought_steps) parts.push(`размышлений ${info.thought_steps}`);
             parts.push(`${tokensText(info.tokens)} токенов на ввод`);
+            // Цена хода — факт со счёта шлюза (разница остатков), а не оценка:
+            // тарифов приложение не знает (см. settings.CLOUD_BALANCE_PATH)
+            if (info.spent) parts.push(`💰 ${moneyText(info.spent)}`);
             if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
             if (info.problems) parts.push(`заминок ${info.problems}`);
             return `<details class="post-thinking post-prompt" data-post-id="${post.id}">`
@@ -2109,10 +2120,13 @@ HTML_TEMPLATE = """
             if (data.running && !data.waiting_for_human) {
                 statusDiv.classList.add('active');
                 let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
-                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>`;
+                // Сколько уже стоил спектакль — по факту со счёта шлюза
+                const bill = data.spent ? `<div style="font-size:12px;margin-top:6px;">💰 за спектакль ${moneyText(data.spent)}</div>` : '';
+                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>${bill}`;
             } else if (data.finished) {
                 statusDiv.classList.remove('active');
-                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>';
+                const curtain = data.spent ? `<div style="font-size:12px;margin-top:8px;">💰 за спектакль ${moneyText(data.spent)}</div>` : '';
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>' + curtain;
                 setTurnState('finished');
                 document.getElementById('finishBtn').style.display = 'none';
                 // «Покинуть театр» оставляем: занавес больше не закрывает сервер,

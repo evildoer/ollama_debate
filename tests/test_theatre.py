@@ -39,6 +39,7 @@ import collections
 import copy
 import http.server
 import importlib
+import io
 import json
 import os
 import re
@@ -49,6 +50,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -117,6 +119,10 @@ CLOUD_DEFAULTS = (
     ("CLOUD_LIMIT_PARAMS", True), ("CLOUD_NUM_CTX", 32768),
     ("CLOUD_MAX_TOKENS", 0), ("CLOUD_TURN_LIMIT", 120),
     ("MAX_SEARCHES", 3), ("SEARCH_MAX_RESULTS", 5), ("MAX_SEARCH_ATTEMPTS", 2),
+    # Цена хода читается у шлюза, а у прогона шлюза нет: пустой путь значит
+    # «не спрашивать вовсе» — иначе набор ходил бы в интернет за балансом.
+    # Кому это нужно — ставит путь сам (см. TestTurnReport про цену хода)
+    ("CLOUD_BALANCE_PATH", ""),
 )
 
 
@@ -2368,6 +2374,95 @@ class TestTurnReport(unittest.TestCase):
         self.assertIn("ответ инструмента поиска", written,
                       "у найденного тоже должно быть сказано, что это такое")
 
+    def test_the_price_of_a_turn_comes_from_the_balance_not_from_tariffs(self):
+        """Цена хода — разница остатков на ключе: тарифов мы не знаем, счёт знает шлюз.
+
+        Умножать токены на цену не на чем: цены шлюза живут в его каталоге
+        и меняются. А остаток он отдаёт сам — и разница «до» и «после» это уже
+        факт со счёта, вместе с размышлениями, поисками и кэшем.
+        """
+        gateway = FakeGateway(balances=[100.0, 97.5])
+        self.addCleanup(gateway.stop)
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+
+        def answer(model, messages, participant_name, **kwargs):
+            return "Вот ответ.", 0, []
+
+        participant = self._participant()
+        participant["model"] = "cloud:qwen/qwen3.8-flash"   # за местную платить нечем
+        with mock.patch.object(settings, "DUMP_FILE", dump), \
+                mock.patch.object(settings, "CLOUD_BASE_URL", gateway.base_url), \
+                mock.patch.object(settings, "CLOUD_API_KEY", "test-key-price"), \
+                mock.patch.object(settings, "CLOUD_BALANCE_PATH", "/proxyapi/balance"), \
+                mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            show.start_dump("Проверочная тема")
+            self.session.handle_ai_turn(participant, 1)
+            written = dump.read_text(encoding="utf-8")
+
+        self.assertAlmostEqual(self.session.spent, 2.5, places=2,
+                               msg="цена спектакля — сумма цен ходов")
+        self.assertAlmostEqual(self.session.posts[-1]["turn"]["spent"], 2.5, places=2,
+                               msg="цена хода должна доехать до ленты")
+        self.assertIn("баланс ключа", written)
+        self.assertIn("за этот ход списано 2,50 ₽", written,
+                      "рубли должны быть с копейками и с запятой, как на ценнике")
+        # Остаток читается дважды на ход, и оба раза — настоящим запросом
+        paths = [request["path"] for request in gateway.requests]
+        self.assertEqual(paths.count("/proxyapi/balance"), 2,
+                         "остаток нужен и до хода, и после него — иначе нет разницы")
+
+    def test_a_local_turn_does_not_ask_the_gateway_about_money(self):
+        """У местной модели платить не за что — и остаток у шлюза не спрашивают.
+
+        Два запроса на каждый ход ради места, где списания быть не может, —
+        это и лишний шум в чужой статистике, и лишняя задержка спектаклю.
+        """
+        gateway = FakeGateway(balances=[100.0, 97.5])
+        self.addCleanup(gateway.stop)
+        participant = self._participant()
+        participant["model"] = "qwen3:8b"   # местная
+
+        with mock.patch.object(settings, "CLOUD_BASE_URL", gateway.base_url), \
+                mock.patch.object(settings, "CLOUD_API_KEY", "test-key-local"), \
+                mock.patch.object(settings, "CLOUD_BALANCE_PATH", "/proxyapi/balance"), \
+                mock.patch.object(ollama_api, "ask_model",
+                                  mock.Mock(return_value=("Вот ответ.", 0, []))):
+            self.session.handle_ai_turn(participant, 1)
+
+        self.assertEqual([request["path"] for request in gateway.requests], [],
+                         "местный ход не должен трогать шлюз вовсе")
+        self.assertEqual(self.session.spent, 0.0)
+
+    def test_a_key_without_the_balance_permission_says_so_once(self):
+        """Нет разрешения на баланс — нет и цены, но спектакль от этого не падает.
+
+        По умолчанию ключам этот запрос запрещён, и шлюз отвечает 403. Это
+        не поломка театра: токены остаются точными, а про цену надо сказать
+        словами и один раз, а не отказом на каждом ходу.
+        """
+        self.addCleanup(cloud.balance_told, False)
+        self.addCleanup(cloud._BALANCE_CACHE.update, {"at": 0.0, "data": None})
+        error = urllib.error.HTTPError("u", 403, "Forbidden", {}, io.BytesIO(b"{}"))
+        opener = mock.Mock()
+        opener.open.side_effect = error
+
+        with mock.patch.object(settings, "CLOUD_BALANCE_PATH", "/proxyapi/balance"), \
+                mock.patch.object(settings, "CLOUD_API_KEY", "test-key-403"), \
+                mock.patch.object(cloud.urllib.request, "build_opener",
+                                  mock.Mock(return_value=opener)):
+            data, problem = cloud.balance(force=True)
+            second, again = cloud.balance(force=True)
+
+        self.assertIsNone(data)
+        self.assertIn("Запрос баланса", problem,
+                      "надо назвать разрешение, которое включается в кабинете ключа")
+        self.assertIn("403", problem)
+        # А вот сама попытка повторяется: разрешение включается в кабинете ключа,
+        # и заставлять перезапускать театр ради этого не надо — цена появится сама
+        self.assertEqual((second, again), (None, problem),
+                         "разрешение могут включить по ходу: надо снова попробовать")
+
     def test_the_answer_code_is_translated_into_words(self):
         """Код ответа вендора — словами: «конец: tool_calls (слов модель не сказала…)».
 
@@ -2936,8 +3031,10 @@ class FakeGateway:
     """
 
     def __init__(self, models=("qwen/qwen3.7-flash",), content="Канберра.",
-                 status=200, body_text=None, statuses=(), stream_text=None, texts=()):
+                 status=200, body_text=None, statuses=(), stream_text=None, texts=(),
+                 balances=()):
         self.requests = []        # что до нас донеслось: метод, путь, ключ, тело
+        self.balances = list(balances)   # остаток на ключе: очередь для «до» и «после»
         self.models = list(models)
         self.content = content
         self.status = status
@@ -2995,6 +3092,18 @@ class FakeGateway:
                 break    # сокет закрыт — просили остановиться
 
     def answer(self, path: str) -> bytes:
+        # Остаток на ключе — свой адрес и свой ответ: он не модель, и очередь
+        # ответов шлюза он тратить не должен (иначе одна проверка съедала бы
+        # заготовленный ответ другой). Значений два и больше — берём по одному:
+        # именно так читается цена хода, «до» и «после»
+        if path.rstrip("/").endswith("/balance"):
+            if not self.balances:
+                value = 0.0
+            elif len(self.balances) == 1:
+                value = self.balances[0]
+            else:
+                value = self.balances.pop(0)
+            return json.dumps({"balance": value}).encode("utf-8")
         if self.texts:
             # Очередь тел ответа: нужна там, где первый ответ — отказ, а второй
             # должен быть настоящим (иначе повторить запрос нечего)
