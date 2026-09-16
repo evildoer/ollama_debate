@@ -220,6 +220,14 @@ BUGS = {
          "    for field in dropped_params(model):\n        payload.pop(field, None)",
          "    for field in ():\n        payload.pop(field, None)"),
     ],
+    # Из жизни: два экземпляра садились на порт 5000 молча, браузер открывал
+    # старый — и казалось, что театр «помнит» старый спектакль
+    "занятый порт снова выглядит свободным": [
+        ("aitheatre/web.py",
+         '        probe.bind(("0.0.0.0", int(port)))',
+         '        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n'
+         '        probe.bind(("0.0.0.0", int(port)))'),
+    ],
     "порт из командной строки снова не читается": [
         ("aitheatre/web.py",
          "    port = port_from_argv(sys.argv[1:])",

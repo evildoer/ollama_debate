@@ -44,6 +44,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import symtable
 import tempfile
@@ -764,6 +765,35 @@ class TestInstanceFiles(unittest.TestCase):
         self.assertLess(web_source.index("settings.prepare_instance(port)"),
                         web_source.index("show.load_theatre_settings()"),
                         "папка экземпляра должна заводиться раньше чтения сцены")
+
+    def test_a_busy_port_is_not_taken_silently(self):
+        """Занятый порт обязан быть виден — иначе театр садится рядом с собой.
+
+        Windows разрешает двум процессам занять один порт (werkzeug ставит
+        SO_REUSEADDR, а с ним занятый порт выглядит свободным). Второй `py .`
+        садился молча, браузер открывал первый экземпляр, и в нём шёл старый
+        спектакль со старыми репликами — «откуда он их помнит?». Ниоткуда: просто
+        это был другой процесс, всё ещё живой.
+        """
+        holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        holder.bind(("0.0.0.0", 0))
+        holder.listen(1)
+        self.addCleanup(holder.close)
+        busy = holder.getsockname()[1]
+
+        self.assertTrue(web_app.port_is_busy(busy),
+                        "занятый так же, как его занимает сервер, порт должен быть виден")
+        self.assertEqual(web_app.free_port(busy), busy + 1,
+                         "занятый порт — повод взять следующий, а не садиться рядом")
+
+    def test_a_free_port_is_left_alone(self):
+        """Свободный порт не трогаем: привычный `py .` должен вести туда же."""
+        self.assertEqual(web_app.free_port(5000, taken=lambda _port: False), 5000)
+        # Два занятых подряд — берём третий: «первый свободный», а не «следующий»
+        taken = {5000: True, 5001: True, 5002: False}
+        self.assertEqual(
+            web_app.free_port(5000, taken=lambda port: taken.get(port, False)), 5002)
 
     def test_the_server_plays_on_the_port_it_was_given(self):
         """Порт из аргумента доходит и до сервера, и до браузера, и до файлов."""

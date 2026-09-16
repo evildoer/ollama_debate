@@ -7,6 +7,7 @@
 
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -623,8 +624,51 @@ def port_from_argv(argv: list) -> int:
     return int(settings.PORT)
 
 
+def port_is_busy(port: int) -> bool:
+    """Занят ли порт — проверкой своей, а не надеждой на сервер.
+
+    Windows разрешает двум экземплярам сесть на один порт: werkzeug ставит
+    SO_REUSEADDR, и второй `py .` молча встаёт рядом с первым. Молча — значит
+    браузер открывает **первый** экземпляр, а в нём старый спектакль со старыми
+    репликами (они никуда и не девались: процесс жив и держит их в памяти).
+    Поэтому пробуем сами, и без SO_REUSEADDR: с ним занятый порт выглядел бы
+    свободным — именно так эта беда и незаметна.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind(("0.0.0.0", int(port)))
+        return False
+    except OSError:
+        return True
+    finally:
+        probe.close()
+
+
+def free_port(port: int, taken=None, tries: int = 20) -> int:
+    """Первый свободный порт, начиная с заданного: 5000 занят — берём 5001.
+
+    taken подменяется в проверках: настоящая проба занимает порт на миг,
+    и на пустом наборе это лишний повод для случайных падений.
+    """
+    taken = taken or port_is_busy
+    for candidate in range(int(port), int(port) + int(tries) + 1):
+        if not taken(candidate):
+            return candidate
+    return int(port)
+
+
 def main():
     port = port_from_argv(sys.argv[1:])
+    # Порт проверяем сами (см. port_is_busy): иначе второй экземпляр сядет на
+    # тот же порт молча, и браузер откроет первый — а там старый спектакль,
+    # откуда и берётся «он помнит старые реплики»
+    if port_is_busy(port):
+        print(f"⚠️  Порт {port} уже занят другим экземпляром театра —"
+              f" скорее всего, в нём идёт старый спектакль.")
+        port = free_port(port)
+        print(f"   Беру свободный порт {port} и не трогаю старый.")
+        print(f"   Старый экземпляр закроется либо Ctrl+C в его окне,"
+              f" либо кнопкой «Покинуть театр» на его странице.")
     # Папка экземпляра заводится до первого чтения настроек: сцена, правила
     # судьи и стенограмма читаются уже из неё, а не из корня проекта
     instance_dir, moved = settings.prepare_instance(port)
