@@ -849,8 +849,14 @@ class TestStreamingReply(unittest.TestCase):
     def test_the_thoughts_arrive_before_the_reply(self):
         """Мысли видно, пока модель думает, и в реплику они не попадают."""
         def answer(model, messages, participant_name, **kwargs):
-            kwargs["on_thought"]("Думаю о теме...", True)
-            kwargs["on_thought"](" и вот что решил.", False)
+            # Как настоящий ask_model: порцию мыслей кладём и в журнал хода (там
+            # её видят лента и ДАМП), и в черновик ленты. Без журнала проверка шла
+            # бы мимо того места, где куски одной мысли размножались на сотни копий
+            report = kwargs["report"]
+            for piece, replace in (("Думаю о теме...", True),
+                                   (" и вот что решил.", False)):
+                cloud.journal_thought(report, piece, replace)
+                kwargs["on_thought"](piece, replace)
             kwargs["on_delta"]("Вот ответ.", True)
             return "Вот ответ.", 0, []
 
@@ -872,6 +878,18 @@ class TestStreamingReply(unittest.TestCase):
         # идёт ход, и без этого мысли исчезали бы вместе с черновиком
         self.assertEqual(self.session.posts[0]["thinking"],
                          "Думаю о теме... и вот что решил.")
+        # Одна мысль — одно событие хронологии, сколько бы кусков в неё ни пришло.
+        # Из жизни: куски одной мысли клались в журнал каждый сам по себе, и у одной
+        # реплики в ленте стояло 707 её копий — с одним и тем же временем
+        post = self.session.posts[0]
+        thoughts = [step for step in self.session.turn_report(post["id"])["steps"]
+                    if step.get("kind") == "thought"]
+        self.assertEqual(len(thoughts), 1,
+                         "куски одной мысли — одно событие, а не по событию на кусок")
+        self.assertEqual(thoughts[0]["text"], "Думаю о теме... и вот что решил.",
+                         "куски должны быть в той же записи, а не потеряться")
+        self.assertEqual(post["turn"]["thought_steps"], 1,
+                         "по этому числу режиссёр читает сводку — врать оно не должно")
 
     def test_the_dump_keeps_the_whole_turn(self):
         """ДАМП хранит весь ход: тему, кто говорил, размышления и саму реплику.

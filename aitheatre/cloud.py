@@ -1220,16 +1220,24 @@ def _turn_notes(answer: dict) -> dict:
 # в файл — сразу: у модели, зациклившейся на две минуты, иначе не остаётся
 # следов вовсе (см. show.dump_step_sink).
 
-def journal_push(report: dict, step: dict, piece: str = None) -> None:
+def journal_push(report: dict, step: dict, piece: str = None,
+                 again: bool = False) -> None:
     """Положить событие в журнал — и сразу отдать его тому, кто пишет ДАМП.
 
     piece — то, что событие добрало на этот раз (кусок размышлений): в файл
     он уходит отдельной строкой, потому что писать размышления одним куском
     в конце — это и значит терять их, когда ход обрывается на середине.
+
+    again — это та же самая запись, которая добрала кусок: в список событий её
+    второй раз не кладут, иначе одна мысль модели превращается в сотни копий
+    самой себя — и в ленте, и в счёте «размышлений N» (из жизни: одна мысль
+    стояла в хронологии 707 раз, все с одним и тем же временем). В файл кусок
+    уходит как обычно: за живое письмо отвечает «перо», а не список событий.
     """
     if report is None:
         return
-    report.setdefault("steps", []).append(step)
+    if not again:
+        report.setdefault("steps", []).append(step)
     sink = report.get("sink")
     if sink is not None:
         try:
@@ -1318,7 +1326,10 @@ def journal_thought(report: dict, piece: str, replace: bool = False) -> None:
     last["text"] += piece
     last["tokens"] = text.estimate_tokens(last["text"])
     last["t_end"] = time.time()
-    journal_push(report, last, piece)
+    # again=True: запись та же, её только дописали куском — в список событий
+    # её второй раз не кладут (иначе куски одной мысли дают сотни её копий),
+    # а в ДАМП кусок уходит отдельной строкой прямо сейчас
+    journal_push(report, last, piece, again=True)
 
 
 def messages_tokens(messages: list) -> int:

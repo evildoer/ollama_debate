@@ -815,6 +815,13 @@ BUGS = {
          '        "tokens": text.estimate_tokens(results),',
          '        "tokens": 0,'),
     ],
+    # Из жизни: одна и та же мысль стояла в ленте 707 раз — все копии с одним
+    # и тем же временем, потому что продолжение мысли клалось в журнал заново
+    "размышления в кусках снова становятся сотней копий": [
+        ("aitheatre/cloud.py",
+         "    journal_push(report, last, piece, again=True)",
+         "    journal_push(report, last, piece)"),
+    ],
     "размышлений снова нет в хронологии: они отдельным блоком": [
         ("aitheatre/show.py",
          '    summary["thought_steps"] = sum(1 for step in steps if step.get("kind") == "thought")',

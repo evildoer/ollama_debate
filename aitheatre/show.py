@@ -1684,18 +1684,21 @@ class DebateSession:
             if draft is not None:
                 draft.finish()
 
-        # То, что стало известно к концу хода: сколько он дописал сам и сколько
-        # раз просил поиск. Шаги при этом уже в отчёте — журнал у них общий
-        spent = self._note_money(journal, money_before, money_error) if cloud_turn else None
-        refresh_turn_report(turn, messages[len(sent):], search_count, journal, spent)
         # Размышления, не попавшие в хронологию шагами (модель без потока, шлюз,
         # отдавший размышления одним куском): мысли оплачены, и это единственный
-        # след того, чем модель занималась, — терять его нельзя
+        # след того, чем модель занималась, — терять его нельзя.
+        # И делается это ДО сводки: иначе шаг есть, а в счёте «размышлений N»
+        # в ленте его нет — цифра и содержимое хода расказывали разное
         thoughts = draft.thinking_full() if draft else ""
         turn["thinking"] = thoughts
         if thoughts and not any(step.get("kind") == "thought"
                                 for step in turn["steps"]):
             cloud.journal_thought(journal, thoughts, replace=True)
+
+        # То, что стало известно к концу хода: сколько он дописал сам и сколько
+        # раз просил поиск. Шаги при этом уже в отчёте — журнал у них общий
+        spent = self._note_money(journal, money_before, money_error) if cloud_turn else None
+        refresh_turn_report(turn, messages[len(sent):], search_count, journal, spent)
 
         post = self.add_post(
             display_name=participant["display_name"],
