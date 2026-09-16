@@ -2325,6 +2325,29 @@ class TestTurnReport(unittest.TestCase):
         self.assertLessEqual(budget["messages_after"], budget["messages_before"],
                              "сцена — часть запроса, больше него быть не может")
 
+    def test_the_header_shows_every_number_it_was_given(self):
+        """Шапка хода — способ прочитать отчёт глазами: числа доезжают все.
+
+        Проверяем на числах, а не на словах: если число теряется по дороге
+        от отчёта к ДАМП, режиссёр видит пустоту там, где данные есть.
+        Запас здесь ненулевой — этим и отличается от проверки про ноль
+        (см. test_a_zero_answer_seat_is_not_called_zero_tokens).
+        """
+        turn = {
+            "who": {"name": "Проверка", "model": "cloud:x", "role": "judge",
+                    "role_name": "Судья", "round": 2, "time": "12:00"},
+            "budget": {"kind": "cloud", "window": 32768, "reserve": 8192,
+                       "safety": 500, "available": 24076, "system_tokens": 807,
+                       "messages_before": 11, "messages_after": 2,
+                       "kept_tokens": 1447},
+            "summary": {"messages": 4, "tokens": 2254, "window_kind": "cloud"},
+            "messages": [],
+        }
+        text = show.dump_turn_header(1, turn)
+        for number in (32768, 8192, 500, 24076, 807, 1447, 2254):
+            self.assertIn(show.numbers_word(number), text,
+                          f"число {number} отчёт знает, и в шапке оно должно быть")
+
     def test_a_zero_answer_seat_is_not_called_zero_tokens(self):
         """Ноль в запасе — это «ответ не ограничиваем», а не «0 токенов на ответ».
 
@@ -2415,6 +2438,22 @@ class TestTurnReport(unittest.TestCase):
         paths = [request["path"] for request in gateway.requests]
         self.assertEqual(paths.count("/proxyapi/balance"), 2,
                          "остаток нужен и до хода, и после него — иначе нет разницы")
+
+    def test_the_balance_address_keeps_the_host_whole(self):
+        """Адрес остатка собирается из адреса шлюза, но хоста не калечит.
+
+        Эти два знака (/v1) есть и в имени хоста (v1.example.com), и отрезать
+        по первому вхождению значило бы собрать «https:» вместо адреса.
+        """
+        for base, expected in (("https://api.proxyapi.ru/v1", "https://api.proxyapi.ru"),
+                               ("https://api.proxyapi.ru/v1/", "https://api.proxyapi.ru"),
+                               ("https://api.example.com/openai/v1",
+                                "https://api.example.com/openai"),
+                               ("https://v1.example.com/v1", "https://v1.example.com"),
+                               ("http://v1.example.com", "http://v1.example.com")):
+            with mock.patch.object(settings, "CLOUD_BASE_URL", base), \
+                    mock.patch.object(settings, "CLOUD_BALANCE_PATH", "/proxyapi/balance"):
+                self.assertEqual(cloud.balance_url(), expected + "/proxyapi/balance", base)
 
     def test_a_local_turn_does_not_ask_the_gateway_about_money(self):
         """У местной модели платить не за что — и остаток у шлюза не спрашивают.

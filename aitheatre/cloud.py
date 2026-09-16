@@ -553,7 +553,13 @@ def balance_url() -> str:
     base = str(settings.CLOUD_BASE_URL or "").rstrip("/")
     if not base:
         return ""
-    host = base.split("/v1")[0].rstrip("/")
+    # Остаток живёт рядом с /v1, а не под ним, поэтому /v1 отрезается. Но резать
+    # по первому вхождению нельзя: эти два знака есть и в имени хоста
+    # (https://v1.example.com/v1), и тогда от адреса остаётся «https:».
+    # Поэтому смотрим только на конец пути.
+    cut = base.find("/v1/")
+    host = (base[:cut] if cut != -1
+            else (base[:-3] if base.endswith("/v1") else base))
     return host + (path if path.startswith("/") else "/" + path)
 
 
