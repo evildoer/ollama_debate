@@ -139,6 +139,14 @@ HTML_TEMPLATE = """
         .prompt-role-assistant { background: #dbead4; }
         .prompt-tokens, .prompt-num { margin-left: 10px; }
         .prompt-text { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; font-size: 13px; line-height: 1.55; margin: 6px 0 0 0; padding: 8px 10px; background: #ffffff; border: 1px solid #eeeeee; color: #333333; max-height: 340px; overflow: auto; }
+        /* Длинный текст в отчёте хода (снимок запроса, найденное, размышления)
+           виден тремя строками: дальше он не читается, а проматывается.
+           Клик раскрывает целиком — текст никуда не девается, просто не раздувает
+           пост на несколько экранов */
+        .prompt-text.clamped { max-height: calc(3 * 1.55em); overflow: hidden; cursor: pointer; position: relative; }
+        .prompt-text.clamped::after { content: '… ещё — клик, чтобы раскрыть'; position: absolute; right: 0; bottom: 0; padding: 0 4px; font-size: 11px; color: #9a9a9a; background: #ffffff; }
+        .prompt-text.clamped.expanded { max-height: 340px; overflow: auto; cursor: auto; }
+        .prompt-text.clamped.expanded::after { content: none; }
         /* Объяснение к сообщению: почему у него ноль токенов текста и что есть вместо */
         .prompt-note { font-size: 12px; line-height: 1.5; color: #8a6d3b; margin: 4px 0 0 0; }
         .prompt-note code { background: #f3efe6; padding: 0 3px; border-radius: 3px; }
@@ -153,6 +161,7 @@ HTML_TEMPLATE = """
         body.dark .prompt-msg-head { color: #8c8c8c; }
         body.dark .prompt-role { background: #2a2a2a; color: #b0b0b0; }
         body.dark .prompt-text { background: #101010; border-color: #262626; color: #cccccc; }
+        body.dark .prompt-text.clamped::after { background: #101010; color: #7a7a7a; }
         body.dark .prompt-note { color: #c9a86a; }
         body.dark .prompt-note code { background: #2a2620; }
         body.dark .prompt-removed { color: #7a7a7a; }
@@ -371,9 +380,9 @@ HTML_TEMPLATE = """
                     <div class="panel-section">
                         <div class="panel-heading"><span class="num">03</span><span class="name">Правила и инструкции</span></div>
                         <div class="panel-note">Общие правила общения, руководства модератора, правила судьи и личные инструкции участников. Работают одинаково до и во время спектакля и сохраняются вместе с составом — после перезапуска театра редактор откроется с тем же текстом. Личная инструкция принадлежит месту в составе, а не имени: «Новый спектакль» переименует участников, но инструкции оставит на своих местах.</div>
-                        <button class="btn btn-secondary" onclick="toggleInstructionsEditor()" style="margin-bottom:15px;">🔧 Открыть редактор</button>
-
-                        <div id="instructionsEditor" style="display:none;">
+                        <!-- Вкладка и есть редактор: содержимое видно сразу, без
+                             отдельной кнопки входа — та требовала лишнего нажатия -->
+                        <div id="instructionsEditor">
                             <div style="font-size:13px;color:#333;margin-bottom:15px;padding:10px;background:#f9f9f9;border:1px solid #ddd;">
                                 <strong>Доступные плейсхолдеры:</strong>
                                 <code>{ИМЯ}</code> — имя текущего участника,
@@ -549,6 +558,8 @@ HTML_TEMPLATE = """
         }
         
         refreshMemory();  // сразу видно, что уже загружено в Ollama (могут быть чужие модели)
+        // Правила и инструкции нужны сразу, а не по нажатию: вкладка открыта
+        loadInstructionsForEdit();
         
         // ── Каналы связи ─────────────────────────────────────────────────
         // Основной канал — Socket.IO: лента приходит событием new_post, черновик —
@@ -895,10 +906,9 @@ HTML_TEMPLATE = """
                 // Поле темы не трогаем вовсе: на сервере она та же (сброс её
                 // не касается), а в поле может лежать набранное, но ещё не
                 // применённое — стирать чужой черновик незачем
-                // Открытый редактор показывает то, что сейчас на сервере: после
-                // сброса в его полях должен быть заводской текст, а не старый
-                const editor = document.getElementById('instructionsEditor');
-                if (editor && editor.style.display !== 'none') loadInstructionsForEdit();
+                // Редактор показывает то, что сейчас на сервере: после сброса
+                // в его полях должен быть заводской текст, а не старый
+                loadInstructionsForEdit();
             })
             .catch(err => alert('❌ ' + err.message));
         }
@@ -1700,6 +1710,16 @@ HTML_TEMPLATE = """
                                                           maximumFractionDigits: 2}) + ' ₽';
         }
 
+        // Сколько спектакль стоит на сейчас — строка для блока «Статус».
+        // Показывается ВСЕГДА: и когда говорит модель, и когда ход ваш, и после
+        // занавеса. Сумма копится от начала спектакля (см. show._note_money),
+        // и раньше она пропадала ровно там, где о ней спокойнее всего знать
+        function spentLine(data) {
+            const spent = Number((data && data.spent) || 0);
+            if (!spent) return '';
+            return `<div style="font-size:12px;margin-top:6px;">💰 за спектакль ${moneyText(spent)}</div>`;
+        }
+
         // Сколько длилось — словами: «2 мин 15 с». Секунды до десятых здесь
         // не нужны: это мера ожидания, а не измерение
         function durationText(seconds) {
@@ -1837,6 +1857,37 @@ HTML_TEMPLATE = """
             return parts.join('');
         }
 
+        // Сколько строк длинного текста видно до раскрытия
+        const CLAMPED_TEXT_LINES = 3;
+
+        // Прятать ли «простыню» — по настоящей высоте текста, а не по числу
+        // переводов строки: одна длинная строка переносится и занимает столько же
+        // места, сколько десять коротких. Функция отдельная не для красоты: её
+        // граница проверяется тестом (см. textNeedsClamp)
+        function textNeedsClamp(contentHeight, lineHeight, padding) {
+            const line = Number(lineHeight) || 0;
+            if (!line) return false;
+            return Number(contentHeight) - Number(padding || 0) > line * CLAMPED_TEXT_LINES + 2;
+        }
+
+        // Свернуть длинные тексты в отчёте хода и раскрывать их по клику
+        function clampLongTexts(root) {
+            (root || document).querySelectorAll('pre.prompt-text').forEach(pre => {
+                const style = getComputedStyle(pre);
+                const padding = (parseFloat(style.paddingTop) || 0)
+                    + (parseFloat(style.paddingBottom) || 0);
+                if (!textNeedsClamp(pre.clientHeight, parseFloat(style.lineHeight), padding)) return;
+                pre.classList.add('clamped');
+                pre.tabIndex = 0;
+                pre.title = 'Клик — раскрыть целиком';
+                const toggle = () => pre.classList.toggle('expanded');
+                pre.addEventListener('click', toggle);
+                pre.addEventListener('keydown', event => {
+                    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); toggle(); }
+                });
+            });
+        }
+
         function loadTurnBox(box) {
             if (box.dataset.loaded === '1') return;
             box.dataset.loaded = '1';
@@ -1847,7 +1898,7 @@ HTML_TEMPLATE = """
                     if (!r.ok) throw data;
                     return data;
                 }))
-                .then(data => { body.innerHTML = turnBodyHtml(data); })
+                .then(data => { body.innerHTML = turnBodyHtml(data); clampLongTexts(body); })
                 .catch(err => {
                     // Неудача — не повод оставить блок пустым: его можно
                     // раскрыть ещё раз и снова спросить сервер
@@ -2165,7 +2216,7 @@ HTML_TEMPLATE = """
                     if (mi && !mi.value.trim()) mi.focus();
                 }
                 statusDiv.classList.add('active');
-                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>`;
+                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">Ваш ход!</div>${spentLine(data)}`;
             } else {
                 // Не ваша очередь: блок остаётся на месте с пояснением, чтобы
                 // нумерация разделов пульта не прыгала
@@ -2175,7 +2226,7 @@ HTML_TEMPLATE = """
                 statusDiv.classList.add('active');
                 let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
                 // Сколько уже стоил спектакль — по факту со счёта шлюза
-                const bill = data.spent ? `<div style="font-size:12px;margin-top:6px;">💰 за спектакль ${moneyText(data.spent)}</div>` : '';
+                const bill = spentLine(data);
                 // Часы хода — рядом с ценой: по ним видно, ждать минуту или
                 // десять, и успеешь ли сходить за пивом (см. turnClockText)
                 const clock = turnClockText(data);
@@ -2183,7 +2234,7 @@ HTML_TEMPLATE = """
                 statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>${clockLine}${bill}`;
             } else if (data.finished) {
                 statusDiv.classList.remove('active');
-                const curtain = data.spent ? `<div style="font-size:12px;margin-top:8px;">💰 за спектакль ${moneyText(data.spent)}</div>` : '';
+                const curtain = spentLine(data);
                 statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>' + curtain;
                 setTurnState('finished');
                 document.getElementById('finishBtn').style.display = 'none';
@@ -2331,7 +2382,8 @@ HTML_TEMPLATE = """
             .then(data => {
                 if (data.success) {
                     alert('✅ Инструкции обновлены!');
-                    document.getElementById('instructionsEditor').style.display = 'none';
+                    // Редактор не прячем: он и есть содержимое вкладки, а в его
+                    // полях после сохранения — ровно то, что уехало на сервер
                     // Обновляем сайдбар с актуальными инструкциями
                     updateSidebarParticipants();
                 } else {
@@ -2389,17 +2441,9 @@ HTML_TEMPLATE = """
             }
         }
         
-        // Функции для редактирования инструкций и руководств
-        function toggleInstructionsEditor() {
-            const editor = document.getElementById('instructionsEditor');
-            if (editor.style.display === 'none') {
-                editor.style.display = 'block';
-                loadInstructionsForEdit();
-            } else {
-                editor.style.display = 'none';
-            }
-        }
-        
+        // Редактор правил и инструкций наполняется сам при загрузке страницы:
+        // вкладка открыта сразу, и отдельной кнопки входа в неё больше нет
+        // (сам вызов — в начале скрипта, рядом с refreshMemory)
         function loadInstructionsForEdit() {
             fetch('/api/moderator/instructions')
             .then(r => r.json())

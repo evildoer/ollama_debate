@@ -3008,6 +3008,69 @@ class TestTurnPanel(unittest.TestCase):
                       "самый частый такой код — ход, в котором модель попросила инструмент")
 
 
+# --------------------------------------------- правила, цена и простыни
+
+class TestRulesPanel(unittest.TestCase):
+    """Вкладка «Правила и инструкции» — и есть редактор: отдельного входа нет.
+
+    Раньше её содержимое пряталось за кнопкой «🔧 Открыть редактор»: лишнее
+    нажатие на каждой правке, а прятать было нечего — право править и открывать
+    одну и ту же вкладку дважды значит не открыть вовсе.
+    """
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+
+    def test_the_editor_is_open_from_the_start(self):
+        self.assertNotIn("Открыть редактор", self.page)
+        self.assertNotIn("toggleInstructionsEditor", self.page,
+                         "кнопки нет — и переключателю нечего делать")
+        self.assertIn('<div id="instructionsEditor">', self.page)
+        self.assertNotIn('id="instructionsEditor" style="display:none', self.page,
+                         "редактор снова прячется — это и была прежняя кнопка")
+
+    def test_the_rules_are_loaded_without_a_click(self):
+        """Вкладка открыта — значит наполняться она обязана при загрузке."""
+        start = self.page.index("refreshMemory();")
+        self.assertIn("loadInstructionsForEdit();", self.page[start:start + 400],
+                      "без вызова при загрузке вкладка откроется пустой")
+
+    def test_the_saved_editor_stays_on_the_page(self):
+        """После «Применить изменения» редактор остаётся на месте."""
+        start = self.page.index("function saveInstructions()")
+        body = self.page[start:self.page.index("function finishDebate()", start)]
+        self.assertNotIn("instructionsEditor').style.display = 'none'", body)
+
+
+class TestStatusPriceAndLongTexts(unittest.TestCase):
+    """В сайдбаре — счёт за весь спектакль всегда; в отчёте хода — три строки.
+
+    Стоимость копится от начала спектакля (см. show._note_money), и раньше она
+    пропадала ровно там, где о ней спокойнее всего знать: на ходу человека и под
+    занавесом. А длинные тексты (снимок запроса, найденное, размышления) лежали
+    простынями на несколько экранов, хотя проматываются целиком.
+    """
+
+    def setUp(self):
+        self.page = page.HTML_TEMPLATE
+
+    def test_the_price_stands_in_every_state_of_the_show(self):
+        start = self.page.index("function applyStatus(")
+        body = self.page[start:self.page.index("function sendModeratorMessage(", start)]
+        self.assertEqual(body.count("spentLine(data)"), 3,
+                         "цена нужна в трёх состояниях: чужой ход, ваш ход, занавес")
+
+    def test_a_long_text_is_three_lines_with_a_click_to_open(self):
+        self.assertIn(".prompt-text.clamped {", self.page)
+        self.assertIn(".prompt-text.clamped.expanded", self.page)
+        self.assertIn("body.dark .prompt-text.clamped", self.page,
+                      "свёрнутый текст на тёмной сцене — тоже текст")
+        start = self.page.index("function loadTurnBox(")
+        body = self.page[start:self.page.index("function postTurnHtml(", start)]
+        self.assertIn("clampLongTexts(body)", body,
+                      "свёртку нечем включить: простыни останутся простынями")
+
+
 # ---------------------------------------------------------------- посты
 
 class TestPosts(unittest.TestCase):
@@ -5386,6 +5449,14 @@ class TestPageScript(unittest.TestCase):
                     return source[start:index + 1]
         raise AssertionError(f"у функции {name} не нашлось конца")
 
+    @staticmethod
+    def _page_constant(name: str) -> str:
+        """Строка `const <имя> = …;` со страницы — целиком, для сверки в node."""
+        match = re.search(rf"^\s*const {name} = .*?;$", page.HTML_TEMPLATE, re.M)
+        if not match:
+            raise AssertionError(f"на странице нет числа {name}")
+        return match.group(0).strip()
+
     def _run_in_node(self, *calls):
         """Считать часы по-настоящему: тот же код, что уедет в браузер.
 
@@ -5396,9 +5467,12 @@ class TestPageScript(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("node не найден: часы не с кем сверить")
-        script = "\n".join(self._function(name) for name in (
+        # Числа страницы (const) едут в тот же скрипт: иначе проверяли бы свою
+        # копию, а не то, что уедет в браузер (см. CLAMPED_TEXT_LINES)
+        script = self._page_constant("CLAMPED_TEXT_LINES") + "\n"
+        script += "\n".join(self._function(name) for name in (
             "tokensText", "moneyText", "durationText", "turnClockText",
-            "turnSummaryParts"))
+            "turnSummaryParts", "spentLine", "textNeedsClamp"))
         script += "\nconsole.log(JSON.stringify([" + ", ".join(calls) + "]));"
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
                                         encoding="utf-8") as handle:
@@ -5446,6 +5520,29 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("без ответа 2", mute)
         self.assertNotIn("заминок", mute,
                          "общего «заминок» больше нет: оно ни о чём не говорит")
+
+    def test_only_a_text_longer_than_three_lines_is_clamped(self):
+        """Свёртка — по настоящей высоте текста, а не по числу переводов строки.
+
+        Одна длинная строка переносится и занимает столько же места, сколько
+        десять коротких, поэтому мерой взята высота. Вместе с ней посчитаны поля:
+        три строки — ещё не простыня, четвёртая уже прячется.
+        """
+        out = self._run_in_node(
+            "textNeedsClamp(60 + 16, 20, 16)",   # ровно три строки — видно целиком
+            "textNeedsClamp(80 + 16, 20, 16)",   # четыре строки — прячем
+            "textNeedsClamp(380, 20, 16)",       # простыня в потолок окна
+            "textNeedsClamp(240, 0, 16)")        # высота строки неизвестна — не гадаем
+        self.assertEqual(out, [False, True, True, False])
+
+    def test_the_show_price_is_named_or_silent_when_there_is_nothing_to_pay(self):
+        """Строка цены для сайдбара: с копейками, а на нуле — пустая."""
+        out = self._run_in_node("spentLine({spent: 12.5})", "spentLine({spent: 0})",
+                                "spentLine({})")
+        self.assertIn("за спектакль", out[0])
+        self.assertIn("12,50 ₽", out[0])
+        self.assertEqual(out[1], "", "нечего было тратить — нечего и показывать")
+        self.assertEqual(out[2], "")
 
     def test_the_clock_counts_up_and_shows_the_bonus(self):
         """Сколько думает и сколько осталось — и с надбавкой за поиски."""

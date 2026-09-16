@@ -992,6 +992,32 @@ BUGS = {
          '                    f"израсходовал их — говори по тому, что уже нашлось.")',
          '        max_text = ""'),
     ],
+    "редактор правил снова спрятали за кнопкой": [
+        ("aitheatre/page.py",
+         '                        <div id="instructionsEditor">',
+         '                        <div id="instructionsEditor" style="display:none;">'),
+    ],
+    "правила снова ждут нажатия при загрузке": [
+        ("aitheatre/page.py",
+         "        // Правила и инструкции нужны сразу, а не по нажатию: вкладка открыта\n"
+         "        loadInstructionsForEdit();\n",
+         "        // Правила и инструкции нужны сразу, а не по нажатию: вкладка открыта\n"),
+    ],
+    "цена спектакля снова пропадает на ходу человека": [
+        ("aitheatre/page.py",
+         'Ваш ход!</div>${spentLine(data)}',
+         'Ваш ход!</div>'),
+    ],
+    "длинные тексты снова разворачиваются целиком": [
+        ("aitheatre/page.py",
+         ".then(data => { body.innerHTML = turnBodyHtml(data); clampLongTexts(body); })",
+         ".then(data => { body.innerHTML = turnBodyHtml(data); })"),
+    ],
+    "свёртку снова считают без полей текста": [
+        ("aitheatre/page.py",
+         "            return Number(contentHeight) - Number(padding || 0) > line * CLAMPED_TEXT_LINES + 2;",
+         "            return Number(contentHeight) > line * CLAMPED_TEXT_LINES + 2;"),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,
