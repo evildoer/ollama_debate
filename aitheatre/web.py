@@ -8,6 +8,7 @@
 import logging
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -644,6 +645,44 @@ def port_is_busy(port: int) -> bool:
         probe.close()
 
 
+def port_holders(port: int, output: str = None) -> list:
+    """Кто держит порт — по выводу `netstat -ano`.
+
+    Нужно, чтобы назвать человеку точный номер процесса: без него ему пришлось
+    бы самому вспоминать эту утилиту и её ключи. Разбираются только числа
+    и слово LISTENING, поэтому кодировка консоли не мешает: netstat отвечает
+    в OEM-кодировке, и русские заголовки от неё портятся, а числа — нет.
+    """
+    if output is None:
+        output = _netstat_text()
+    marker = f":{int(port)}"
+    found = []
+    for line in str(output or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP":
+            continue
+        # Порт сверяется по КОНЦУ адреса, а не по вхождению: 5000 есть
+        # и в адресе порта 50001, и тогда чужая строка выдала бы себя за нашу
+        if not parts[1].endswith(marker) or parts[3].upper() != "LISTENING":
+            continue
+        if parts[4].isdigit() and int(parts[4]) not in found:
+            found.append(int(parts[4]))
+    return found
+
+
+def _netstat_text() -> str:
+    """Вывод `netstat -ano`: своей утилитой, а без неё — пустой строкой.
+
+    Пустая строка значит «не знаю чей порт» — это не повод падать: спектакль
+    важнее диагностики (см. port_holders).
+    """
+    try:
+        done = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=10)
+    except Exception:
+        return ""
+    return done.stdout.decode("utf-8", "replace")
+
+
 def free_port(port: int, taken=None, tries: int = 20) -> int:
     """Первый свободный порт, начиная с заданного: 5000 занят — берём 5001.
 
@@ -665,6 +704,15 @@ def main():
     if port_is_busy(port):
         print(f"⚠️  Порт {port} уже занят другим экземпляром театра —"
               f" скорее всего, в нём идёт старый спектакль.")
+        # Номер процесса называем сами: иначе человеку пришлось бы вспоминать
+        # netstat с его ключами — а он живёт в обычной консоли Windows, и
+        # команда должна быть та, которую там можно вставить как есть
+        holders = port_holders(port)
+        if holders:
+            # Команда — та, которую можно вставить в обычную консоль Windows
+            # как есть: свои ключи у netstat и taskkill свои, и путать их нельзя
+            print(f"   Порт держат процессы: {', '.join(str(pid) for pid in holders)}"
+                  f" — ненужный закройте: taskkill /PID <номер> /F")
         port = free_port(port)
         print(f"   Беру свободный порт {port} и не трогаю старый.")
         print(f"   Старый экземпляр закроется либо Ctrl+C в его окне,"

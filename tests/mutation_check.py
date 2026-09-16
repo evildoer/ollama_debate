@@ -228,6 +228,11 @@ BUGS = {
          '        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n'
          '        probe.bind(("0.0.0.0", int(port)))'),
     ],
+    "порт снова ищется по вхождению в адрес": [
+        ("aitheatre/web.py",
+         '        if not parts[1].endswith(marker) or parts[3].upper() != "LISTENING":',
+         '        if marker not in parts[1] or parts[3].upper() != "LISTENING":'),
+    ],
     "порт из командной строки снова не читается": [
         ("aitheatre/web.py",
          "    port = port_from_argv(sys.argv[1:])",

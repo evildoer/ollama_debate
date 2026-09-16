@@ -787,6 +787,31 @@ class TestInstanceFiles(unittest.TestCase):
         self.assertEqual(web_app.free_port(busy), busy + 1,
                          "занятый порт — повод взять следующий, а не садиться рядом")
 
+    def test_the_holder_of_the_port_is_named_by_numbers(self):
+        """Кто держит порт — театр называет сам, номером процесса.
+
+        Разбор только по числам и слову LISTENING: netstat отвечает в OEM-кодировке,
+        и русские заголовки от неё портятся, а числа — нет. И порт сверяется
+        по концу адреса: 5000 есть и в порту 50001, и чужая строка не имеет
+        права выдать себя за нашу.
+        """
+        netstat = (
+            "Активные подключения\n\n"
+            "  Имя    Локальный адрес        Внешний адрес          Состояние       PID\n"
+            "  TCP    0.0.0.0:5000           0.0.0.0:0              LISTENING       33088\n"
+            "  TCP    0.0.0.0:5000           0.0.0.0:0              LISTENING       21388\n"
+            "  TCP    0.0.0.0:50001          0.0.0.0:0              LISTENING       777\n"
+            "  TCP    127.0.0.1:5000         127.0.0.1:52100        ESTABLISHED     33088\n"
+            "  TCP    0.0.0.0:11434          0.0.0.0:0              LISTENING       4242\n"
+        )
+        self.assertEqual(web_app.port_holders(5000, netstat), [33088, 21388],
+                         "свой порт — по концу адреса, чужие порты и состояния мимо")
+        self.assertEqual(web_app.port_holders(11434, netstat), [4242])
+        self.assertEqual(web_app.port_holders(5300, netstat), [],
+                         "никто не держит — пустой список, а не выдуманный номер")
+        self.assertEqual(web_app.port_holders(5000, "netstat не нашёлся"), [],
+                         "мусор на входе — тоже пустой список")
+
     def test_a_free_port_is_left_alone(self):
         """Свободный порт не трогаем: привычный `py .` должен вести туда же."""
         self.assertEqual(web_app.free_port(5000, taken=lambda _port: False), 5000)
