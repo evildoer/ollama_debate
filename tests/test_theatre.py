@@ -2588,6 +2588,28 @@ class TestTurnReport(unittest.TestCase):
         self.assertIn("### Реплика", written)
         self.assertEqual(written.count("### Что вошло в запрос к модели"), 1,
                          "ход должен попасть в файл один раз, а не дважды")
+        # Строка запроса и шапка мыслей появляются в файле сразу, без итоговых
+        # чисел, — а когда числа есть, файл переписывает ту же строку, а не
+        # оставляет её недописанной и не заводит вторую (см. dump_fix_step)
+        open_ask = [line for line in mid.splitlines() if "**запрос 1**" in line]
+        self.assertEqual(len(open_ask), 1, "строка запроса — одна")
+        self.assertNotIn("ввод", open_ask[0],
+                         "до ответа числа вендора ещё неизвестны, и строка не выдумывает их")
+        ask_lines = [line for line in written.splitlines() if "**запрос 1**" in line]
+        self.assertEqual(len(ask_lines), 1, "после правки строка всё та же — одна")
+        self.assertIn("ввод 1 000", ask_lines[0],
+                      "число вендора должно доехать в ту же строку")
+        self.assertIn("вывод 50", ask_lines[0])
+        self.assertIn("→", ask_lines[0], "и время окончания запроса — тоже")
+        thought_lines = [line for line in written.splitlines() if "**размышления**" in line]
+        self.assertEqual(len(thought_lines), 1)
+        self.assertIn("→", thought_lines[0],
+                      "у мыслей тоже должно появиться время окончания")
+        turned = self.session.turn_report(self.session.posts[-1]["id"])
+        weight = [step for step in turned["steps"]
+                  if step.get("kind") == "thought"][0]["tokens"]
+        self.assertIn(show.numbers_word(weight), thought_lines[0],
+                      "вес в файле — тот же, что в отчёте, то есть итоговый")
 
     def test_a_search_round_lands_in_the_turn_step_by_step(self):
         """Ход собирается по шагам из настоящих ответов шлюза, а не из догадок.

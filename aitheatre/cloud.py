@@ -1301,6 +1301,15 @@ def journal_ask(report: dict, notes: dict) -> dict:
     entry.update(notes or {})
     entry["t_end"] = time.time()
     entry.pop("open", None)
+    # Строка о запросе уже лежит в ДАМПе — и пока без чисел: в тот миг их ещё
+    # не было. Теперь время окончания и числа вендора известны, и файл
+    # переписывает ту же строку (см. show.dump_fix_step)
+    fix = (report or {}).get("fix")
+    if fix is not None:
+        try:
+            fix(entry)
+        except Exception:
+            pass
     return notes
 
 

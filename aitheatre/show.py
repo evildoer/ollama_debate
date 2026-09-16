@@ -437,10 +437,73 @@ def dump_step_sink(step: dict, piece: str = None) -> None:
             dump_write(piece)
         return
     if _DUMP.get("thought") is not None:
-        # Размышления кончились: отделяем их от следующего события
+        # Размышления кончились: отделяем их от следующего события — и тут же
+        # исправляем их строку, потому что итоговый вес и время окончания
+        # стали известны только сейчас (см. dump_fix_step)
+        finished = _DUMP["thought"]
         _DUMP["thought"] = None
         dump_write("\n")
+        dump_fix_step(finished)
     dump_write(step_markdown(step) + "\n")
+
+
+def dump_fix_step(step: dict) -> None:
+    """Исправить в ДАМПе строку события, у которого появились итоговые числа.
+
+    Живое письмо и правка тут не спорят. Строка запроса появляется в файле
+    в тот миг, когда запрос ушёл, — тогда у неё нет ни времени окончания, ни
+    чисел вендора: ждать с записью нельзя, иначе у оборванного хода не осталось
+    бы следа. А показывать устаревшее — врать: «1 токенов» у мыслей, текст
+    которых на семьсот токенов, читается как ошибка. Поэтому, когда итог
+    известен, файл переписывает ту же строку: метка начала у каждого шага своя,
+    по ней строка и находится.
+    """
+    if step.get("kind") not in ("ask", "thought"):
+        return
+    if step.get("kind") == "thought" and not step.get("t_end"):
+        # Мысль, пришедшая одним куском, до сих пор оставалась без времени
+        # окончания: дописывать её больше некому, и этот миг и есть конец
+        step["t_end"] = time.time()
+    when = clock(step.get("t"))
+    if not when:
+        return
+    marker = f"- {when} ·"
+    path = Path(settings.DUMP_FILE)
+    was_open = _DUMP.get("handle") is not None
+    handle = _DUMP.get("handle")
+    if handle is not None:
+        try:
+            handle.flush()
+            handle.close()
+        except Exception:
+            pass
+        _DUMP["handle"] = None
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except Exception:
+        lines = []
+    for index, line in enumerate(lines):
+        if not line.startswith(marker):
+            continue
+        lines[index] = step_markdown(step, with_text=False) + "\n"
+        temp = path.with_name(path.name + ".fix")
+        try:
+            temp.write_text("".join(lines), encoding="utf-8")
+            temp.replace(path)
+        except Exception as e:
+            print(f"  ⚠️  Не исправляется строка в {path.name}: {e}")
+        break
+    if was_open:
+        dump_reopen()
+
+
+def dump_reopen() -> None:
+    """Открыть ДАМП дальше на дописывание — после того как строка исправлена."""
+    try:
+        _DUMP["handle"] = open(settings.DUMP_FILE, "a", encoding="utf-8")
+    except Exception as e:
+        _DUMP["handle"] = None
+        print(f"  ⚠️  Не открывается {settings.DUMP_FILE.name}: {e}")
 
 
 def open_dump_turn(post_id: int, turn: dict, report: dict) -> None:
@@ -451,21 +514,24 @@ def open_dump_turn(post_id: int, turn: dict, report: dict) -> None:
     хода, поэтому и оборванный ход остаётся в ДАМПе.
     """
     _DUMP["thought"] = None
-    try:
-        _DUMP["handle"] = open(settings.DUMP_FILE, "a", encoding="utf-8")
-    except Exception as e:
-        print(f"  ⚠️  Не открывается {settings.DUMP_FILE.name}: {e}")
-        _DUMP["handle"] = None
+    dump_reopen()
     dump_write(dump_turn_header(post_id, turn))
     if report is not None:
         report["sink"] = dump_step_sink
+        # Перо пишет событие сразу, а «правка» доводит его строку, когда числа
+        # наконец известны (см. dump_fix_step): у запроса это время окончания
+        # и числа вендора, у размышлений — итоговый вес
+        report["fix"] = dump_fix_step
 
 
 def close_dump_turn(post: dict, turn: dict) -> None:
     """Закончить запись о ходе: реплика, прежняя её версия — и закрыть файл."""
     if _DUMP.get("thought") is not None:
+        # Мысль оказалась последним событием хода: её строка тоже ждёт итога
+        finished = _DUMP["thought"]
         _DUMP["thought"] = None
         dump_write("\n")
+        dump_fix_step(finished)
     dump_write(dump_turn_tail(post, turn))
     handle = _DUMP.get("handle")
     _DUMP["handle"] = None
