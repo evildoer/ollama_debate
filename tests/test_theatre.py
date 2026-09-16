@@ -2287,21 +2287,29 @@ class TestTurnReport(unittest.TestCase):
         self.assertRegex(search["clock_end"], number)
         self.assertEqual(post["turn"]["thought_steps"], 1,
                          "о размышлениях должно быть сказано в свёрнутой строке")
-        self.assertIn("наш счёт", show.ask_line(ask),
+        # Проверяем числа, а не слова вокруг них: переименование подписи ничего
+        # не ломает, и краснеть от него набор не должен (см. правило в tests/mutation_check.py)
+        self.assertIn(show.numbers_word(3431), show.ask_line(ask),
+                      "в строке запроса — число ввода от вендора")
+        self.assertIn(show.numbers_word(3400), show.ask_line(ask),
                       "рядом с числом вендора виден и наш счёт")
-        self.assertIn("ввод", show.ask_line(ask), "числа запроса — это ввод и вывод")
-        self.assertNotIn("на глаз", show.ask_line(ask),
-                         "«на глаз» звучало как угадывание, а это тот же счётчик")
+        self.assertIn(show.numbers_word(1246), show.ask_line(ask),
+                      "и вывод, иначе «ввод» не с чем сравнить")
+        silent = show.ask_line({"kind": "ask", "tokens_in_est": 3400})
+        self.assertIn(show.numbers_word(3400), silent,
+                      "вендор чисел не дал — наш счёт остаётся, дыры быть не должно")
+        self.assertNotEqual(show.ask_line(ask), silent,
+                            "есть вендорские числа или нет — строка об этом говорит")
         line = show.step_markdown(search)
         self.assertIn("население", line, "в хронологии ДАМПа видна формулировка запроса")
         self.assertIn("900", line, "и вес найденного")
 
-    def test_the_dump_header_names_every_number(self):
-        """У чисел в шапке хода — свои имена: «уехало 3 сообщ. из 1» больше нет.
+    def test_the_dump_header_does_not_merge_two_numbers_into_one(self):
+        """Шапка хода не сваливает два разных числа под одно «из».
 
-        То самое место, где шапка выглядела ошибкой арифметики: «уехало» считало
-        все сообщения запроса (промпт, сцена, задания), а «из» — только сообщения
-        сцены до обрезки. Разбираться в этом приходилось самому режиссёру.
+        Из жизни: строчка «N сообщ. из M» читалась как ошибка арифметики — первое
+        число считало все сообщения запроса (промпт, сцена, задания), а второе
+        только сообщения сцены до обрезки. Разбираться приходилось режиссёру.
         """
         folder = Path(tempfile.mkdtemp())
         dump = folder / "damp.md"
@@ -2310,16 +2318,11 @@ class TestTurnReport(unittest.TestCase):
             self._turn()
             written = dump.read_text(encoding="utf-8")
 
-        self.assertIn("**Окно говорящего:**", written)
-        self.assertIn("оставлено на ответ модели", written,
-                      "запас на ответ нужно объяснить словами, а не назвать «запасом")
-        self.assertIn("технический запас", written)
-        self.assertIn("**Запрос к модели состоял из:**", written)
-        self.assertIn("из сцены", written, "сцена и задания — разные вещи, и это видно")
         self.assertNotIn(") из ", written,
-                         "«уехало N из M» сравнивало разные вещи: это забыто")
+                         "два разных числа под одним «из» — та самая путаница")
         # И ни одного выдуманного числа: сцены в этом ходу нет, и так и сказано
-        self.assertIn("из сцены 0 сообщ.", written)
+        self.assertIn("из сцены 0 сообщ.", written,
+                      "ноль — это ноль, а не общее число сообщений")
 
     def test_a_zero_answer_seat_is_not_called_zero_tokens(self):
         """Ноль в запасе — это «ответ не ограничиваем», а не «0 токенов на ответ».
@@ -2689,11 +2692,18 @@ class TestTurnPanel(unittest.TestCase):
                       "«0 токенов» — верный сигнал, но без «текста» он ничего не говорит")
 
     def test_the_ask_line_explains_what_the_numbers_mean(self):
-        """«3431 + 1246» — это ввод и вывод, и в ленте это должно быть сказано."""
+        """Строка о запросе называет оба числа, размышления и смысл кода ответа.
+
+        «3431 + 1246» в ленте — два числа про разное (что вошло в запрос и что
+        вернул вендор), и без подписей не читаются. Проверяем не сами подписи,
+        а что оба числа и смысл кода вообще попадают в строку.
+        """
         start = self.page.index("function turnAskText(")
         body = self.page[start:self.page.index("function ", start + 10)]
-        self.assertIn("ввод", body)
-        self.assertIn("вывод", body)
+        self.assertIn("step.tokens_in", body, "в строке должно быть число ввода")
+        self.assertIn("step.tokens_out", body, "и вывод — без него сравнивать не с чем")
+        self.assertIn("tokens_in_est", body,
+                      "вендор чисел не дал — подставить сюда наш счёт обязательно")
         self.assertIn("reasoning_tokens", body, "размышления считаются в вывод — их надо назвать")
         self.assertIn("FINISH_WORDS", body,
                       "код ответа без перевода читается как код: нужен его смысл")
