@@ -1858,9 +1858,10 @@ HTML_TEMPLATE = """
 
         // Сводка в свёрнутой строке: сколько было запросов к модели, сколько
         // поисков и сколько токенов ушло — чтобы решить, раскрывать ли
-        function postTurnHtml(post) {
-            const info = post.turn;
-            if (!info) return '';
+        // Сводка хода в свёрнутой строке: по ней решаешь, раскрывать ли блок.
+        // Вынесена отдельной функцией не для красоты: здесь одни числа, а числа
+        // проверяются — и настоящим node тоже (см. turnClockText)
+        function turnSummaryParts(info) {
             const parts = [`запросов ${info.asks || 0}`];
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
             if (info.thought_steps) parts.push(`размышлений ${info.thought_steps}`);
@@ -1873,7 +1874,19 @@ HTML_TEMPLATE = """
             // тарифов приложение не знает (см. settings.CLOUD_BALANCE_PATH)
             if (info.spent) parts.push(`💰 ${moneyText(info.spent)}`);
             if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
-            if (info.problems) parts.push(`заминок ${info.problems}`);
+            // Заминки названы по отдельности: отказ в поиске сверх лимита —
+            // это ещё не беда (модель просто просила больше, чем ей дали),
+            // а вот молчание — уже беда. Общим числом они говорили бы «что-то
+            // было», не говоря что
+            if (info.search_refusals) parts.push(`поиск сверх лимита ${info.search_refusals}`);
+            if (info.silences) parts.push(`⚠️ без ответа ${info.silences}`);
+            return parts;
+        }
+
+        function postTurnHtml(post) {
+            const info = post.turn;
+            if (!info) return '';
+            const parts = turnSummaryParts(info);
             return `<details class="post-thinking post-prompt" data-post-id="${post.id}">`
                 + `<summary>🧾 ход реплики · ${parts.join(' · ')}</summary>`
                 + `<div class="prompt-hint">${TURN_HINT}</div>`

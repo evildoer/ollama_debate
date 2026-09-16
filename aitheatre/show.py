@@ -758,7 +758,12 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         "extra_tokens": sum(m["tokens"] for m in extra),
         "search_rounds": int(search_count or 0),
         "asks": sum(1 for step in steps if step.get("kind") == "ask"),
-        "problems": sum(1 for step in steps if step.get("kind") in ("refused", "silence")),
+        # Заминки названы по отдельности, а не одним числом: отказ в поиске
+        # сверх лимита — это ещё не беда (модель просто просила больше, чем ей
+        # дали), а вот молчание — уже беда. Общая их сумма говорила бы «что-то
+        # было», не говоря что (см. refresh_turn_report — к концу хода шаги уже есть)
+        "search_refusals": _steps_count(steps, "refused"),
+        "silences": _steps_count(steps, "silence"),
     }
     return {
         "summary": summary,
@@ -796,6 +801,11 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         "removed": removed,
         "steps": steps,
     }
+
+
+def _steps_count(steps, kind: str) -> int:
+    """Сколько в ходу было событий такого рода — по журналу, а не по догадке."""
+    return sum(1 for step in (steps or []) if step.get("kind") == kind)
 
 
 def _as_number(value, fallback: int) -> int:
@@ -838,8 +848,10 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     # Размышления — тоже шаг хронологии, и о них стоит сказать в свёрнутой
     # строке: иначе о том, что модель что-то говорила сама с собой, и не узнать
     summary["thought_steps"] = sum(1 for step in steps if step.get("kind") == "thought")
-    summary["problems"] = sum(1 for step in steps
-                               if step.get("kind") in ("refused", "silence"))
+    # Заминки к концу хода пересчитываются по журналу: в сводке от них было бы
+    # одно слово «что-то было», а отказ в поиске и молчание модели — разные вещи
+    summary["search_refusals"] = _steps_count(steps, "refused")
+    summary["silences"] = _steps_count(steps, "silence")
     turn["added"] = extra
 
 

@@ -894,6 +894,19 @@ BUGS = {
          '    summary["seconds"] = None if seconds is None else round(float(seconds), 1)',
          '    summary["seconds"] = None'),
     ],
+    # Из жизни: в свёрнутой строке стояло одно слово «заминок N», и было
+    # непонятно, что за заминка: отказ в поиске сверх лимита или молчание модели
+    "заминки снова свалены в одно непонятное число": [
+        ("aitheatre/page.py",
+         "            if (info.search_refusals) parts.push(`поиск сверх лимита ${info.search_refusals}`);\n"
+         "            if (info.silences) parts.push(`⚠️ без ответа ${info.silences}`);",
+         "            if (info.search_refusals + info.silences) parts.push(`заминок ${info.search_refusals + info.silences}`);"),
+    ],
+    "молчание модели снова не считают в сводке хода": [
+        ("aitheatre/show.py",
+         '    summary["silences"] = _steps_count(steps, "silence")',
+         '    summary["silences"] = 0'),
+    ],
     "часы страницы снова молчат про надбавку": [
         ("aitheatre/page.py",
          "                if (data.turn_extra) {",

@@ -2173,6 +2173,29 @@ class TestTurnReport(unittest.TestCase):
             self.session.handle_ai_turn(participant, 1)
         return self.session.posts[-1]
 
+    def test_the_two_kinds_of_trouble_are_counted_apart(self):
+        """Отказ в поиске и молчание — разные заминки, и в сводке они врозь.
+
+        Модель, попросившая поиск сверх лимита, просто хотела больше, чем ей
+        дали, — реплика при этом есть. А молчание — это когда реплики нет вовсе.
+        Общее число «заминок» говорило «что-то было», не говоря что.
+        """
+        steps = [
+            {"kind": "refused", "text": "просит ещё поиск «раз», но лимит 3 исчерпан"},
+            {"kind": "silence", "text": "пустой ответ: размышления заняли весь бюджет"},
+            # Принудительный поиск заминкой не считается: это правила работают,
+            # а не что-то сломалось
+            {"kind": "force", "text": "модель ответила без поиска — прошу поиск"},
+        ]
+        post = self._turn(steps=steps)
+
+        self.assertEqual(post["turn"]["search_refusals"], 1,
+                         "отказ в поиске — своё число")
+        self.assertEqual(post["turn"]["silences"], 1,
+                         "молчание — своё: это уже беда, а не просьба поискать ещё")
+        self.assertNotIn("problems", post["turn"],
+                         "общего «сколько-то заминок» быть не должно — оно ни о чём")
+
     def test_the_trim_report_names_the_window_and_what_was_dropped(self):
         messages = [{"role": "user", "name": f"говорун{i}",
                      "content": "реплика сцены " * 900} for i in range(4)]
@@ -2288,7 +2311,13 @@ class TestTurnReport(unittest.TestCase):
         payload = self.session.turn_report(post["id"])
 
         self.assertEqual(post["turn"]["asks"], 1, "в сводке — сколько было запросов")
-        self.assertEqual(post["turn"]["problems"], 1, "и сколько было заминок")
+        # Заминки названы по отдельности: отказ в поиске сверх лимита — это ещё
+        # не беда, а молчание — уже беда. Одним числом они говорили бы «что-то
+        # было», не говоря что
+        self.assertEqual(post["turn"]["search_refusals"], 1,
+                         "отказ в поиске должен быть назван отдельно")
+        self.assertEqual(post["turn"]["silences"], 0,
+                         "молчания в этом ходу не было — и приписывать его нельзя")
         self.assertEqual([step["kind"] for step in payload["steps"]],
                          ["ask", "search", "refused"], "шаги должны идти по порядку")
         search = payload["steps"][1]
@@ -5149,8 +5178,9 @@ class TestPageScript(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("node не найден: часы не с кем сверить")
-        script = "\n".join(self._function(name)
-                           for name in ("durationText", "turnClockText"))
+        script = "\n".join(self._function(name) for name in (
+            "tokensText", "moneyText", "durationText", "turnClockText",
+            "turnSummaryParts"))
         script += "\nconsole.log(JSON.stringify([" + ", ".join(calls) + "]));"
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
                                         encoding="utf-8") as handle:
@@ -5172,6 +5202,28 @@ class TestPageScript(unittest.TestCase):
         self.assertEqual(self._run_in_node("durationText(45)", "durationText(135)",
                                            "durationText(120)"),
                          ["45 с", "2 мин 15 с", "2 мин"])
+
+    def test_the_summary_line_names_the_trouble_apart(self):
+        """В свёрнутой строке отказ в поиске и молчание — двумя разными словами.
+
+        Общее число «заминок» говорило «что-то было» и не говорило что: отказ
+        в поиске — это просьба поискать ещё, и реплика при этом есть, а молчание —
+        это когда реплики нет вовсе.
+        """
+        out = self._run_in_node(
+            "turnSummaryParts({asks: 2, search_rounds: 1, tokens: 2254, seconds: 135,"
+            " spent: 1.89, search_refusals: 1, silences: 0})",
+            "turnSummaryParts({asks: 1, tokens: 10, silences: 2})")
+        quiet, mute = " · ".join(out[0]), " · ".join(out[1])
+
+        self.assertIn("⏱ 2 мин 15 с", quiet)
+        self.assertIn("1,89 ₽", quiet, "цена хода должна остаться в сводке")
+        self.assertIn("поиск сверх лимита 1", quiet)
+        self.assertNotIn("без ответа", quiet,
+                         "молчания не было — и приписывать его нельзя")
+        self.assertIn("без ответа 2", mute)
+        self.assertNotIn("заминок", mute,
+                         "общего «заминок» больше нет: оно ни о чём не говорит")
 
     def test_the_clock_counts_up_and_shows_the_bonus(self):
         """Сколько думает и сколько осталось — и с надбавкой за поиски."""
