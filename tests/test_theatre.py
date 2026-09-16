@@ -2347,6 +2347,12 @@ class TestTurnReport(unittest.TestCase):
         for number in (32768, 8192, 500, 24076, 807, 1447, 2254):
             self.assertIn(show.numbers_word(number), text,
                           f"число {number} отчёт знает, и в шапке оно должно быть")
+        # А это — против пропажи самого числа: если сцена в шапке не называется,
+        # то и от правки числа текст не изменится (слова тут ни при чём)
+        for key, value in (("messages_after", 3), ("kept_tokens", 9999)):
+            other = dict(turn, budget=dict(turn["budget"], **{key: value}))
+            self.assertNotEqual(text, show.dump_turn_header(1, other),
+                                f"шапка не заметила правки {key} — число не показано")
 
     def test_a_zero_answer_seat_is_not_called_zero_tokens(self):
         """Ноль в запасе — это «ответ не ограничиваем», а не «0 токенов на ответ».

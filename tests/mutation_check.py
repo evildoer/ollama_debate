@@ -827,6 +827,11 @@ BUGS = {
          '            f"{numbers_word(budget.get(\'system_tokens\'))} токенов, из сцены {scene} "',
          '            f"токенов, из сцены {scene} "'),
     ],
+    "из шапки хода пропало число сообщений сцены": [
+        ("aitheatre/show.py",
+         '    scene = int(budget.get("messages_after") or 0)',
+         "    scene = 0"),
+    ],
     "ноль в запасе снова читается как «ноль токенов на ответ»": [
         ("aitheatre/show.py",
          '              else "на ответ ничего не зарезервировано '
