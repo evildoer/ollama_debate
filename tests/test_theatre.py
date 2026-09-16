@@ -3382,6 +3382,31 @@ class TestCloudGateway(unittest.TestCase):
         """Одна порция текста в потоке: так её отдают шлюзы OpenAI."""
         return {"choices": [{"delta": {"content": text}}]}
 
+    def test_a_streamed_reply_survives_without_a_draft_in_the_feed(self):
+        """Поток без черновика в ленте — не поломка шлюза.
+
+        Ход без черновика приходит с одним только сборщиком размышлений,
+        и получателя текста у него нет вовсе: звать его было нельзя. Кончилось
+        это не ошибкой в консоли, а ответом модели, в котором человек читал
+        «шлюз недоступен по адресу …: 'NoneType' object is not callable».
+        """
+        self.gateway.stream_text = self._sse(self._piece("Канберра."))
+        cloud_setting(self, "CLOUD_SEND_TOOLS", False)
+
+        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                     on_delta=None, on_thought=lambda piece, replace: None)
+
+        self.assertEqual(content, "Канберра.",
+                         "реплика должна доехать целиком, а не превратиться в ошибку")
+        self.assertNotIn("NoneType", content)
+
+        # И то же самое через ход целиком: поток есть, черновика нет
+        self.gateway.stream_text = self._sse(self._piece("Канберра."))
+        spoken, _count, _queries = ollama_api.ask_model(
+            self.MODEL, [{"role": "user", "content": "Привет!"}],
+            participant_name="Проверка")
+        self.assertEqual(spoken, "Канберра.")
+
     def test_the_reply_grows_in_pieces_while_the_model_speaks(self):
         """Ответ умеет приходить по кускам, а собираться в тот же целый текст."""
         self.gateway.stream_text = self._sse(self._piece("Кан"), self._piece("бер"),

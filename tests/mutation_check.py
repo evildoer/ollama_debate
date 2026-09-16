@@ -603,6 +603,14 @@ BUGS = {
          "    spent = first - first\n    return spent if spent > 0 else None"),
     ],
     # У местной модели платить не за что: два запроса впустую на каждом её ходу
+    # Поток без черновика в ленте приходил с одним только сборщиком размышлений:
+    # получателя текста там не было, и в ленте появлялось «'NoneType' object is
+    # not callable» — то есть наша ошибка выдавалась за поломку шлюза
+    "поток снова зовёт получателя, которого нет": [
+        ("aitheatre/cloud.py",
+         "                if on_delta is not None:\n                    on_delta(piece, not parts)",
+         "                on_delta(piece, not parts)"),
+    ],
     "остаток снова спрашивают и на ходу местной модели": [
         ("aitheatre/show.py",
          '        cloud_turn = cloud.is_cloud_model(participant.get("model", ""))',

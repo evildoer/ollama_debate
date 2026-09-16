@@ -53,6 +53,7 @@ import json
 import os
 import re
 import time
+import traceback
 import urllib.error
 import urllib.request
 
@@ -859,6 +860,10 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
                 continue
             return None, GatewayError(hide_key(_error_text(e.code, e.reason, detail)), e.code)
         except Exception as e:
+            # Своя собственная ошибка не должна выглядеть как поломка шлюза: покажем
+            # её в консоли со следом, а в ленте останется короткое слово (так была
+            # найдена свалка «'NoneType' object is not callable» в ответе модели)
+            traceback.print_exc()
             return None, GatewayError(hide_key(f"шлюз недоступен по адресу {base_url()}: {e}"))
 
     return None, "шлюз не ответил"      # недостижимо: попытки кончаются возвратом
@@ -1150,7 +1155,12 @@ def _read_stream(response, on_delta, on_thought=None, deadline: float = None) ->
                     thoughts.append(thought)
             piece = _delta_text(delta)
             if piece:
-                on_delta(piece, not parts)
+                # Получателя может и не быть: ход без черновика в ленте приходит
+                # с одним только сборщиком размышлений, и звать None нельзя —
+                # это не ошибка шлюза, а наша собственная (её и видно было
+                # в ленте как «шлюз недоступен: 'NoneType' object is not callable»)
+                if on_delta is not None:
+                    on_delta(piece, not parts)
                 parts.append(piece)
             _accumulate_calls(calls, delta)
 
