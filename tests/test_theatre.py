@@ -2304,25 +2304,26 @@ class TestTurnReport(unittest.TestCase):
         self.assertIn("население", line, "в хронологии ДАМПа видна формулировка запроса")
         self.assertIn("900", line, "и вес найденного")
 
-    def test_the_dump_header_does_not_merge_two_numbers_into_one(self):
-        """Шапка хода не сваливает два разных числа под одно «из».
+    def test_the_scene_count_comes_from_the_report_and_zero_is_zero(self):
+        """Числа хода — те же в отчёте и в шапке, и ноль сцены остаётся нулём.
 
-        Из жизни: строчка «N сообщ. из M» читалась как ошибка арифметики — первое
-        число считало все сообщения запроса (промпт, сцена, задания), а второе
-        только сообщения сцены до обрезки. Разбираться приходилось режиссёру.
+        Из жизни: рядом стояли два числа про разное (все сообщения запроса и
+        только сцена) — читалось как ошибка арифметики. Хуже: ноль сообщений
+        сцены подменялся общим числом сообщений, и в отчёте появлялось число,
+        которого в запросе не было. Проверяем данные, а не слова вокруг них:
+        эти числа уезжают и в ленту, и в ДАМП.
         """
         folder = Path(tempfile.mkdtemp())
         dump = folder / "damp.md"
         with mock.patch.object(settings, "DUMP_FILE", dump):
             show.start_dump("Проверочная тема")
-            self._turn()
-            written = dump.read_text(encoding="utf-8")
+            post = self._turn()
 
-        self.assertNotIn(") из ", written,
-                         "два разных числа под одним «из» — та самая путаница")
-        # И ни одного выдуманного числа: сцены в этом ходу нет, и так и сказано
-        self.assertIn("из сцены 0 сообщ.", written,
-                      "ноль — это ноль, а не общее число сообщений")
+        budget = self.session.turn_report(post["id"])["budget"]
+        self.assertEqual(budget["messages_after"], 0,
+                         "сцены в этом ходу нет — и в отчёте ноль, а не все сообщения запроса")
+        self.assertLessEqual(budget["messages_after"], budget["messages_before"],
+                             "сцена — часть запроса, больше него быть не может")
 
     def test_a_zero_answer_seat_is_not_called_zero_tokens(self):
         """Ноль в запасе — это «ответ не ограничиваем», а не «0 токенов на ответ».
