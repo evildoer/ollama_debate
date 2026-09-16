@@ -767,13 +767,12 @@ class TestInstanceFiles(unittest.TestCase):
                         "папка экземпляра должна заводиться раньше чтения сцены")
 
     def test_a_busy_port_is_not_taken_silently(self):
-        """Занятый порт обязан быть виден — иначе театр садится рядом с собой.
+        """Занятый порт обязан быть виден.
 
-        Windows разрешает двум процессам занять один порт (werkzeug ставит
-        SO_REUSEADDR, а с ним занятый порт выглядит свободным). Второй `py .`
-        садился молча, браузер открывал первый экземпляр, и в нём шёл старый
-        спектакль со старыми репликами — «откуда он их помнит?». Ниоткуда: просто
-        это был другой процесс, всё ещё живой.
+        Windows разрешает двум процессам занять один порт: werkzeug ставит
+        SO_REUSEADDR, а с ним занятый порт выглядит свободным — и второй `py .`
+        садится рядом молча. Проверка ставится без SO_REUSEADDR именно затем,
+        чтобы такой порт был виден.
         """
         holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -784,8 +783,6 @@ class TestInstanceFiles(unittest.TestCase):
 
         self.assertTrue(web_app.port_is_busy(busy),
                         "занятый так же, как его занимает сервер, порт должен быть виден")
-        self.assertEqual(web_app.free_port(busy), busy + 1,
-                         "занятый порт — повод взять следующий, а не садиться рядом")
 
     def test_the_holder_of_the_port_is_named_by_numbers(self):
         """Кто держит порт — театр называет сам, номером процесса.
@@ -812,13 +809,27 @@ class TestInstanceFiles(unittest.TestCase):
         self.assertEqual(web_app.port_holders(5000, "netstat не нашёлся"), [],
                          "мусор на входе — тоже пустой список")
 
-    def test_a_free_port_is_left_alone(self):
-        """Свободный порт не трогаем: привычный `py .` должен вести туда же."""
-        self.assertEqual(web_app.free_port(5000, taken=lambda _port: False), 5000)
-        # Два занятых подряд — берём третий: «первый свободный», а не «следующий»
-        taken = {5000: True, 5001: True, 5002: False}
-        self.assertEqual(
-            web_app.free_port(5000, taken=lambda port: taken.get(port, False)), 5002)
+    def test_a_busy_port_is_reported_with_the_process_numbers(self):
+        """О занятом порте говорят, и говорят с номерами — но порт не меняют.
+
+        Порт остаётся тем, что попросили: `py .` обязан вести на 5000, другой
+        назначается только аргументом — иначе поведение перестаёт быть
+        предсказуемым. А сказать надо вот что: соединения отдаются тому, кто
+        занял порт раньше, поэтому второй экземпляр жив, но недостижим.
+        """
+        notice = "\n".join(web_app.port_conflict_notice(5000, [33088, 21388]))
+
+        self.assertIn("5000", notice,
+                      "порт должен быть назван — он же будет в адресе браузера")
+        for pid in (33088, 21388):
+            self.assertIn(f"taskkill /PID {pid} /F", notice,
+                          "команда должна быть готова к вставке в консоль Windows")
+        self.assertIn("недостижим", notice,
+                      "человек должен понять, почему его новый спектакль никто не увидит")
+        # Номера процессов узнаются не всегда: тогда обязан быть способ их найти
+        blind = "\n".join(web_app.port_conflict_notice(5000, []))
+        self.assertIn("netstat -ano | findstr :5000", blind,
+                      "без номеров надо дать команду, которой их ищут")
 
     def test_the_server_plays_on_the_port_it_was_given(self):
         """Порт из аргумента доходит и до сервера, и до браузера, и до файлов."""
@@ -829,6 +840,8 @@ class TestInstanceFiles(unittest.TestCase):
         self.assertIn("socketio.run(app, host='0.0.0.0', port=port", source)
         self.assertIn("webbrowser.open(f'http://localhost:{port}')", source,
                       "браузер должен открывать тот же порт, что и сервер")
+        self.assertNotIn("free_port", source,
+                         "порт не подменяется сам: он должен быть тем, что попросили")
 
 
 class TestStreamingReply(unittest.TestCase):

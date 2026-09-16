@@ -228,6 +228,11 @@ BUGS = {
          '        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n'
          '        probe.bind(("0.0.0.0", int(port)))'),
     ],
+    "о занятом порте снова говорят без номеров процессов": [
+        ("aitheatre/web.py",
+         '        lines.extend(f"      taskkill /PID {pid} /F" for pid in holders)',
+         '        lines.append("      taskkill /PID <номер> /F")'),
+    ],
     "порт снова ищется по вхождению в адрес": [
         ("aitheatre/web.py",
          '        if not parts[1].endswith(marker) or parts[3].upper() != "LISTENING":',
