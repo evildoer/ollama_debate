@@ -1801,6 +1801,28 @@ HTML_TEMPLATE = """
                 + inner + `</section>`;
         }
 
+        // Из чего сложился дописанный хвост — словами и по счёту, а не по
+        // привычке. Раньше тут стояло «по паре на каждый поиск, плюс
+        // напоминания», и с числами это не сходилось: пара — привычный случай,
+        // а не всегдашний (счёт по сообщениям — в show.added_kinds)
+        function addedPurpose(summary, added) {
+            const kinds = (summary && summary.added_kinds) || {};
+            const words = [];
+            if (kinds.asks) words.push(`просьба вызвать инструмент — ${kinds.asks}`);
+            if (kinds.results) words.push(`найденное по ней — ${kinds.results}`);
+            if (kinds.refusals) words.push(`отказ по лимиту поисков — ${kinds.refusals}`);
+            if (kinds.nudges) words.push(`просьба приложения словами — ${kinds.nudges}`);
+            const count = `${added.length} сообщ. `
+                + `(${tokensText(summary.extra_tokens)} токенов)`;
+            const tail = 'В хронологии выше те же поиски названы своими словами — '
+                + 'с формулировкой запроса и своим весом.';
+            if (!words.length) {
+                return `После первого запроса приложение дописало модели ${count}. ` + tail;
+            }
+            return `После первого запроса приложение дописало модели ${count}: `
+                + words.join(' · ') + '. ' + tail;
+        }
+
         function turnBodyHtml(data) {
             const s = data.summary || {};
             const b = data.budget || {};
@@ -1884,17 +1906,13 @@ HTML_TEMPLATE = """
                     promptRemovedHtml(data.removed)));
             }
             if ((data.added || []).length) {
-                // Не «ход дописал», а кто и что: дописывает та самая пара
-                // «прошу поиск + найденное», и делает это приложение, а не модель.
+                // Не «ход дописал», а кто и что: дописывает приложение, а не модель.
                 // Полные тексты здесь есть, и это не ошибка: найденное приходит
                 // модели именно таким сообщением (кроме текста у него ничего нет),
                 // и в этом разделе видно, сколько оно весило в запросе. В хронологии
                 // выше тот же поиск назван своими словами — с запросом и весом
                 parts.push(turnBlock('✍️ Что приложение дописало в запрос',
-                    'После первого запроса приложение дописало модели '
-                    + `${data.added.length} сообщ. (${tokensText(s.extra_tokens)} токенов) — по паре на каждый поиск, плюс напоминания. `
-                    + 'Это те же поиски, что в хронологии выше, только со стороны протокола: '
-                    + 'просьба вызвать инструмент и ответ на неё.',
+                    addedPurpose(s, data.added),
                     promptMessagesHtml(data.added)));
             } else if (s.extra_messages) {
                 parts.push(turnBlock('✍️ Что приложение дописало в запрос',

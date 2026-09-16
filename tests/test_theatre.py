@@ -2292,6 +2292,37 @@ class TestTurnReport(unittest.TestCase):
         self.assertEqual(post["turn"]["tokens_in_total"], 2871 + 5189 + 6400,
                          "сумма по всем запросам хода, а не по первому")
 
+    def test_the_added_tail_counts_what_is_really_in_it(self):
+        """Хвост хода посчитан по самим сообщениям, а не «по паре на каждый поиск».
+
+        В отчёте стояла именно эта фраза, и с числами она не сходилась: «3 сообщ.
+        — по паре на каждый поиск» — как так? Пара — привычный случай, а не
+        всегдашний: три поиска одним вызовом дают одну просьбу и три ответа,
+        а напоминаний в ходу может не быть вовсе (см. added_kinds).
+        """
+        extra = [
+            # Один вызов, три поиска в нём, и ни одного напоминания
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "1", "function": {"name": "search_web", "arguments": {}}},
+                {"id": "2", "function": {"name": "search_web", "arguments": {}}},
+                {"id": "3", "function": {"name": "search_web", "arguments": {}}}]},
+            {"role": "tool", "tool_name": "search_web", "name": "search_web",
+             "content": "нашлось раз"},
+            {"role": "tool", "tool_name": "search_web", "name": "search_web",
+             "content": "нашлось два"},
+            # Отказ по лимиту — тоже сообщение хвоста, но это не найденное
+            {"role": "tool", "tool_name": "search_web", "name": "search_web",
+             "content": "[лимит поисков исчерпан]"},
+        ]
+        post = self._turn(extra=extra, search_count=3)
+
+        self.assertEqual(post["turn"]["added_kinds"],
+                         {"asks": 1, "results": 2, "refusals": 1, "nudges": 0},
+                         "хвост считается по сообщениям: просьбы, найденное, отказы "
+                         "и просьбы приложения словами")
+        self.assertEqual(post["turn"]["extra_messages"], 4,
+                         "и общее число сообщений хвоста — рядом со счётом по частям")
+
     def test_the_two_kinds_of_trouble_are_counted_apart(self):
         """Отказ в поиске и молчание — разные заминки, и в сводке они врозь.
 
@@ -4927,6 +4958,26 @@ class TestRoutes(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.client = web_app.app.test_client()
 
+    def test_the_page_is_served_from_the_code_and_never_cached(self):
+        """Страница отдаётся ровно тем, что лежит в page.py, и браузер её не держит.
+
+        Баг был такой: вёрстку правят, `py .` обновляют — а на экране прежняя,
+        и «кэш чистил, не знаю». Вёрстка живёт в памяти процесса, поэтому
+        обновление страницы её не меняет вообще; но и браузерный кэш тут лишний —
+        иначе «не применяется» выглядит одинаково и когда код старый, и когда
+        страница старая (см. index в web.py).
+        """
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("no-store", response.headers.get("Cache-Control", ""),
+                      "браузеру нельзя разрешать держать страницу у себя")
+        # Единственное, чем ответ отличается от шаблона, — последний перевод
+        # строки: Jinja его срезает
+        self.assertEqual(response.get_data(as_text=True),
+                         page.HTML_TEMPLATE.rstrip("\n"),
+                         "отдаётся не то, что лежит в коде: тогда правка вёрстки "
+                         "не появится даже после перезапуска")
+
     def test_empty_topic_field_uses_the_one_on_the_server(self):
         """Тот самый баг: поле в форме стёрли, а тема на сервере осталась."""
         self.session.topic = "1"
@@ -5643,7 +5694,7 @@ class TestPageScript(unittest.TestCase):
         script += "\n" + "\n".join(self._function(name) for name in (
             "escapeHtml", "tokensText", "durationText", "stepClock", "turnAskText",
             "promptMessagesHtml", "promptRemovedHtml", "thinkingBlockHtml",
-            "turnBlock", "turnBodyHtml"))
+            "addedPurpose", "turnBlock", "turnBodyHtml"))
         script += f"\nconsole.log(turnBodyHtml({payload}));"
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
                                         encoding="utf-8") as handle:
@@ -5702,6 +5753,34 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("Вот ответ.", html)
         self.assertIn("&lt;b&gt;не тег&lt;/b&gt;", html,
                       "тексты разделов должны быть экранированы, а не уехать тегом")
+
+    def test_the_added_tail_is_named_by_its_real_parts(self):
+        """В шапке хвоста — счёт по частям, а не «по паре на каждый поиск».
+
+        Именно так и было написано, и с числами это не сходилось: «3 сообщ. —
+        по паре на каждый поиск, плюс напоминания» просит читателя делить
+        тройку на пары. Здесь в хвосте одна просьба и три ответа (три поиска
+        одним вызовом) и ни одного напоминания — про пары здесь было бы враньём
+        (счёт — в show.added_kinds).
+        """
+        html = self._render_turn_report(
+            "{who: {name: 'Проверка', model: 'cloud:fake', round: 1, time: '12:00'},"
+            " summary: {messages: 1, tokens: 900, extra_messages: 4,"
+            " extra_tokens: 900,"
+            " added_kinds: {asks: 1, results: 3, refusals: 0, nudges: 0}},"
+            " budget: {kind: 'cloud', window: 32768, safety: 500},"
+            " added: [{role: 'assistant', name: 'проверка', tokens: 0, content: ''},"
+            " {role: 'tool', name: 'search_web', tokens: 300, content: 'Найдено'},"
+            " {role: 'tool', name: 'search_web', tokens: 300, content: 'Найдено'},"
+            " {role: 'tool', name: 'search_web', tokens: 300, content: 'Найдено'}],"
+            " messages: [], answer: 'Ответ.'}")
+
+        self.assertIn("4 сообщ.", html, "число сообщений хвоста — в шапке раздела")
+        self.assertIn("просьба вызвать инструмент — 1", html)
+        self.assertIn("найденное по ней — 3", html)
+        self.assertNotIn("по паре", html, "пара — привычный случай, а не счёт")
+        self.assertNotIn("напоминания", html,
+                         "напоминаний в ходу не было, а слово обещало бы их")
 
 
 if __name__ == "__main__":

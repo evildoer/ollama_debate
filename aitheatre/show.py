@@ -780,6 +780,11 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         # дописал»: дописывает приложение, а не модель)
         "extra_messages": len(extra),
         "extra_tokens": sum(m["tokens"] for m in extra),
+        # Из чего этот хвост состоит — по самим сообщениям: в шапке стояло
+        # «по паре на каждый поиск, плюс напоминания», и с числами это не
+        # сходилось (3 сообщ. — это как?), потому что пара — привычный случай,
+        # а не всегдашний (см. added_kinds)
+        "added_kinds": added_kinds(extra),
         "search_rounds": int(search_count or 0),
         "asks": sum(1 for step in steps if step.get("kind") == "ask"),
         # Заминки названы по отдельности, а не одним числом: отказ в поиске
@@ -825,6 +830,36 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         "removed": removed,
         "steps": steps,
     }
+
+
+def added_kinds(added: list) -> dict:
+    """Из чего состоит дописанный приложением хвост хода — по самим сообщениям.
+
+    Привычно это «пара на каждый поиск»: просьба вызвать инструмент и ответ на
+    неё. Но пара — привычный случай, а не всегдашний: три поиска одним вызовом
+    дают одну просьбу и три ответа, а напоминаний в ходу может не быть вовсе.
+    Фраза, начинавшаяся с «по паре на каждый поиск», с числами поэтому не
+    сходилась. Считаем то, что в хвосте лежит: просьбы модели, найденное, отказы
+    по лимиту и просьбы приложения словами (см. _message_view и refresh_turn_report:
+    хвост достраивается по ходу и к концу хода считается заново).
+    """
+    kinds = {"asks": 0, "results": 0, "refusals": 0, "nudges": 0}
+    for message in added or []:
+        role = str(message.get("role") or "")
+        content = str(message.get("content") or "")
+        if role == "assistant":
+            kinds["asks"] += 1
+        elif content.startswith(ollama_api.SEARCH_RESULT_PREFIX):
+            kinds["results"] += 1
+        elif role == "tool":
+            # Ответ инструмента: либо найденное по поиску, либо отказ по лимиту
+            if content.startswith("[лимит поисков исчерпан]"):
+                kinds["refusals"] += 1
+            else:
+                kinds["results"] += 1
+        else:
+            kinds["nudges"] += 1
+    return kinds
 
 
 def _steps_count(steps, kind: str) -> int:
@@ -876,6 +911,7 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     turn["steps"] = steps
     summary["extra_messages"] = len(extra)
     summary["extra_tokens"] = sum(m["tokens"] for m in extra)
+    summary["added_kinds"] = added_kinds(extra)
     summary["search_rounds"] = int(search_count or 0)
     # Цена хода — по разнице остатков на ключе, а не по тарифам (см. _note_money).
     # Не знаем — так и говорим молчанием: ноль означал бы «бесплатно»

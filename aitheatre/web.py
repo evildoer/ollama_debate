@@ -14,7 +14,8 @@ import threading
 import time
 import webbrowser
 
-from flask import Flask, jsonify, render_template_string, request, send_from_directory
+from flask import (Flask, jsonify, make_response, render_template_string, request,
+                   send_from_directory)
 from flask_socketio import SocketIO, emit
 
 from . import avatars
@@ -165,7 +166,20 @@ log.setLevel(logging.WARNING)
 
 @app.route('/')
 def index():
-    return render_template_string(page.HTML_TEMPLATE)
+    """Страница целиком берётся из кода процесса, а не из файла на диске.
+
+    Значит правка вёрстки видна только после перезапуска `py .` — обновление
+    страницы само по себе ничего не меняет. Но браузер тут лишний свидетель:
+    если он держит старую страницу у себя, то и после перезапуска на экране
+    останется прежняя вёрстка, и снова будет казаться, что правка «не
+    применилась» (см. no-store ниже).
+    """
+    response = make_response(render_template_string(page.HTML_TEMPLATE))
+    # Держать страницу у себя браузеру незачем: она собирается заново на каждый
+    # запрос и меняется вместе с кодом. Остальные ответы уже помечены так же
+    # (см. /api/status и /api/post/<id>/turn)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 @app.route('/favicon.ico')
 def favicon():

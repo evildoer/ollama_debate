@@ -1041,6 +1041,28 @@ BUGS = {
          '    "history": "### 🧭 Хронология хода: что происходило по порядку",',
          '    "history": "### Хронология",'),
     ],
+    "хвост хода снова описан парами вместо счёта": [
+        ("aitheatre/page.py",
+         "                + words.join(' · ') + '. ' + tail;",
+         "                + 'по паре на каждый поиск, плюс напоминания. ' + tail;"),
+    ],
+    "отказ по лимиту снова записан в найденное": [
+        ("aitheatre/show.py",
+         """            if content.startswith(\"[лимит поисков исчерпан]\"):
+                kinds[\"refusals\"] += 1
+            else:
+                kinds[\"results\"] += 1""",
+         "            kinds[\"results\"] += 1"),
+    ],
+    "страница снова отдаётся браузеру с разрешением кэшировать": [
+        ("aitheatre/web.py",
+         """    response = make_response(render_template_string(page.HTML_TEMPLATE))
+    # Держать страницу у себя браузеру незачем: она собирается заново на каждый
+    # запрос и меняется вместе с кодом. Остальные ответы уже помечены так же
+    # (см. /api/status и /api/post/<id>/turn)
+    response.headers[\"Cache-Control\"] = \"no-store\"""",
+         "    response = make_response(render_template_string(page.HTML_TEMPLATE))"),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,
