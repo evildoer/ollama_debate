@@ -2953,6 +2953,313 @@ class TestTurnReport(unittest.TestCase):
                       "страница спрашивает отчёт не по тому адресу, что есть у сервера")
 
 
+class TestPlayKeptInDump(unittest.TestCase):
+    """Спектакль живёт в ДАМПе: и посты, и ходы, — и возвращается из него.
+
+    Реплики и отчёты о ходах лежали только в памяти процесса: перезапуск
+    означал пустую сцену, хотя записан был весь спектакль. Теперь файл — это
+    сам спектакль, и читается он тем же, чем писался: разделы называются
+    одними словами (см. TURN_SECTIONS), а строки собираются теми же функциями,
+    что их и пишут.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.session.topic = "Возвращённая тема"
+        # Куда черновик реплики отдаёт то, что рисует в ленте на ходу: без этого
+        # у хода не будет ни размышлений, ни наброска (см. _StreamingReply)
+        self.drafts = []
+
+    @staticmethod
+    def _participant(model: str = "fake-model") -> dict:
+        return {"display_name": "Проверка", "model": model, "gender": "female",
+                "avatar_emoji": "🦊", "instruction": "ГОВОРИ КОРОТКО"}
+
+    def _play(self, folder) -> tuple:
+        """Спектакль целиком: ход с поиском, мыслями и наброском, потом человек.
+
+        Возвращает файл ДАМПа и сессию, в которой этот спектакль был отыгран:
+        сверять прочитанное надо именно с ней, а не с тем, что мы написали
+        здесь второй раз.
+        """
+        dump = Path(folder) / "damp.md"
+        now = time.time()
+        steps = [
+            {"kind": "ask", "n": 1, "t": now, "t_end": now + 5.5, "tokens_in": 3431,
+             "tokens_in_est": 3400, "tokens_out": 1246, "reasoning_tokens": 1160,
+             "finish_reason": "tool_calls", "tools": True},
+            {"kind": "search", "n": 1, "t": now + 6, "t_end": now + 6.8, "limit": 5,
+             "query": "Сыктывкар население", "results": "НАЙДЕНО ПОИСКОМ: 250 тысяч",
+             "tokens": 900},
+            {"kind": "ask", "n": 2, "t": now + 7, "t_end": now + 9, "tokens_in": 5189,
+             "tokens_in_est": 5000, "tokens_out": 700, "finish_reason": "stop",
+             "tools": True},
+            {"kind": "refused", "t": now + 9.1,
+             "text": "просит ещё поиск «раз», но лимит 5 исчерпан"},
+        ]
+        extra = [
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "1", "function": {"name": "search_web",
+                                        "arguments": {"query": "Сыктывкар население"}}}]},
+            {"role": "tool", "tool_name": "search_web", "name": "search_web",
+             "content": "НАЙДЕНО ПОИСКОМ: 250 тысяч"},
+        ]
+
+        def answer(model, messages, participant_name, **kwargs):
+            kwargs["on_thought"]("Сначала взвешу доводы.", True)
+            kwargs["on_delta"]("Набросок ответа.", True)
+            kwargs["on_delta"]("Вот ответ.", True)
+            messages.extend(copy.deepcopy(extra))
+            # Настоящий шлюз кладёт события в журнал именно так, и они уезжают
+            # в файл в тот же миг (см. cloud.journal_push) — иначе в ДАМПе
+            # не осталось бы ни запросов, ни поиска, и сверять было бы нечего
+            for step in copy.deepcopy(steps):
+                cloud.journal_push(kwargs["report"], step)
+            return "Вот ответ.", 1, ["Сыктывкар население"]
+
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Возвращённая тема")
+            with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+                self.session.handle_ai_turn(self._participant(), 1,
+                                            on_draft=self.drafts.append)
+            # И живая реплика — тоже часть спектакля: у неё нет ни запросов,
+            # ни поиска, но в ленте она стоит между машинными
+            self.session.add_post("Живой", "human", "Сказано руками.", 1, gender="female")
+            written = dump.read_text(encoding="utf-8")
+        return written, dump
+
+    def test_the_play_comes_back_the_same_from_the_dump(self):
+        """Спектакль читается назад целиком: реплики, их ходы и числа ходов.
+
+        Это и есть взаимозаменяемость: файл и лента содержат одно и то же,
+        поэтому по файлу лента и собирается заново. Сверяем с той самой
+        сессией, в которой спектакль отыгран, а не с пересказом.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            written, _ = self._play(folder)
+            play = show.parse_dump(written)
+
+        self.assertIsNotNone(play, "свой же ДАМП не читается")
+        self.assertEqual(play["topic"], "Возвращённая тема")
+        played = self.session.posts
+        self.assertEqual([p["display_name"] for p in play["posts"]],
+                         [p["display_name"] for p in played])
+        for original, restored in zip(played, play["posts"]):
+            for key in ("content", "round", "role", "role_name", "gender",
+                        "gender_symbol", "model_used", "timestamp"):
+                self.assertEqual(restored[key], original[key], key)
+
+        machine = played[0]["id"]
+        original_turn = self.session.turn_report(machine)
+        restored_turn = play["turns"][machine]
+        # Сводка хода считается заново по его же частям — и должна сойтись
+        # с тем, что театр показывал на ходу
+        for key in ("asks", "search_rounds", "thought_steps", "messages", "tokens",
+                    "extra_messages", "extra_tokens", "removed_messages",
+                    "tokens_in_total", "window_kind"):
+            self.assertEqual(restored_turn["summary"][key], original_turn["summary"][key],
+                             f"число «{key}» не вернулось из ДАМПа")
+        self.assertEqual(int(round(original_turn["summary"]["seconds"])),
+                         restored_turn["summary"]["seconds"],
+                         "время хода в файле округлено до секунд — но не потеряно")
+        for key in ("window", "reserve", "safety", "available", "system_tokens",
+                    "kept_tokens", "messages_after"):
+            self.assertEqual(restored_turn["budget"][key], original_turn["budget"][key], key)
+        self.assertEqual([step["kind"] for step in restored_turn["steps"]],
+                         [step["kind"] for step in original_turn["steps"]],
+                         "хронология хода должна вернуться шаг в шаг")
+        self.assertEqual([m["role"] for m in restored_turn["messages"]],
+                         [m["role"] for m in original_turn["messages"]])
+        self.assertEqual([m["tokens"] for m in restored_turn["messages"]],
+                         [m["tokens"] for m in original_turn["messages"]],
+                         "вес сообщений запроса должен считаться тем же счётом")
+        self.assertEqual([m["content"] for m in restored_turn["added"]],
+                         [m["content"] for m in original_turn["added"]])
+        fallback = next(step for step in restored_turn["steps"] if step["kind"] == "search")
+        self.assertEqual(fallback["query"], "Сыктывкар население")
+        self.assertEqual(fallback["results"], "НАЙДЕНО ПОИСКОМ: 250 тысяч")
+        asked = next(step for step in restored_turn["steps"] if step["kind"] == "ask")
+        self.assertEqual(asked["tokens_in"], 3431)
+        self.assertEqual(asked["tokens_out"], 1246)
+        self.assertEqual(asked["finish_reason"], "tool_calls")
+        self.assertRegex(asked["clock"], r"^\d\d:\d\d:\d\d\.\d\d\d$",
+                         "время события должно вернуться, иначе «чем занимался ход» не ответить")
+        self.assertEqual(restored_turn["sketch"], played[0]["sketch"])
+        self.assertEqual(restored_turn["answer"], played[0]["content"])
+        self.assertIn("Сначала взвешу доводы.", restored_turn["thinking"],
+                      "мысли модели — тоже часть хода")
+
+    def test_another_format_is_not_read_half_way(self):
+        """Чужой формат записи не читается вовсе, а не наполовину.
+
+        Формат будет меняться вместе с тем, как устроена запись, и тогда
+        прежний ДАМП может не подойти. Прочитать из него половину хуже, чем
+        ничего: непрочитанная реплика в ленте выглядела бы как «модель
+        промолчала в этом ходу» — и это была бы неправда.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            written, _ = self._play(folder)
+        self.assertIn("Формат записи: " + str(show.DUMP_FORMAT), written,
+                      "в файле должен быть номер формата — по нему и читают")
+
+        older = written.replace("Формат записи: " + str(show.DUMP_FORMAT),
+                                "Формат записи: 1")
+        self.assertIsNone(show.parse_dump(older))
+        self.assertIsNone(show.parse_dump("# ДАМП · 01.09.2026 12:00 · прежний\n\nход\n"),
+                          "прежний ДАМП без номера формата тоже не наш")
+
+    def test_the_heading_carries_the_time_and_the_price_back(self):
+        """Время хода и его цена — в шапке записи, и читаются обратно.
+
+        Это два числа, которых задним числом не посчитать: часы уже не идут,
+        а остаток на ключе — только у шлюза. Поэтому они и лежат в шапке,
+        рядом с остальной сводкой (см. turn_summary_line).
+        """
+        who, seconds, spent = show._parse_heading(
+            "22:01 · 🦊 Элина · cloud:qwen/qwen3.8-flash · Судья · Акт 2 · запросов 3 · "
+            "поисков 5 · ⏱ 2 мин 15 с · 💰 1,89 ₽")
+
+        self.assertEqual(who["emoji"], "🦊")
+        self.assertEqual(who["name"], "Элина")
+        self.assertEqual(who["role_name"], "Судья")
+        self.assertEqual(who["round"], 2)
+        self.assertEqual(who["time"], "22:01")
+        self.assertEqual(seconds, 135)
+        self.assertAlmostEqual(spent, 1.89, places=2)
+        # Имя без значка — тоже обычное дело: значок может быть и не задан
+        self.assertEqual(show._parse_heading("22:01 · Элина · human · Участник · Акт 1")[0]["name"],
+                         "Элина")
+
+    def test_the_who_line_names_the_gender_like_the_lane(self):
+        """Пол стоит рядом с именем и в файле, и в ленте: это часть «кто говорит».
+
+        Без него одна и та же реплика в файле и на странице читалась бы про
+        разных людей: у поста в ленте значок есть (см. postHeaderHtml).
+        """
+        who = {"name": "Проверка", "model": "cloud:x", "round": 2, "time": "12:00",
+               "gender": "female"}
+        line = show.who_line({"who": who})
+        self.assertIn("Проверка", line)
+        self.assertIn("♀", line)
+        self.assertNotIn("♂", line)
+        self.assertIn("Акт 2", line)
+        self.assertIn("♂", show.who_line({"who": dict(who, gender="male")}))
+        self.assertIn("who.gender", page.HTML_TEMPLATE,
+                      "в ленте пол тоже должен быть виден — иначе сверять нечего")
+
+    def test_the_play_returns_to_the_session_after_a_restart(self):
+        """Перезапуск показывает прежний спектакль: реплики, ходы и их цена.
+
+        Посты и отчёты живут в памяти процесса, а у нового процесса она своя:
+        без этого лента начиналась бы с пустой сцены, хотя спектакль записан.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            _, dump = self._play(folder)
+            played = [p["display_name"] for p in self.session.posts]
+            machine = self.session.posts[0]["id"]
+            # Перезапуск: тот же файл, чистая память
+            self.session.posts = []
+            self.session.turn_log = {}
+            self.session.finished = False
+            self.session.restored = False
+            with mock.patch.object(settings, "DUMP_FILE", dump):
+                count = show.load_play_from_dump()
+
+        self.assertEqual(count, 2, "вернулись не все реплики")
+        self.assertEqual([p["display_name"] for p in self.session.posts], played)
+        self.assertTrue(self.session.finished, "прежний спектакль доигран, а не идёт сейчас")
+        self.assertFalse(self.session.running)
+        self.assertTrue(self.session.restored, "в ленте надо сказать, что это прежний спектакль")
+        self.assertEqual(self.session.current_round, 1)
+        self.assertIsNotNone(self.session.turn_report(machine),
+                             "ход вернулся вместе с репликой")
+        self.assertEqual(self.session.topic, "Возвращённая тема")
+
+    def test_a_new_show_forgets_the_previous_one_on_disk_too(self):
+        """«Новый спектакль» и «Полный сброс» стирают прежний спектакль и в файле.
+
+        Иначе кнопка значила бы «забудь, пока я не закрыл окно»: следующий
+        запуск вернул бы то, от чего только что отказались (см. forget_play).
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            _, dump = self._play(folder)
+            with mock.patch.object(settings, "DUMP_FILE", dump):
+                self.session.new_show()
+                self.assertEqual(self.session.posts, [])
+                self.assertFalse(self.session.restored)
+                self.assertFalse(dump.exists(),
+                                 "«Новый спектакль» оставил прежний ДАМП на диске")
+
+                show.start_dump("Другая тема")
+                self.session.reset_to_defaults()
+                self.assertFalse(dump.exists(),
+                                 "«Полный сброс» оставил прежний ДАМП на диске")
+                self.assertEqual(self.session.spent, 0.0,
+                                 "счёт за прежний спектакль сбросом не сбрасывается — значит "
+                                 "он вернётся в ленту")
+
+    def test_the_file_says_about_a_turn_what_the_page_shows(self):
+        """Разделы записи идут в том же порядке и теми же словами, что в ленте.
+
+        Один и тот же отчёт читают в двух местах, и разойтись в порядке значило
+        бы заставить читателя собирать картину заново в каждом из них. Порядок
+        берётся у самих разделов (см. TURN_SECTIONS), но проверять его надо
+        против страницы: порядок — это единственное, чего в одном словаре
+        не видно.
+        """
+        body = page.HTML_TEMPLATE[page.HTML_TEMPLATE.index("function turnBodyHtml("):]
+        body = body[:body.index("function loadTurnBox(")]
+        self.assertEqual(list(show.TURN_SECTIONS),
+                         ["who", "place", "history", "sketch", "cut", "added",
+                          "request", "answer"],
+                         "порядок разделов в файле должен быть порядком ленты")
+        positions = [body.index(title.lstrip("#").strip())
+                     for title in show.TURN_SECTIONS.values()]
+        self.assertEqual(positions, sorted(positions),
+                         "на странице разделы идут не в том порядке, что в файле")
+        turn = {"who": {"name": "Варвара", "model": "cloud:x", "role_name": "Судья",
+                        "round": 1, "time": "22:19", "gender": "female", "emoji": "🧛‍♀️"},
+                "summary": {"asks": 2, "tokens": 890, "seconds": 135, "spent": 1.89,
+                            "removed_messages": 1},
+                "budget": {}, "messages": [],
+                "removed": [{"speaker": "Кто-то", "tokens": 300, "preview": "начало"}],
+                "added": [{"role": "tool", "name": "search_web", "tokens": 5,
+                           "content": "нашлось", "note": ""}]}
+        written = (show.dump_turn_header(1, turn)
+                   + show.dump_turn_tail({"content": "сказано", "sketch": "набросок"}, turn))
+        for title in show.TURN_SECTIONS.values():
+            self.assertIn(title, written,
+                          f"раздела «{title}» нет в записи — только в ленте")
+        # И шапка записи собирается тем же заведением, что сводка ленты: без
+        # этой сверки сводку можно было бы из файла выбросить незаметно
+        self.assertIn(show.turn_heading(1, turn), written,
+                      "шапка записи — это сводка того же хода, по ней и решают, читать ли его")
+        self.assertIn(show.turn_summary_line(turn["summary"]),
+                      show.turn_heading(1, turn))
+
+    def test_the_added_tail_is_told_the_same_way_in_both_places(self):
+        """О дописанном хвосте в файле сказано то же, что в ленте.
+
+        В файле стояла фраза про «полных текстов здесь нет нарочно», а тексты
+        рисовались следующей строкой — то есть файл врал о самом себе (см.
+        added_purpose против addedPurpose на странице).
+        """
+        summary = {"added_kinds": {"asks": 1, "results": 2, "refusals": 1, "nudges": 0},
+                   "extra_tokens": 1200}
+        added = [{"role": "tool", "name": "search_web", "tokens": 900,
+                  "content": "НАЙДЕНО", "note": ""}] * 2
+
+        purpose = show.added_purpose(summary, added)
+        for words in ("2 сообщ.", "1 200", "просьба вызвать инструмент — 1",
+                      "найденное по ней — 2", "отказ по лимиту поисков — 1"):
+            self.assertIn(words, purpose)
+        self.assertNotIn("Полных текстов здесь нет",
+                         show.dump_turn_tail({"content": "сказано"},
+                                             {"summary": summary, "added": added}),
+                         "файл не должен утверждать, что текстов нет, если они есть")
+
+
 class TestTurnPanel(unittest.TestCase):
     """Блок о ходе на странице: один вместо трёх, свёрнут, тёмен и по требованию."""
 
@@ -5555,11 +5862,26 @@ class TestPageScript(unittest.TestCase):
 
     @staticmethod
     def _page_constant(name: str) -> str:
-        """Строка `const <имя> = …;` со страницы — целиком, для сверки в node."""
-        match = re.search(rf"^\s*const {name} = .*?;$", page.HTML_TEMPLATE, re.M)
+        """Строка `const <имя> = …;` со страницы — целиком, для сверки в node.
+
+        Скобки считаются, а не ищется `;` в той же строке: у словаря и списка
+        конец бывает и на следующей строке, и число вытаскивалось бы обрубленным
+        (см. FINISH_WORDS — по нему страница объясняет коды ответа вендора).
+        """
+        source = page.HTML_TEMPLATE
+        match = re.search(rf"^\s*const {name} = ", source, re.M)
         if not match:
             raise AssertionError(f"на странице нет числа {name}")
-        return match.group(0).strip()
+        depth = 0
+        for index in range(match.end(), len(source)):
+            char = source[index]
+            if char in "{[(":
+                depth += 1
+            elif char in "}])":
+                depth -= 1
+            elif char == ";" and depth == 0:
+                return source[match.start():index + 1].strip()
+        raise AssertionError(f"у числа {name} не нашлось конца")
 
     def _run_in_node(self, *calls):
         """Считать часы по-настоящему: тот же код, что уедет в браузер.
@@ -5568,15 +5890,26 @@ class TestPageScript(unittest.TestCase):
         больше всего: «осталось» считает браузер, и ошибка в нём видна только
         зрителю (см. turnClockText).
         """
+        return self._run_page(("tokensText", "moneyText", "durationText",
+                               "turnClockText", "turnSummaryParts", "spentLine",
+                               "textNeedsClamp"), *calls)
+
+    def _run_page(self, functions, *calls, constants=()):
+        """Страница в node: сколько угодно её функций и чисел — в том виде,
+        в каком они уедут в браузер.
+
+        Списком, а не одной строкой: сверить с файлом надо и то, что считает
+        часы, и то, чем рассказан один запрос хода (см. show.ask_line), а тянуть
+        в каждый прогон всю страницу незачем.
+        """
         node = shutil.which("node")
         if not node:
             self.skipTest("node не найден: часы не с кем сверить")
         # Числа страницы (const) едут в тот же скрипт: иначе проверяли бы свою
         # копию, а не то, что уедет в браузер (см. CLAMPED_TEXT_LINES)
-        script = self._page_constant("CLAMPED_TEXT_LINES") + "\n"
-        script += "\n".join(self._function(name) for name in (
-            "tokensText", "moneyText", "durationText", "turnClockText",
-            "turnSummaryParts", "spentLine", "textNeedsClamp"))
+        script = "\n".join(self._page_constant(name)
+                          for name in ("CLAMPED_TEXT_LINES",) + tuple(constants)) + "\n"
+        script += "\n".join(self._function(name) for name in functions)
         script += "\nconsole.log(JSON.stringify([" + ", ".join(calls) + "]));"
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
                                         encoding="utf-8") as handle:
@@ -5624,6 +5957,47 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("без ответа 2", mute)
         self.assertNotIn("заминок", mute,
                          "общего «заминок» больше нет: оно ни о чём не говорит")
+
+    def test_the_heading_of_a_dump_record_repeats_the_summary_of_the_page(self):
+        """Шапка записи в файле — та же сводка, что свёрнутая строка в ленте.
+
+        На странице по этой строке решают, раскрывать ли ход; в файле такой
+        строки не было, и по ДАМПу нельзя было понять, что за ход внутри,
+        не прочитав его целиком. Числа одни и те же и в том же порядке
+        (см. show.turn_summary_line против turnSummaryParts).
+        """
+        summary = {"asks": 3, "search_rounds": 5, "thought_steps": 2,
+                   "tokens": 2254, "tokens_in_total": 14158, "seconds": 135,
+                   "spent": 1.89, "removed_messages": 2, "search_refusals": 1,
+                   "silences": 1}
+        out = self._run_in_node("turnSummaryParts(" + json.dumps(summary) + ")")
+        # Пробел в разрядах у страницы неразрывный (toLocaleString), а у файла
+        # обычный: читателю разницы нет, а сверке она мешала бы
+        page_line = " · ".join(out[0]).replace("\u00a0", " ").replace("\u202f", " ")
+
+        self.assertEqual(show.turn_summary_line(summary), page_line,
+                         "в ленте и в файле об одном ходе сказано разное")
+
+    def test_one_request_is_told_the_same_way_in_the_file_and_in_the_lane(self):
+        """Один и тот же запрос в файле и в ленте — одними словами и числами.
+
+        В файле стояло «ввод 3 431 · вывод 1 246», а в ленте — «ввод 3 431 →
+        вывод 1 246»: один и тот же ход был рассказан двумя разными способами,
+        и это читалось как разные числа (см. show.ask_line против turnAskText).
+        """
+        steps = [{"kind": "ask", "n": 2, "tokens_in": 3431, "tokens_in_est": 3400,
+                  "tokens_out": 1246, "reasoning_tokens": 1160,
+                  "finish_reason": "length", "tools": True},
+                 # Вендор чисел не назвал — остаётся только наш счёт
+                 {"kind": "ask", "n": 3, "tokens_in_est": 3400},
+                 {"kind": "ask", "n": 4, "error": "шлюз ответил HTTP 400"}]
+        out = self._run_page(("escapeHtml", "tokensText", "turnAskText"),
+                             *[f"turnAskText({json.dumps(step)})" for step in steps],
+                             constants=("FINISH_WORDS",))
+        for step, page_line in zip(steps, out):
+            self.assertEqual(show.ask_line(step),
+                             page_line.replace("\u00a0", " ").replace("\u202f", " "),
+                             "файл и лента рассказывают один запрос по-разному")
 
     def test_only_a_text_longer_than_three_lines_is_clamped(self):
         """Свёртка — по настоящей высоте текста, а не по числу переводов строки.

@@ -1828,10 +1828,13 @@ HTML_TEMPLATE = """
             const b = data.budget || {};
             const who = data.who || {};
             const parts = [];
+            // Пол — тем же значком, что у поста в ленте (см. postHeaderHtml):
+            // одна и та же строка «кто говорит» в файле и на странице (см. who_line)
+            const whoGender = who.gender === 'female' ? '♀' : '♂';
             parts.push(turnBlock('👤 Кто говорит и когда',
                 'Дальше всё, что случилось за этот ход: чьё было место под историю, '
                 + 'что происходило по порядку и чем ход кончился.',
-                `<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> · `
+                `<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> ${whoGender} · `
                 + `${escapeHtml(who.model || '')} · Акт ${who.round} · ${escapeHtml(who.time || '')}`
                 + (s.seconds ? ` · ход длился ${durationText(s.seconds)}` : '') + `</div>`));
             // Четыре числа окна — не украшение, а ответ на «куда делись токены»
@@ -1987,7 +1990,10 @@ HTML_TEMPLATE = """
         // Вынесена отдельной функцией не для красоты: здесь одни числа, а числа
         // проверяются — и настоящим node тоже (см. turnClockText)
         function turnSummaryParts(info) {
-            const parts = [`запросов ${info.asks || 0}`];
+            const parts = [];
+            // Ноль запросов — не факт о ходе, а «ещё неизвестно»: строку пишут
+            // и в начале хода, когда запросов ещё не было (см. show.turn_heading)
+            if (info.asks) parts.push(`запросов ${info.asks}`);
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
             if (info.thought_steps) parts.push(`размышлений ${info.thought_steps}`);
             // Ввод — по ВСЕМ запросам хода, когда их было несколько: поиск
@@ -2309,7 +2315,13 @@ HTML_TEMPLATE = """
             } else if (data.finished) {
                 statusDiv.classList.remove('active');
                 const curtain = spentLine(data);
-                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>' + curtain;
+                // Спектакль мог вернуться из ДАМПа прошлого запуска: без этих
+                // слов лента с чужими репликами выглядит как «театр помнит то,
+                // чего я не играл» (см. show.load_play_from_dump)
+                const restored = data.restored
+                    ? '<div style="font-size:12px;margin-top:6px;font-style:italic;">🗒 прежний спектакль, возвращённый из ДАМПа</div>'
+                    : '';
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>' + restored + curtain;
                 setTurnState('finished');
                 document.getElementById('finishBtn').style.display = 'none';
                 // «Покинуть театр» оставляем: занавес больше не закрывает сервер,

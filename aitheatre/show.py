@@ -12,6 +12,7 @@
 import copy
 import json
 import random
+import re
 import threading
 import time
 import traceback
@@ -141,6 +142,10 @@ def forget_theatre_settings():
 WINDOW_NAMES = {"cloud": "окно облака", "local": "окно модели",
                 "unbounded": "окно не ограничено (CLOUD_NUM_CTX = 0)"}
 
+# Обратно словам: по этому словару прочитанное в файле окно становится тем же
+# «чьим-то», каким было на ходу (см. parse_dump)
+WINDOW_KINDS = {name: kind for kind, name in WINDOW_NAMES.items()}
+
 
 def numbers_word(value) -> str:
     """Число с разрядами: «23 318» читается, а «23318» — уже нет."""
@@ -195,9 +200,14 @@ def clock(when) -> str:
 
 
 def step_period(step: dict) -> str:
-    """Когда событие началось и когда кончилось — одной строкой."""
-    start = clock(step.get("t"))
-    end = clock(step.get("t_end")) if step.get("t_end") else ""
+    """Когда событие началось и когда кончилось — одной строкой.
+
+    Время берётся из самих часов события, а если оно уже записано словами —
+    из записи (см. parse_dump): у прочитанного хода тех часов уже нет, а время
+    событий осталось, и терять его незачем.
+    """
+    start = step.get("clock") or clock(step.get("t"))
+    end = step.get("clock_end") or (clock(step.get("t_end")) if step.get("t_end") else "")
     if start and end and end != start:
         return f"{start} → {end}"
     return start
@@ -223,12 +233,13 @@ def ask_line(step: dict) -> str:
     if step.get("tokens_in") is None and step.get("tokens_out") is None:
         weight = "числа токенов вендор не сообщил"
         if estimate:
+            # Тут «→» не нужен: сравнивать не с чем, вендорских чисел нет
             weight += f" · наш счёт ≈{numbers_word(estimate)} токенов"
     else:
         weight = f"ввод {numbers_word(step.get('tokens_in'))}"
         if estimate:
             weight += f" (наш счёт ≈{numbers_word(estimate)})"
-        weight += f" · вывод {numbers_word(step.get('tokens_out'))} токенов"
+        weight += f" → вывод {numbers_word(step.get('tokens_out'))} токенов"
     parts = [weight]
     if step.get("reasoning_tokens"):
         parts.append(f"из них размышлений {numbers_word(step['reasoning_tokens'])}")
@@ -236,15 +247,25 @@ def ask_line(step: dict) -> str:
         # Код ответа без перевода читается как код: рядом с ним — его смысл
         meaning = finish_meaning(step["finish_reason"])
         parts.append(f"конец: {step['finish_reason']}" + (f" ({meaning})" if meaning else ""))
-    parts.append("инструмент поиска отправлен" if step.get("tools")
+    # Слова — как на странице (см. turnAskText): файл и лента рассказывают
+    # об одном запросе, и «инструмент отправлен» против «с инструментом»
+    # читалось бы как два разных запроса
+    parts.append("с инструментом поиска" if step.get("tools")
                  else "без инструмента поиска")
-    return ", ".join(parts)
+    # Соединитель — тот же, что на странице (см. turnAskText в page.py): один
+    # и тот же ход читают в файле и в ленте, и «→ вывод» в одном месте против
+    # «· вывод» в другом значило бы, что это два разных числа
+    return " · ".join(parts)
 
 
 # Каким значком помечать строку хронологии: шаг — он и есть шаг, а вот заминки
 # и отказы должны отличаться от обычного запроса с первого взгляда
 STEP_MARKS = {"refused": "⛔", "force": "🔍", "silence": "⚠️", "note": "·",
               "money": "💰"}
+
+# Обратно значкам: по значку строка хронологии снова становится событием
+# с его видом (см. parse_dump). Заминки от обычных записей отличает именно вид
+STEP_KINDS = {mark.replace("\ufe0f", ""): kind for kind, mark in STEP_MARKS.items()}
 
 
 def money(value) -> str:
@@ -295,7 +316,7 @@ def window_line(budget: dict) -> str:
     ответа, см. settings.context_budget), технический запас на неточность
     счёта и сколько после всего этого оставалось истории.
     """
-    available = ("без предела (CLOUD_NUM_CTX = 0)" if budget.get("available") is None
+    available = ("без предела" if budget.get("available") is None
                  else numbers_word(budget.get("available")))
     # Ноль в запасе — не «ноль токенов на ответ», а «ответ не ограничиваем»:
     # у облака CLOUD_MAX_TOKENS = 0 именно это и значит (см. settings),
@@ -327,9 +348,10 @@ def history_line(summary: dict, budget: dict) -> str:
     if tasks:
         line += f", и ещё {tasks} — задания хода"
     if summary.get("removed_messages"):
+        # Без хвоста «самое раннее перечислено ниже»: оно и так ниже, и сказано
+        # это ровно теми же словами, что в ленте (см. placeHtml в page.py)
         line += (f". Обрезка выбросила {summary.get('removed_messages')} сообщ. "
-                 f"({numbers_word(summary.get('removed_tokens'))} токенов) — "
-                 f"самое раннее перечислено ниже")
+                 f"({numbers_word(summary.get('removed_tokens'))} токенов)")
     else:
         line += ". Обрезка ничего не тронула: сцена влезла в окно целиком"
     return line + "\n"
@@ -338,92 +360,258 @@ def history_line(summary: dict, budget: dict) -> str:
 # Имена разделов отчёта о ходе — те же слова, что на странице (см. turnBlock
 # в page.py). Отчёт один: его читают и в ДАМПе, и в ленте, и названия разделов
 # в двух местах не должны расходиться, иначе непонятно, один это раздел или два.
+#
+# Порядок ключей — тот же, в каком разделы идут на странице (см. turnBodyHtml):
+# по файлу и по ленте читают одно и то же, и разойтись в порядке значило бы
+# заставить читателя собирать картину заново в каждом месте.
+#
 # Назначение разделов словами есть только на странице: в файле разделяет уже
 # сам заголовок, и повторять под ним пояснение было бы шумом.
 TURN_SECTIONS = {
     "who": "### 👤 Кто говорит и когда",
     "place": "### 📐 Место под историю: чьё окно и как оно заполнилось",
-    "request": "### 📨 Первый запрос к модели целиком",
-    "cut": "### ✂️ Что выбросила обрезка",
     "history": "### 🧭 Хронология хода: что происходило по порядку",
-    "added": "### ✍️ Что приложение дописало в запрос",
     "sketch": "### 🌱 Сказано раньше: прежняя версия реплики",
+    "cut": "### ✂️ Что выбросила обрезка",
+    "added": "### ✍️ Что приложение дописало в запрос",
+    "request": "### 📨 Первый запрос к модели целиком",
     "answer": "### 💬 Реплика, которой ход кончился",
 }
+
+# Раздел по его заголовку — обратный словарь: по нему ДАМП читается назад
+# (см. parse_dump). Он же и сторож: заголовки разделов в файле и в этом словаре
+# разойтись не могут, потому что словарь один
+TURN_SECTION_KEYS = {title: key for key, title in TURN_SECTIONS.items()}
+
+# Как назвать роль сообщения словами: сами роли (system/user/assistant/tool) —
+# это протокол, а в отчёте их читают глазами. Те же слова, что на странице
+# (см. ROLE_WORDS в page.py)
+ROLE_WORDS = {
+    "system": "системный промпт",
+    "user": "реплика в запросе",
+    "assistant": "сказано самой моделью",
+    "tool": "результат поиска",
+}
+
+# Значки ролей в ленте — те же, что у постов (см. create_post): иначе значок
+# одной роли значил бы в файле и в ленте разное
+ROLE_ICONS = {"participant": "🎭", "moderator": "🎬", "judge": "⚖️"}
+
+# Что на странице говорят о наброске: это не размышления, а прежняя версия
+# реплики, и без пояснения её читают как черновик мыслей (см. thinkingBlockHtml)
+SKETCH_HINT = "Так бывает, когда модель сначала отвечает, а потом её просят поискать."
+
+# Сколько строк длинного текста видно до раскрытия — в файле решать нечего,
+# но подпись к наброску у страницы и файла общая (см. dump_turn_tail)
+
+# Формат записи ДАМПа. Читается первым делом при чтении файла: по нему новый
+# процесс решает, можно ли вернуть прежний спектакль (см. parse_dump). Меняется
+# вместе с тем, как запись устроена, — и тогда прежний ДАМП честно называется
+# нечитаемым, а не читается наполовину
+DUMP_FORMAT = 3
+
+
+def turn_summary_line(summary: dict) -> str:
+    """Сводка хода — те же числа и в том же порядке, что в свёрнутой строке ленты.
+
+    На странице у каждой реплики сверху строка «🧾 ход реплики · запросов 3 ·
+    поисков 5 · …», и решают, раскрывать ли блок, именно по ней. В файле такой
+    строки не было вовсе: по ДАМПу нельзя было понять, что за ход внутри,
+    не прочитав его целиком. Теперь шапка записи (см. turn_heading) — это она
+    и есть, и считается тем же счётом, что на странице (см. turnSummaryParts
+    в page.py).
+    """
+    summary = summary or {}
+    parts = []
+    # Ноль запросов — не факт о ходе, а «ещё неизвестно»: строка пишется
+    # в тот миг, когда ход начался, и до первого запроса о ней сказать нечего
+    if summary.get("asks"):
+        parts.append(f"запросов {summary['asks']}")
+    if summary.get("search_rounds"):
+        parts.append(f"поисков {summary['search_rounds']}")
+    if summary.get("thought_steps"):
+        parts.append(f"размышлений {summary['thought_steps']}")
+    # Ввод — по ВСЕМ запросам хода, когда их было несколько: поиск это ещё один
+    # круг, и вся история уезжает к модели заново (см. _input_tokens_total)
+    if (summary.get("asks") or 0) > 1 and summary.get("tokens_in_total"):
+        parts.append(f"на ввод всего {numbers_word(summary['tokens_in_total'])} токенов")
+    elif summary.get("tokens"):
+        parts.append(f"{numbers_word(summary['tokens'])} токенов на ввод")
+    if summary.get("seconds"):
+        parts.append(f"⏱ {duration_words(summary['seconds'])}")
+    if summary.get("spent"):
+        parts.append(f"💰 {money(summary['spent'])}")
+    if summary.get("removed_messages"):
+        parts.append(f"выброшено {summary['removed_messages']}")
+    if summary.get("search_refusals"):
+        parts.append(f"поиск сверх лимита {summary['search_refusals']}")
+    if summary.get("silences"):
+        parts.append(f"⚠️ без ответа {summary['silences']}")
+    return " · ".join(parts)
+
+
+def cast_field(emoji, name, gender) -> str:
+    """«🦊 Элина ♀» — кто говорил, одной строкой: в ленте у поста то же рядом.
+
+    И значок, и пол стоят вместе с именем (см. postHeaderHtml), а не порознь:
+    по этой же строке реплика собирается назад (см. _parse_heading), поэтому
+    порядок и разделитель здесь не украшение, а способ прочитать её обратно.
+    """
+    return " ".join(part for part in (str(emoji or "").strip(),
+                                      str(name or "").strip(),
+                                      gender_symbol(gender)) if part)
+
+
+def turn_heading(post_id: int, turn: dict) -> str:
+    """Шапка записи о ходе: кто, чем и сводка — как свёрнутая строка в ленте.
+
+    Числа, известные только к концу хода (сколько он шёл и сколько стоил),
+    сначала пишутся без них, а потом шапка переписывается (см. dump_fix_heading):
+    ждать с записью нельзя — у оборванного хода не осталось бы следа.
+    """
+    who = turn.get("who") or {}
+    head = [f"## {post_id}",
+            str(who.get("time") or ""),
+            cast_field(who.get("emoji"), who.get("name"), who.get("gender")),
+            str(who.get("model") or ""),
+            str(who.get("role_name") or who.get("role") or ""),
+            f"Акт {who.get('round')}"]
+    return " · ".join(head) + " · " + turn_summary_line(turn.get("summary") or {})
+
+
+def who_line(turn: dict) -> str:
+    """Кто говорит и когда — одна строка, теми же словами, что в ленте.
+
+    Пол здесь не украшение: он виден у каждой реплики в ленте (♂/♀ рядом
+    с именем), и та же реплика в файле должна читаться так же.
+    """
+    who = turn.get("who") or {}
+    return (f"**Кто:** **{who.get('name') or ''}** {gender_symbol(who.get('gender'))} · "
+            f"{who.get('model') or ''} · Акт {who.get('round')} · {who.get('time') or ''}\n")
+
+
+def added_purpose(summary: dict, added: list) -> str:
+    """Из чего сложился дописанный хвост — теми же словами, что в ленте.
+
+    Раньше тут стояло «по паре на каждый поиск, плюс напоминания», и с числами
+    это не сходилось: пара — привычный случай, а не всегдашний (см. added_kinds).
+    Слова те же, что на странице (см. addedPurpose в page.py), и считать их надо
+    по тем же сообщениям — иначе о ходе скажут разное в двух местах.
+    """
+    summary = summary or {}
+    kinds = summary.get("added_kinds") or added_kinds(added)
+    words = []
+    if kinds.get("asks"):
+        words.append(f"просьба вызвать инструмент — {kinds['asks']}")
+    if kinds.get("results"):
+        words.append(f"найденное по ней — {kinds['results']}")
+    if kinds.get("refusals"):
+        words.append(f"отказ по лимиту поисков — {kinds['refusals']}")
+    if kinds.get("nudges"):
+        words.append(f"просьба приложения словами — {kinds['nudges']}")
+    tokens = summary.get("extra_tokens")
+    if tokens is None:
+        tokens = sum(int(m.get("tokens") or 0) for m in (added or []))
+    count = f"{len(added or [])} сообщ. ({numbers_word(tokens)} токенов)"
+    tail = ("В хронологии выше те же поиски названы своими словами — "
+            "с формулировкой запроса и своим весом.")
+    if not words:
+        return f"После первого запроса приложение дописало модели {count}. {tail}"
+    return (f"После первого запроса приложение дописало модели {count}: "
+            + " · ".join(words) + ". " + tail)
+
+
+def message_line(index: int, total: int, message: dict) -> str:
+    """Одно сообщение запроса одной строкой — с объяснением, если текста нет.
+
+    Ноль токенов у сообщения — не пустое место, а сигнал: по протоколу OpenAI
+    просьба о поиске приходит пустым текстом плюс полем `tool_calls`. Поэтому
+    у такого сообщения названы и его поля со значениями, и что они значат.
+
+    Собрана строка из того же, что видно в ленте (см. promptMessagesHtml):
+    роль, кто говорил, та же роль словами и вес — иначе одно и то же сообщение
+    в файле и на странице читалось бы по-разному.
+    """
+    role = str(message.get("role") or "")
+    weight = (f"{numbers_word(message.get('tokens'))} токенов"
+              if int(message.get("tokens") or 0) else "0 токенов текста")
+    head = [f"№{index}/{total}", role]
+    name = str(message.get("name") or "")
+    if name and name != role:
+        head.append(name)
+    words = ROLE_WORDS.get(role)
+    if words:
+        head.append(words)
+    head.append(weight)
+    line = "- " + " · ".join(head)
+    if message.get("note"):
+        line += f"\n  - {message['note']}"
+    return line
+
+
+def messages_block(messages: list) -> str:
+    """Сообщения запроса списком — так они и лежат в запросе, по порядку."""
+    messages = list(messages or [])
+    out = []
+    for index, message in enumerate(messages, 1):
+        out.append(message_line(index, len(messages), message))
+        if message.get("content"):
+            out.append(quoted(message.get("content")))
+    return "\n".join(out) + "\n"
 
 
 def dump_turn_header(post_id: int, turn: dict) -> str:
     """Начало записи о ходе: кто говорит, чьим окном мерено, что вошло в запрос.
 
     Пишется ДО запроса к модели (см. open_dump_turn): у хода, который оборвался
-    на середине, в файле должно остаться начало, а не пустота. Раздела
-    «дописано ходом» здесь нет нарочно: дописанное — это результаты поисков
-    и напоминания, и все они видны в хронологии со своим весом. В двух местах
-    одни и те же данные — это не полнота, а каша (см. build_turn_report).
+    на середине, в файле должно остаться начало, а не пустота.
 
-    Разделы названы теми же словами, что на странице (см. TURN_SECTIONS):
-    один и тот же отчёт читают и в файле, и в ленте — и разойтись в названиях
-    разделов они не должны.
+    Разделы идут в том же порядке, что на странице (см. TURN_SECTIONS):
+    один и тот же отчёт читают и в файле, и в ленте. Записи о том, что дописало
+    приложение, здесь нет нарочно: дописанное лежит своим разделом ниже
+    (см. dump_turn_tail), а одни и те же данные в двух местах — не полнота,
+    а каша.
     """
-    who = turn.get("who") or {}
-    budget = turn.get("budget") or {}
-    summary = turn.get("summary") or {}
-    out = [f"\n## {post_id} · {who.get('time')} · {who.get('name')} · "
-           f"{who.get('model')} · {who.get('role_name') or who.get('role')} "
-           f"· Акт {who.get('round')}\n"]
+    out = ["\n" + turn_heading(post_id, turn) + "\n"]
     out.append(TURN_SECTIONS["who"] + "\n")
-    out.append(f"**Кто:** {who.get('name')} · {who.get('model')} · "
-               f"{who.get('role_name') or who.get('role')} · {who.get('time')}\n")
+    out.append(who_line(turn))
     # Окно и то, что в него вошло, — один раздел: это два взгляда на одно место
     out.append(TURN_SECTIONS["place"] + "\n")
-    out.append(window_line(budget))
-    out.append(history_line(summary, budget))
-    out.append(TURN_SECTIONS["request"] + "\n")
-    for index, message in enumerate(turn.get("messages") or [], 1):
-        out.append(message_line(index, message))
-        if message.get("content"):
-            out.append(quoted(message.get("content")))
+    out.append(window_line(turn.get("budget") or {}))
+    out.append(history_line(turn.get("summary") or {}, turn.get("budget") or {}))
+    out.append(TURN_SECTIONS["history"] + "\n")
+    return "\n".join(out) + "\n"
+
+
+def dump_turn_tail(post: dict, turn: dict) -> str:
+    """Конец записи о ходе: набросок, обрезка, дописанное и чем ход кончился.
+
+    Порядок тот же, что на странице (см. turnBodyHtml): хронологию открывает
+    начало записи (см. dump_turn_header), а дальше идёт то, что стало известно
+    к концу хода. Времени хода тут своя строка: в ленте оно стоит в разделе
+    «кто говорит и когда», а в файле — рядом с итогом, потому что сказано оно
+    может быть только к концу хода.
+    """
+    out = []
+    summary = turn.get("summary") or {}
+    if post.get("sketch"):
+        out.append("\n" + TURN_SECTIONS["sketch"] + "\n")
+        out.append(SKETCH_HINT + "\n")
+        out.append(quoted(post["sketch"]))
     if summary.get("removed_messages"):
         out.append("\n" + TURN_SECTIONS["cut"] + "\n")
         for gone in turn.get("removed") or []:
             out.append(f"- {gone.get('speaker')} · {numbers_word(gone.get('tokens'))} токенов · "
                        f"{gone.get('preview')}")
-    out.append("\n" + TURN_SECTIONS["history"] + "\n")
-    return "\n".join(out) + "\n"
-
-
-def message_line(index: int, message: dict) -> str:
-    """Одно сообщение запроса одной строкой — с объяснением, если текста нет.
-
-    Ноль токенов у сообщения — не пустое место, а сигнал: по протоколу OpenAI
-    просьба о поиске приходит пустым текстом плюс полем `tool_calls`. Поэтому
-    у такого сообщения названы и его поля со значениями, и что они значат.
-    """
-    weight = (f"{numbers_word(message.get('tokens'))} токенов"
-              if int(message.get("tokens") or 0) else "0 токенов текста")
-    line = (f"- №{index} · {message.get('role')} · "
-            f"{message.get('name') or '—'} · {weight}")
-    if message.get("note"):
-        line += f"\n  - {message['note']}"
-    return line
-
-
-def dump_turn_tail(post: dict, turn: dict) -> str:
-    """Конец записи о ходе: что дописало приложение, чем ход кончился, сколько шёл."""
-    out = []
-    summary = turn.get("summary") or {}
+    if turn.get("added"):
+        out.append("\n" + TURN_SECTIONS["added"] + "\n")
+        out.append(added_purpose(summary, turn["added"]) + "\n")
+        out.append(messages_block(turn["added"]))
+    out.append("\n" + TURN_SECTIONS["request"] + "\n")
+    out.append(messages_block(turn.get("messages") or []))
     if summary.get("seconds") is not None:
         out.append(f"\n**Ход длился:** {duration_words(summary['seconds'])}"
                    f" — от начала обрезки истории до готовой реплики\n")
-    if turn.get("added"):
-        out.append("\n" + TURN_SECTIONS["added"] + "\n")
-        out.append("Полных текстов здесь нет нарочно: найденное стоит в хронологии "
-                   "выше, вместе с формулировкой запроса и своим весом.\n")
-        for index, message in enumerate(turn["added"], 1):
-            out.append(message_line(index, message))
-    if post.get("sketch"):
-        out.append("\n" + TURN_SECTIONS["sketch"] + "\n")
-        out.append(quoted(post["sketch"]))
     out.append("\n" + TURN_SECTIONS["answer"] + "\n")
     out.append(quoted(post.get("content")))
     return "\n".join(out) + "\n"
@@ -431,17 +619,21 @@ def dump_turn_tail(post: dict, turn: dict) -> str:
 
 def dump_human_markdown(post: dict) -> str:
     """Ход живого участника: отправлять никуда нечего, но в хронологии он есть."""
-    return (f"\n## {post.get('id')} · {post.get('timestamp')} · {post.get('display_name')} "
-            f"· {post.get('model_used')} · {post.get('role_name')} "
-            f"· Акт {post.get('round')}\n\n"
+    head = " · ".join([f"## {post.get('id')}", str(post.get("timestamp") or ""),
+                       cast_field(post.get("avatar_emoji"), post.get("display_name"),
+                                  post.get("gender")),
+                       str(post.get("model_used") or ""),
+                       str(post.get("role_name") or ""), f"Акт {post.get('round')}"])
+    return (f"\n{head}\n\n"
             f"Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
             + quoted(post.get("content")) + "\n")
 
 
 # Открытый файл ДАМПа и событие, которое сейчас дописывается: держим их между
 # вызовами, потому что ход пишется по частям — от запроса к запросу и от куска
-# размышлений к куску (см. dump_step_sink)
-_DUMP = {"handle": None, "thought": None}
+# размышлений к куску (см. dump_step_sink). line_start — стоим ли мы в начале
+# строки: по нему куски размышлений достраивают кавычки, не рвя строку
+_DUMP = {"handle": None, "thought": None, "line_start": True}
 
 
 def dump_write(text: str, force: bool = True) -> None:
@@ -467,6 +659,33 @@ def dump_write(text: str, force: bool = True) -> None:
         print(f"  ⚠️  Не сохраняется ход в {settings.DUMP_FILE.name}: {e}")
 
 
+def _dump_thought_piece(piece: str) -> None:
+    """Кусок размышлений — в файл, построчно и в кавычках, как всё остальное.
+
+    Кусок приходит как придётся: он может кончаться на половине строки, а может
+    содержать несколько строк сразу. Поэтому строки уходят целыми и с «> »,
+    а недописанная строка — без перевода строки: файл растёт, как растут сами
+    размышления, и при этом разметка цела.
+
+    Кавычки тут не для красоты: модель пишет в размышлениях свои заголовки
+    и списки, и без кавычек они рвали бы ДАМП на чужие разделы — и читать его
+    стало бы нельзя (см. parse_dump).
+    """
+    text = str(piece or "")
+    if not text:
+        return
+    out = []
+    for index, part in enumerate(text.split("\n")):
+        if index:
+            out.append("\n")
+            _DUMP["line_start"] = True
+        if _DUMP.get("line_start"):
+            out.append("> ")
+            _DUMP["line_start"] = False
+        out.append(part)
+    dump_write("".join(out))
+
+
 def dump_step_sink(step: dict, piece: str = None) -> None:
     """Событие хода — в файл, в тот же миг, как оно случилось.
 
@@ -479,42 +698,35 @@ def dump_step_sink(step: dict, piece: str = None) -> None:
         if _DUMP.get("thought") is not step:
             _DUMP["thought"] = step
             dump_write(step_markdown(step, with_text=False) + "\n")
-        if piece:
-            # Без force=False: файл читают глазами прямо во время хода
-            dump_write(piece)
+            _DUMP["line_start"] = True
+        # Без force=False: файл читают глазами прямо во время хода
+        _dump_thought_piece(piece)
         return
     if _DUMP.get("thought") is not None:
-        # Размышления кончились: отделяем их от следующего события — и тут же
-        # исправляем их строку, потому что итоговый вес и время окончания
-        # стали известны только сейчас (см. dump_fix_step)
+        # Размышления кончились: закрываем их последнюю строку, если она осталась
+        # недописанной, — и тут же исправляем их шапку, потому что итоговый вес
+        # и время окончания стали известны только сейчас (см. dump_fix_step)
         finished = _DUMP["thought"]
         _DUMP["thought"] = None
-        dump_write("\n")
+        if not _DUMP.get("line_start"):
+            dump_write("\n")
+        _DUMP["line_start"] = True
         dump_fix_step(finished)
     dump_write(step_markdown(step) + "\n")
 
 
-def dump_fix_step(step: dict) -> None:
-    """Исправить в ДАМПе строку события, у которого появились итоговые числа.
+def _dump_replace_line(prefix: str, new_text: str) -> None:
+    """Переписать в ДАМПе строку, начинающуюся с `prefix`.
 
-    Живое письмо и правка тут не спорят. Строка запроса появляется в файле
-    в тот миг, когда запрос ушёл, — тогда у неё нет ни времени окончания, ни
-    чисел вендора: ждать с записью нельзя, иначе у оборванного хода не осталось
-    бы следа. А показывать устаревшее — врать: «1 токенов» у мыслей, текст
+    Живое письмо и правка тут не спорят. Строка появляется в файле в тот миг,
+    когда событие случилось, — тогда у неё нет ни времени окончания, ни чисел
+    вендора: ждать с записью нельзя, иначе у оборванного хода не осталось бы
+    следа. А показывать устаревшее — врать: «1 токенов» у мыслей, текст
     которых на семьсот токенов, читается как ошибка. Поэтому, когда итог
-    известен, файл переписывает ту же строку: метка начала у каждого шага своя,
-    по ней строка и находится.
+    известен, файл переписывает ту же строку. Метка у каждой строки своя
+    (у события — время начала, у записи о ходе — номер реплики), по ней
+    строка и находится.
     """
-    if step.get("kind") not in ("ask", "thought"):
-        return
-    if step.get("kind") == "thought" and not step.get("t_end"):
-        # Мысль, пришедшая одним куском, до сих пор оставалась без времени
-        # окончания: дописывать её больше некому, и этот миг и есть конец
-        step["t_end"] = time.time()
-    when = clock(step.get("t"))
-    if not when:
-        return
-    marker = f"- {when} ·"
     path = Path(settings.DUMP_FILE)
     was_open = _DUMP.get("handle") is not None
     handle = _DUMP.get("handle")
@@ -530,9 +742,9 @@ def dump_fix_step(step: dict) -> None:
     except Exception:
         lines = []
     for index, line in enumerate(lines):
-        if not line.startswith(marker):
+        if not line.startswith(prefix):
             continue
-        lines[index] = step_markdown(step, with_text=False) + "\n"
+        lines[index] = new_text + "\n"
         temp = path.with_name(path.name + ".fix")
         try:
             temp.write_text("".join(lines), encoding="utf-8")
@@ -544,6 +756,30 @@ def dump_fix_step(step: dict) -> None:
         dump_reopen()
 
 
+def dump_fix_step(step: dict) -> None:
+    """Исправить в ДАМПе строку события, у которого появились итоговые числа."""
+    if step.get("kind") not in ("ask", "thought"):
+        return
+    if step.get("kind") == "thought" and not step.get("t_end"):
+        # Мысль, пришедшая одним куском, до сих пор оставалась без времени
+        # окончания: дописывать её больше некому, и этот миг и есть конец
+        step["t_end"] = time.time()
+    when = clock(step.get("t"))
+    if not when:
+        return
+    _dump_replace_line(f"- {when} ·", step_markdown(step, with_text=False))
+
+
+def dump_fix_heading(post_id: int, turn: dict) -> None:
+    """Дописать в шапку записи то, что стало известно к концу хода.
+
+    Шапка — это свёрнутая строка реплики: по ней решают, читать ли дальше
+    (см. turn_heading). Сколько ход шёл и сколько стоил к его началу неизвестно,
+    поэтому к концу хода та же строка переписывается целиком.
+    """
+    _dump_replace_line(f"## {post_id} · ", turn_heading(post_id, turn))
+
+
 def dump_reopen() -> None:
     """Открыть ДАМП дальше на дописывание — после того как строка исправлена."""
     try:
@@ -551,6 +787,23 @@ def dump_reopen() -> None:
     except Exception as e:
         _DUMP["handle"] = None
         print(f"  ⚠️  Не открывается {settings.DUMP_FILE.name}: {e}")
+
+
+def _dump_reset() -> None:
+    """Закрыть ДАМП, если он открыт: этот файл больше не наш.
+
+    Нужно тому, кто начинает запись заново или стирает её целиком
+    (см. start_dump и forget_play): открытый на дописывание файл пережил бы
+    и перезапись, и удаление.
+    """
+    handle, _DUMP["handle"] = _DUMP.get("handle"), None
+    _DUMP["thought"] = None
+    _DUMP["line_start"] = True
+    if handle is not None:
+        try:
+            handle.close()
+        except Exception:
+            pass
 
 
 def open_dump_turn(post_id: int, turn: dict, report: dict) -> None:
@@ -561,6 +814,7 @@ def open_dump_turn(post_id: int, turn: dict, report: dict) -> None:
     хода, поэтому и оборванный ход остаётся в ДАМПе.
     """
     _DUMP["thought"] = None
+    _DUMP["line_start"] = True
     dump_reopen()
     dump_write(dump_turn_header(post_id, turn))
     if report is not None:
@@ -572,13 +826,18 @@ def open_dump_turn(post_id: int, turn: dict, report: dict) -> None:
 
 
 def close_dump_turn(post: dict, turn: dict) -> None:
-    """Закончить запись о ходе: реплика, прежняя её версия — и закрыть файл."""
+    """Закончить запись о ходе: шапка, реплика, прежняя её версия — и закрыть файл."""
     if _DUMP.get("thought") is not None:
         # Мысль оказалась последним событием хода: её строка тоже ждёт итога
         finished = _DUMP["thought"]
         _DUMP["thought"] = None
-        dump_write("\n")
+        if not _DUMP.get("line_start"):
+            dump_write("\n")
+        _DUMP["line_start"] = True
         dump_fix_step(finished)
+    if post.get("id") and turn:
+        # Теперь известны и время хода, и его цена — шапка пишется заново
+        dump_fix_heading(post["id"], turn)
     dump_write(dump_turn_tail(post, turn))
     handle = _DUMP.get("handle")
     _DUMP["handle"] = None
@@ -596,16 +855,25 @@ def start_dump(topic: str) -> None:
     спектакль, а не летопись. Иначе он рос бы вечно, а читают его всегда ради
     разбора свежего случая — так и было со стенограммой, которая никого не
     чистилась и после десятков спектаклей стала мегабайтами.
+
+    И это же тот файл, из которого прежний спектакль возвращается в ленту
+    после перезапуска (см. parse_dump): тема, формат записи и все реплики
+    с их ходами лежат здесь целиком, а не только в памяти процесса.
     """
-    close_dump_turn({}, {})     # на всякий случай: прошлый файл больше не наш
+    _dump_reset()               # на всякий случай: прошлый файл больше не наш
     when = time.strftime("%d.%m.%Y %H:%M")
     header = (
-        f"# ДАМП · {when} · {(topic or '').strip() or 'без темы'}\n\n"
-        f"Хронология последнего спектакля: что вошло в каждый запрос к модели,\n"
-        f"что она попросила, что ей принесли и что она сказала — со временем\n"
-        f"и числами токенов.\n"
-        f"Пишется по ходу дела, заново на каждый новый спектакль "
-        f"(порт {settings.PORT}).\n\n"
+        f"# ДАМП · {when} · порт {settings.PORT}\n\n"
+        f"Формат записи: {DUMP_FORMAT}\n\n"
+        f"**Тема:**\n{quoted((topic or '').strip())}\n\n"
+        f"Спектакль целиком, реплика за репликой: что вошло в каждый запрос\n"
+        f"к модели, что она попросила, что ей принесли и что она сказала —\n"
+        f"со временем и числами токенов.\n"
+        f"Пишется по ходу дела, заново на каждый новый спектакль: по этому же\n"
+        f"файлу прежний спектакль возвращается в ленту после перезапуска.\n\n"
+        f"Каждая запись начинается шапкой «## номер · время · имя · модель ·\n"
+        f"роль · акт · сводка» — это то же, что свёрнутая строка реплики\n"
+        f"в ленте. Дальше — разделы в том порядке, как они идут на странице.\n\n"
         f"Как читать. **ввод** — сколько токенов было в этом запросе к модели;\n"
         f"**вывод** — сколько она вернула (размышления считаются выводом,\n"
         f"но в реплику не попадают); **наш счёт** — то, что театр посчитал сам\n"
@@ -632,6 +900,537 @@ def save_dump_entry(post: dict, turn: dict = None) -> None:
         dump_write(dump_turn_tail(post, turn))
         return
     dump_write(dump_human_markdown(post))
+
+
+# ── ЧТЕНИЕ ДАМПА: ПРЕЖНИЙ СПЕКТАКЛЬ ───────────────────────
+#
+# ДАМП — это не только хронология для чтения глазами, а сам спектакль: реплики,
+# их ходы и всё, что к ним привело. По нему прежний спектакль возвращается
+# в ленту после перезапуска (см. load_play_from_dump): посты и отчёты живут
+# в памяти процесса, и без этого новая вёрстка означала бы «посты пропали».
+#
+# Читается ровно то, что пишется: заголовки разделов берутся из TURN_SECTIONS,
+# а строки — из тех же заведений, что их и пишут (см. ask_line, window_line,
+# history_line, message_line). Формат помечен номером (см. DUMP_FORMAT), и чужой
+# номер честно называется нечитаемым: половина восстановленного спектакля хуже,
+# чем никакого.
+
+# Число с разрядами, как его пишет numbers_word: «31 445» (пробел любой ширины)
+_GROUPED = r"[\d][\d\u00a0\u202f ]*"
+
+_RECORD_RE = re.compile(r"^## (\d+) · (.+)$")
+_SECTION_RE = re.compile(r"^### (.+)$")
+_WINDOW_RE = re.compile(
+    rf"^\*\*Окно говорящего:\*\* (?P<kind>.+?) (?P<window>{_GROUPED}) токенов целиком — "
+    rf"(?P<answer>.+?), (?P<safety>{_GROUPED}) — технический запас, "
+    rf"на историю оставалось (?P<available>.+)$")
+_HISTORY_RE = re.compile(
+    rf"^\*\*Запрос к модели состоял из:\*\* (?P<messages>\d+) сообщ\. "
+    rf"\((?P<tokens>{_GROUPED}) токенов\) — системный промпт (?P<system>{_GROUPED}) токенов, "
+    rf"из сцены (?P<scene>\d+) сообщ\. \((?P<kept>{_GROUPED}) токенов\)"
+    rf"(?:, и ещё (?P<tasks>\d+) — задания хода)?\. "
+    rf"(?:Обрезка выбросила (?P<removed>\d+) сообщ\. \((?P<removed_tokens>{_GROUPED}) токенов\)"
+    rf"|Обрезка ничего не тронула: сцена влезла в окно целиком)")
+_DURATION_RE = re.compile(r"^\*\*Ход длился:\*\* (?P<words>.+?)(?: —|$)")
+_ASK_STEP_RE = re.compile(r"^-\s+(?P<period>.+?) · \*\*запрос (?P<n>\d+)\*\* — (?P<body>.+)$")
+_SEARCH_STEP_RE = re.compile(
+    rf"^-\s+(?P<period>.+?) · 🔍 \*\*поиск (?P<n>\d+)\*\* \(лимит (?P<limit>\d+)\): "
+    rf"«(?P<query>.*)» — принесено (?P<tokens>{_GROUPED}) токенов$")
+_THOUGHT_STEP_RE = re.compile(
+    rf"^-\s+(?P<period>.+?) · 💭 \*\*размышления\*\* \(к запросу (?P<n>\d+)\) — "
+    rf"(?P<tokens>{_GROUPED}) токенов, в реплику не попадают$")
+_OTHER_STEP_RE = re.compile(r"^-\s+(?P<period>.+?) · (?P<mark>[⛔🔍⚠️·💰]) (?P<text>.*)$")
+_CUT_LINE_RE = re.compile(
+    rf"^- (?P<speaker>.*?) · (?P<tokens>{_GROUPED}) токенов · (?P<preview>.*)$")
+_MESSAGE_RE = re.compile(
+    r"^- №(?P<index>\d+)/(?P<total>\d+) · (?P<role>[^·]*) · (?P<rest>.*)$")
+
+
+def _as_int(raw) -> int:
+    """Число из текста с разрядами: «1 234» — это 1234."""
+    return int(re.sub(r"[^\d]", "", str(raw if raw is not None else "")) or 0)
+
+
+def duration_seconds(text) -> int:
+    """Секунды из «2 мин 15 с» — обратно тому, что пишет duration_words."""
+    written = str(text or "")
+    minutes = re.search(r"(\d+)\s*мин", written)
+    secs = re.search(r"(\d+)\s*с", written)
+    return ((int(minutes.group(1)) * 60 if minutes else 0)
+            + (int(secs.group(1)) if secs else 0))
+
+
+def rubles(text):
+    """Рубли из «1,89 ₽» — обратно тому, что пишет money (None — цены нет)."""
+    written = re.sub(r"[^\d,.]", "", str(text or "")).replace(",", ".")
+    try:
+        return round(float(written), 2)
+    except ValueError:
+        return None
+
+
+def _quoted_block(lines: list) -> tuple:
+    """«> »-текст: сам текст и сколько строк он занял (см. quoted)."""
+    out, used = [], 0
+    for line in lines:
+        if line.startswith("> "):
+            out.append(line[2:])
+        elif line.strip() == ">":
+            out.append("")
+        else:
+            break
+        used += 1
+    return "\n".join(out), used
+
+
+def _section_text(lines: list) -> str:
+    """Весь «> »-текст раздела — реплика, набросок или найденное по поиску."""
+    start = 0
+    while start < len(lines) and not lines[start].startswith(">"):
+        start += 1
+    return _quoted_block(lines[start:])[0]
+
+
+def _split_sections(lines: list) -> dict:
+    """Тело записи по разделам: имя раздела — его строки (см. TURN_SECTIONS)."""
+    sections, key = {}, ""
+    for line in lines:
+        found = _SECTION_RE.match(line)
+        if found:
+            key = TURN_SECTION_KEYS.get("### " + found.group(1).strip(), "")
+            sections[key] = []
+            continue
+        if key:
+            sections[key].append(line)
+    return sections
+
+
+def _with_period(step: dict, period: str) -> dict:
+    """Время события — словами: часов у прочитанного хода уже нет."""
+    start, _, end = str(period or "").partition(" → ")
+    step["clock"] = start.strip()
+    step["clock_end"] = end.strip()
+    return step
+
+
+def _ask_body(body: str) -> dict:
+    """Числа запроса из его строки — обратно тому, что пишет ask_line."""
+    if body.startswith("не прошёл — "):
+        return {"error": body[len("не прошёл — "):]}
+    step = {}
+    if "числа токенов вендор не сообщил" in body:
+        found = re.search(rf"наш счёт ≈({_GROUPED}) токенов", body)
+        if found:
+            step["tokens_in_est"] = _as_int(found.group(1))
+        return step
+    for key, pattern in (("tokens_in", rf"ввод ({_GROUPED})"),
+                         ("tokens_in_est", rf"наш счёт ≈({_GROUPED})\)"),
+                         ("tokens_out", rf"→ вывод ({_GROUPED}) токенов"),
+                         ("reasoning_tokens", rf"из них размышлений ({_GROUPED})")):
+        found = re.search(pattern, body)
+        if found:
+            step[key] = _as_int(found.group(1))
+    found = re.search(r"конец: (\S+)", body)
+    if found:
+        step["finish_reason"] = found.group(1)
+    if "без инструмента поиска" in body:
+        step["tools"] = False
+    elif "с инструментом поиска" in body:
+        step["tools"] = True
+    return step
+
+
+def _step_from(lines: list, index: int) -> tuple:
+    """Одно событие хода, начиная со строки index: событие и что читать дальше.
+
+    Порядок разбора — тот же, что порядок письма (см. step_markdown): строка
+    запроса, поиска и размышлений узнаётся по своему заголовку, а остальное —
+    по значку события (он у каждого вида свой, см. STEP_MARKS).
+    """
+    line = lines[index]
+    found = _ASK_STEP_RE.match(line)
+    if found:
+        step = {"kind": "ask", "n": int(found.group("n")),
+                **_ask_body(found.group("body"))}
+        return _with_period(step, found.group("period")), index + 1
+    found = _SEARCH_STEP_RE.match(line)
+    if found:
+        step = {"kind": "search", "n": int(found.group("n")),
+                "limit": int(found.group("limit")), "query": found.group("query"),
+                "tokens": _as_int(found.group("tokens"))}
+        step["results"], used = _quoted_block(lines[index + 1:])
+        return _with_period(step, found.group("period")), index + 1 + used
+    found = _THOUGHT_STEP_RE.match(line)
+    if found:
+        step = {"kind": "thought", "n": int(found.group("n")),
+                "tokens": _as_int(found.group("tokens"))}
+        step["text"], used = _quoted_block(lines[index + 1:])
+        return _with_period(step, found.group("period")), index + 1 + used
+    found = _OTHER_STEP_RE.match(line)
+    if found:
+        mark = found.group("mark").replace("\ufe0f", "")
+        step = {"kind": STEP_KINDS.get(mark, "note"), "text": found.group("text")}
+        return _with_period(step, found.group("period")), index + 1
+    return None, index + 1
+
+
+def _parse_steps(lines: list) -> list:
+    """Хронология хода: события по порядку, со своим временем и весом."""
+    steps, index = [], 0
+    while index < len(lines):
+        step, index = _step_from(lines, index)
+        if step:
+            steps.append(step)
+    return steps
+
+
+def _record_seconds(lines: list):
+    """Сколько ход шёл — из его же строки (см. dump_turn_tail).
+
+    Строку ищут по всей записи, а не только в хронологии: время хода известно
+    только к его концу, и в файле у него своё место — рядом с остальным итогом.
+    """
+    for line in lines or []:
+        found = _DURATION_RE.match(line)
+        if found:
+            return duration_seconds(found.group("words"))
+    return None
+
+
+def _parse_cut(lines: list) -> list:
+    """Что выбросила обрезка — обратно тому, что пишет раздел «✂️»."""
+    removed = []
+    for line in lines or []:
+        found = _CUT_LINE_RE.match(line)
+        if found:
+            removed.append({"speaker": found.group("speaker").strip(),
+                            "tokens": _as_int(found.group("tokens")),
+                            "preview": found.group("preview")})
+    return removed
+
+
+def _parse_messages(lines: list) -> list:
+    """Сообщения запроса — обратно тому, что пишет message_line."""
+    messages, index = [], 0
+    while index < len(lines):
+        found = _MESSAGE_RE.match(lines[index])
+        if not found:
+            index += 1
+            continue
+        # Вес стоит последним полем (так его пишет message_line), перед ним
+        # может стоять та же роль словами, а перед ней — чьё это сообщение
+        fields = [part.strip() for part in found.group("rest").split(" · ")]
+        if fields:
+            fields = fields[:-1]
+        if fields and fields[-1] in ROLE_WORDS.values():
+            fields = fields[:-1]
+        name = fields[0] if fields else ""
+        if name == "—":
+            name = ""
+        cursor = index + 1
+        note = ""
+        if cursor < len(lines) and lines[cursor].startswith("  - "):
+            note = lines[cursor][4:].strip()
+            cursor += 1
+        content, used = _quoted_block(lines[cursor:])
+        messages.append({"role": found.group("role").strip(), "name": name,
+                         "tokens": text.estimate_tokens(content),
+                         "content": content, "note": note})
+        index = cursor + used
+    return messages
+
+
+def _parse_place(lines: list) -> dict:
+    """Раздел «место под историю» → окно говорящего и то, что в него вошло."""
+    budget = {"kind": "local", "window": 0, "reserve": 0, "safety": 0,
+              "available": None, "system_tokens": 0, "kept_tokens": 0,
+              "history_tokens": 0, "messages_before": 0, "messages_after": 0}
+    for line in lines or []:
+        found = _WINDOW_RE.match(line)
+        if found:
+            budget["kind"] = WINDOW_KINDS.get(found.group("kind").strip(), "local")
+            budget["window"] = _as_int(found.group("window"))
+            # Ноль в запасе — это «на ответ не зарезервировано»: тем же словом
+            # это сказано в файле (см. window_line)
+            budget["reserve"] = (0 if "не зарезервировано" in found.group("answer")
+                                 else _as_int(found.group("answer")))
+            budget["safety"] = _as_int(found.group("safety"))
+            available = found.group("available").strip()
+            budget["available"] = (None if "без предела" in available
+                                   else _as_int(available))
+        found = _HISTORY_RE.match(line)
+        if found:
+            budget["system_tokens"] = _as_int(found.group("system"))
+            budget["kept_tokens"] = _as_int(found.group("kept"))
+            budget["history_tokens"] = _as_int(found.group("tokens"))
+            budget["messages_after"] = int(found.group("scene"))
+            # Сколько было до обрезки — не отдельным числом, а суммой:
+            # выброшенное и оставленное — и есть вся сцена
+            budget["messages_before"] = (budget["messages_after"]
+                                         + _as_int(found.group("removed")))
+    return budget
+
+
+def _split_emoji(field: str) -> tuple:
+    """Значок и имя из «🦊 Элина»: у поста в ленте они стоят рядом (см. create_post)."""
+    first, space, rest_text = str(field or "").partition(" ")
+    if space and first and not re.search(r"[0-9A-Za-zА-Яа-яЁё]", first):
+        return first, rest_text.strip()
+    return "", str(field or "").strip()
+
+
+def _split_gender(name: str) -> tuple:
+    """Имя и пол из «Элина ♀» — обратно тому, что пишет cast_field."""
+    written = str(name or "").strip()
+    for mark, gender in (("♀", "female"), ("♂", "male")):
+        if written.endswith(mark):
+            return written[:-1].strip(), gender
+    return written, ""
+
+
+def _parse_heading(rest: str) -> tuple:
+    """Шапка записи: кто говорил, сколько ход шёл и сколько он стоил."""
+    fields = [part.strip() for part in str(rest or "").split(" · ")]
+    who = {"name": "", "model": "", "role_name": "", "round": 0, "time": "",
+           "emoji": "", "gender": ""}
+    if len(fields) >= 5:
+        who["time"] = fields[0]
+        who["emoji"], name = _split_emoji(fields[1])
+        who["name"], who["gender"] = _split_gender(name)
+        who["model"] = fields[2]
+        who["role_name"] = fields[3]
+        round_found = re.search(r"\d+", fields[4])
+        who["round"] = int(round_found.group()) if round_found else 0
+    # В остальных полях — сводка хода: у неё свои значки, и по ним находятся
+    # ровно те два числа, которых задним числом не посчитать
+    seconds, spent = None, None
+    for part in fields[5:]:
+        if part.startswith("⏱ "):
+            seconds = duration_seconds(part[2:])
+        elif part.startswith("💰 "):
+            spent = rubles(part[2:])
+    return who, seconds, spent
+
+
+def restored_summary(turn: dict, seconds=None, spent=None) -> dict:
+    """Сводка хода по его же частям — тем же счётом, которым его вёл живой ход.
+
+    Числа не вычитываются из шапки по буквам, а считаются заново: счёт один
+    и тот же (см. build_turn_report, added_kinds, _input_tokens_total), и разойтись
+    с тем, что театр показывал на ходу, они не могут. Из шапки берутся только
+    те два, которые задним числом не посчитать: сколько ход шёл и сколько стоил.
+    """
+    messages = turn.get("messages") or []
+    added = turn.get("added") or []
+    removed = turn.get("removed") or []
+    steps = turn.get("steps") or []
+    budget = turn.get("budget") or {}
+    return {
+        "messages": len(messages),
+        "tokens": sum(int(m.get("tokens") or 0) for m in messages),
+        "window": int(budget.get("window") or 0),
+        "window_kind": budget.get("kind") or "local",
+        "removed_messages": len(removed),
+        "removed_tokens": sum(int(r.get("tokens") or 0) for r in removed),
+        "extra_messages": len(added),
+        "extra_tokens": sum(int(m.get("tokens") or 0) for m in added),
+        "added_kinds": added_kinds(added),
+        "search_rounds": _steps_count(steps, "search"),
+        "asks": _steps_count(steps, "ask"),
+        "thought_steps": _steps_count(steps, "thought"),
+        "search_refusals": _steps_count(steps, "refused"),
+        "silences": _steps_count(steps, "silence"),
+        "tokens_in_total": _input_tokens_total(steps),
+        "seconds": seconds,
+        "spent": spent,
+    }
+
+
+def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str,
+               summary, queries: list) -> dict:
+    """Реплика ленты из разобранной записи — теми же полями, что create_post.
+
+    Аватар берётся у состава, который сейчас в пульте: имя то же — значит и
+    лицо то же. Если такого имени в составе больше нет, остаётся значок: по нему
+    видно хотя бы роль.
+    """
+    role = who.get("role") or "participant"
+    name = who.get("name") or ""
+    gender = who.get("gender") or "male"
+    return {
+        "id": post_id,
+        "display_name": name,
+        "model_used": who.get("model") or "",
+        "avatar_url": session.avatars.get(name),
+        "avatar_emoji": (who.get("emoji") or session.avatar_emojis.get(name)
+                         or ROLE_ICONS.get(role, "📣")),
+        "content": content,
+        "content_html": text.markdown_to_html(content),
+        "thinking": thinking,
+        "sketch": sketch,
+        "round": int(who.get("round") or 0),
+        "timestamp": who.get("time") or "",
+        "search_count": len(queries or []),
+        "search_queries": list(queries or []),
+        "turn": summary,
+        "role": role,
+        "role_icon": ROLE_ICONS.get(role, "🎭"),
+        "role_name": ROLE_NAMES.get(role, "Участник"),
+        "gender": gender,
+        "gender_symbol": gender_symbol(gender),
+    }
+
+
+def _parse_record(post_id: int, rest: str, body: list) -> dict:
+    """Одна запись ДАМПа → реплика ленты и, если ход был машинным, отчёт о нём."""
+    who, seconds, spent = _parse_heading(rest)
+    sections = _split_sections(body)
+    if not who.get("gender"):
+        # Пол виден в строке «кто» — тем же значком, что у поста в ленте
+        who["gender"] = ("female" if "♀" in "\n".join(sections.get("who") or [])
+                          else "male")
+    who["role"] = ROLE_BY_NAME.get(who.get("role_name") or "", "participant")
+    who["topic"] = ""
+    if not sections:
+        # Реплика человека: ни запросов, ни поиска, поэтому и разделов нет
+        return {"post": _post_dict(post_id, who, _section_text(body), "", "", None, []),
+                "turn": None}
+    steps = _parse_steps(sections.get("history") or [])
+    turn = {
+        "who": who,
+        "budget": _parse_place(sections.get("place") or []),
+        "messages": _parse_messages(sections.get("request") or []),
+        "added": _parse_messages(sections.get("added") or []),
+        "removed": _parse_cut(sections.get("cut") or []),
+        "steps": steps,
+        "sketch": _section_text(sections.get("sketch") or []),
+        "answer": _section_text(sections.get("answer") or []),
+        # Размышления в ленте лежат шагами хронологии, а у реплики есть своё
+        # поле под них (см. create_post) — вот его и собираем из тех же шагов
+        "thinking": "\n\n".join(step.get("text", "") for step in steps
+                                 if step.get("kind") == "thought"),
+    }
+    turn["summary"] = restored_summary(
+        turn, seconds if seconds is not None else _record_seconds(body), spent)
+    queries = [step.get("query") or "" for step in steps if step.get("kind") == "search"]
+    post = _post_dict(post_id, who, turn["answer"], turn["sketch"], turn["thinking"],
+                      turn["summary"], queries)
+    return {"post": post, "turn": turn}
+
+
+def _add_record(current: tuple, body: list, posts: list, turns: dict) -> None:
+    """Одна запись — в спектакль: реплика всегда, отчёт о ходе — если он был."""
+    post_id, rest = current
+    record = _parse_record(post_id, rest, body)
+    posts.append(record["post"])
+    if record["turn"]:
+        turns[int(post_id)] = record["turn"]
+
+
+def parse_dump(written: str) -> dict:
+    """Прочитать ДАМП обратно — прежний спектакль целиком.
+
+    None значит «файл не наш»: другой формат записи (см. DUMP_FORMAT), пусто
+    или ни одной записи. Половина спектакля хуже, чем никакого: непрочитанная
+    реплика в ленте выглядела бы как «модель промолчала в этом ходу».
+    """
+    lines = str(written or "").splitlines()
+    version = 0
+    for line in lines[:12]:
+        found = re.match(r"^Формат записи: (\d+)$", line.strip())
+        if found:
+            version = int(found.group(1))
+            break
+    if version != DUMP_FORMAT:
+        return None
+    topic = ""
+    for index, line in enumerate(lines):
+        if line.strip() == "**Тема:**":
+            topic = _section_text(lines[index + 1:])
+            break
+    posts, turns = [], {}
+    current, body = None, []
+    for line in lines:
+        found = _RECORD_RE.match(line)
+        if found:
+            if current is not None:
+                _add_record(current, body, posts, turns)
+            current, body = (int(found.group(1)), found.group(2)), []
+            continue
+        if current is not None:
+            body.append(line)
+    if current is not None:
+        _add_record(current, body, posts, turns)
+    if not posts:
+        return None
+    return {
+        "format": version,
+        "topic": topic,
+        "posts": posts,
+        "turns": turns,
+        "round": max(int(post.get("round") or 0) for post in posts),
+        # Цена спектакля — сумма цен его ходов: другого источника у неё нет
+        "spent": round(sum(float((t.get("summary") or {}).get("spent") or 0.0)
+                           for t in turns.values()), 2),
+    }
+
+
+def load_play_from_dump() -> int:
+    """Вернуть в ленту прежний спектакль — по ДАМПу прошлого запуска.
+
+    Раньше ДАМП был только для чтения глазами: реплики жили в памяти процесса,
+    и перезапуск означал пустую сцену. Теперь файл — это и есть спектакль,
+    и новый процесс (с новой вёрсткой) показывает прежние реплики с их ходами.
+    Возвращает число возвращённых реплик: 0 — возвращать нечего.
+    """
+    try:
+        written = settings.DUMP_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    # Пустой файл — это не чужой формат, а «спектакля тут нет»: пугать
+    # предупреждением нечем, а вот в чужом формате признаться надо
+    if not written.strip():
+        return 0
+    play = parse_dump(written)
+    if not play:
+        print(f"  ⚠️  Прежний спектакль не возвращается: {settings.DUMP_FILE.name} "
+              f"записан не нашим форматом (ожидается {DUMP_FORMAT}), сцена будет пустой")
+        return 0
+    session.posts = play["posts"]
+    session.turn_log = play["turns"]
+    session.spent = play["spent"]
+    session.current_round = play["round"]
+    # Спектакль прошлый, и это видно: он доигран, а не идёт сейчас
+    session.finished = True
+    session.running = False
+    session.waiting_for_human = False
+    session.restored = True
+    if not session.topic and play.get("topic"):
+        session.topic = play["topic"]
+    print(f"🗒  Вернулся прежний спектакль из {settings.DUMP_FILE.name}: "
+          f"реплик {len(play['posts'])}, актов {play['round']}, "
+          f"цена {money(play['spent'])}")
+    return len(play["posts"])
+
+
+def forget_play() -> None:
+    """Забыть прежний спектакль — и в памяти, и на диске.
+
+    «Новый спектакль» и «Полный сброс» — это «начать заново», и прежний
+    спектакль после них не должен возвращаться при перезапуске: иначе кнопка
+    значила бы «забыть, пока я не закрыл окно». Файл удаляется целиком: он и есть
+    спектакль, а следующий начнёт его заново (см. start_dump).
+    """
+    session.posts = []
+    session.turn_log = {}
+    session.spent = 0.0
+    session.money_told = False
+    session.restored = False
+    _dump_reset()
+    try:
+        settings.DUMP_FILE.unlink()
+    except OSError:
+        pass
 
 # Смысл кода ответа вендора словами: сам по себе он ничего не говорит, а ход
 # им и объясняется. `tool_calls` — та самая строка, которую видели у харитона:
@@ -799,6 +1598,11 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         "who": {
             "name": participant.get("display_name", ""),
             "model": participant.get("model", ""),
+            # Значок и пол — тоже часть «кто говорит»: в ленте они рядом с именем,
+            # и в записи о ходе (см. who_line) должны быть там же
+            "emoji": participant.get("avatar_emoji")
+                     or session.avatar_emojis.get(participant.get("display_name", ""), ""),
+            "gender": participant.get("gender", "male"),
             "role": role_of(participant.get("is_moderator", False),
                             participant.get("is_judge", False)),
             # То же слово по-русски: в ДАМПе читают глазами, а «participant»
@@ -943,8 +1747,11 @@ def _step_view(step: dict) -> dict:
     не идёт — страница показывает закрытые записи.
     """
     view = {key: value for key, value in step.items() if key != "open"}
-    view["clock"] = clock(step.get("t"))
-    view["clock_end"] = clock(step.get("t_end")) if step.get("t_end") else ""
+    # Время — словами, и оно важнее часов: у восстановленного хода часов нет,
+    # а время его событий осталось записанным (см. parse_dump)
+    view["clock"] = step.get("clock") or clock(step.get("t"))
+    view["clock_end"] = (step.get("clock_end")
+                         or (clock(step.get("t_end")) if step.get("t_end") else ""))
     return view
 
 
@@ -954,6 +1761,15 @@ ROLE_NAMES = {
     "moderator": "Модератор",
     "judge": "Судья",
 }
+
+# Обратно словам: роль в прочитанной записи названа по-русски, а посты и отчёты
+# работают с ней по машинному имени (см. parse_dump)
+ROLE_BY_NAME = {name: role for role, name in ROLE_NAMES.items()}
+
+
+def gender_symbol(gender) -> str:
+    """Значок пола — тот же, что у поста в ленте (см. create_post)."""
+    return "♂" if (gender or "male") == "male" else "♀"
 
 
 def create_post(display_name: str, model_used: str, content: str, round_num: int, 
@@ -965,13 +1781,8 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
     if search_queries is None:
         search_queries = []
     
-    # Определяем роль и соответствующую иконку
-    role_icons = {
-        "participant": "🎭",
-        "moderator": "🎬",
-        "judge": "⚖️"
-    }
-    
+    # Роли и значки — из общего словаря: тот же значок нужен и посту, собранному
+    # из прочитанного ДАМПа, и разойтись эти два места не должны
     role_names = ROLE_NAMES
     
     return {
@@ -979,7 +1790,7 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "display_name": display_name,
         "model_used": model_used,
         "avatar_url": avatar_url,
-        "avatar_emoji": avatar_emoji or role_icons.get(role, "📣"),
+        "avatar_emoji": avatar_emoji or ROLE_ICONS.get(role, "📣"),
         "content": content,
         "content_html": text.markdown_to_html(content),
         # Размышления модели — не реплика, но и не мусор: их тратят наши токены.
@@ -997,10 +1808,10 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         # только сводка, сам отчёт живёт в памяти сессии (см. DebateSession.turn_report)
         "turn": (turn or {}).get("summary"),
         "role": role,
-        "role_icon": role_icons.get(role, "🎭"),
+        "role_icon": ROLE_ICONS.get(role, "🎭"),
         "role_name": role_names.get(role, "Участник"),
         "gender": gender,
-        "gender_symbol": "♂" if gender == "male" else "♀"
+        "gender_symbol": gender_symbol(gender)
     }
 
 def role_of(is_moderator: bool, is_judge: bool) -> str:
@@ -1208,6 +2019,9 @@ class DebateSession:
         # спектакль: читают это ради разбора свежего случая, а новый спектакль
         # начинает список заново (см. start_show), как и ДАМП переписывается
         self.turn_log = {}
+        # Вернулся ли этот спектакль из ДАМПа прошлого запуска: по этому
+        # признаку в ленте видно, что занавес был не сейчас (см. status_payload)
+        self.restored = False
         # Сцена: места состава без имён, аватаров и личных инструкций — роли,
         # модели, порядок и числа. None значит «своей сцены нет»: места берутся
         # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
@@ -1250,6 +2064,10 @@ class DebateSession:
         self.moderator_guidelines = []
         self.scene = None
         self.load_new_cast()
+        # Прежний спектакль тоже забывается — и в памяти, и на диске: после
+        # «Полного сброса» сцена (и лента) начинается с чистого листа, а не
+        # с прежних реплик (см. forget_play)
+        forget_play()
 
     def sync_cast_media(self):
         """
@@ -1324,6 +2142,9 @@ class DebateSession:
         self.static_instructions = static_instructions
         self.scene = scene
         self.topic = topic
+        # «Новый спектакль» — это новая сцена: прежние реплики в ленту больше
+        # не вернутся ни сейчас, ни после перезапуска (см. forget_play)
+        forget_play()
         self.load_new_cast()
 
     # ------------------------------------------------------------

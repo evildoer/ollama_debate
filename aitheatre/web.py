@@ -106,6 +106,10 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         # а остаток знает только шлюз
         "spent": round(float(show.session.spent or 0.0), 2),
         "waiting_for_human": show.session.waiting_for_human,
+        # Спектакль вернулся из ДАМПа прошлого запуска (см. load_play_from_dump):
+        # занавес был не сейчас, и об этом надо сказать — иначе лента с чужими
+        # репликами выглядит как «театр помнит то, чего я не играл»
+        "restored": show.session.restored,
         "current_participant_is_moderator": show.session.current_participant_is_moderator(),
         # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
         "current_participant_role": show.session.current_participant_role(),
@@ -743,6 +747,10 @@ def main():
     # этого места неизвестно, где они лежат, и чтение смотрело бы в корень
     # проекта, хотя файлы экземпляра лежат в его папке
     show.load_theatre_settings()
+    # И прежний спектакль — из его же ДАМПа: посты и отчёты о ходах живут
+    # в памяти, а память у нового процесса своя, поэтому лента без этого
+    # начиналась бы с пустой сцены, хотя спектакль записан целиком
+    show.load_play_from_dump()
 
     print("=" * 50)
     print("🎭 AI Театр - Спектакль нейросетей")

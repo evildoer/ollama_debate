@@ -1063,6 +1063,55 @@ BUGS = {
     response.headers[\"Cache-Control\"] = \"no-store\"""",
          "    response = make_response(render_template_string(page.HTML_TEMPLATE))"),
     ],
+    "прежний спектакль больше не возвращается в ленту": [
+        ("aitheatre/show.py",
+         "    session.posts = play[\"posts\"]\n    session.turn_log = play[\"turns\"]",
+         "    return 0\n    session.posts = play[\"posts\"]\n    session.turn_log = play[\"turns\"]"),
+    ],
+    "чужой формат записи снова читается как свой": [
+        ("aitheatre/show.py",
+         "    if version != DUMP_FORMAT:\n        return None\n",
+         ""),
+    ],
+    "«Новый спектакль» снова оставляет прежний ДАМП на диске": [
+        ("aitheatre/show.py",
+         "        # «Новый спектакль» — это новая сцена: прежние реплики в ленту больше\n"
+         "        # не вернутся ни сейчас, ни после перезапуска (см. forget_play)\n"
+         "        forget_play()\n",
+         ""),
+    ],
+    "шапка записи снова без сводки, по которой решают, читать ли ход": [
+        ("aitheatre/show.py",
+         '    return " · ".join(head) + " · " + turn_summary_line(turn.get("summary") or {})',
+         '    return " · ".join(head)'),
+    ],
+    "размышления снова пишутся в файл без кавычек и рвут разметку": [
+        ("aitheatre/show.py",
+         "        # Без force=False: файл читают глазами прямо во время хода\n"
+         "        _dump_thought_piece(piece)",
+         "        dump_write(piece)"),
+    ],
+    "разделы записи снова идут не в том порядке, что в ленте": [
+        ("aitheatre/show.py",
+         '    "history": "### 🧭 Хронология хода: что происходило по порядку",\n'
+         '    "sketch": "### 🌱 Сказано раньше: прежняя версия реплики",',
+         '    "sketch": "### 🌱 Сказано раньше: прежняя версия реплики",\n'
+         '    "history": "### 🧭 Хронология хода: что происходило по порядку",'),
+    ],
+    "пол снова пропал из строки «кто говорит»": [
+        ("aitheatre/show.py",
+         '    return (f"**Кто:** **{who.get(\'name\') or \'\'}** {gender_symbol(who.get(\'gender\'))} · "',
+         '    return (f"**Кто:** **{who.get(\'name\') or \'\'}** · "'),
+    ],
+    "время хода и его цена снова не читаются из шапки": [
+        ("aitheatre/show.py",
+         "    for part in fields[5:]:\n"
+         "        if part.startswith(\"⏱ \"):\n"
+         "            seconds = duration_seconds(part[2:])\n"
+         "        elif part.startswith(\"💰 \"):\n"
+         "            spent = rubles(part[2:])",
+         "    return who, seconds, spent"),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,
