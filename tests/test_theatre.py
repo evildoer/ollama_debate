@@ -52,6 +52,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -67,6 +68,25 @@ from aitheatre import web as web_app
 # по имени — так подмена бьёт в цель, а не в копию имени в другом файле.
 APP_MODULES = (settings, deps, text, tooltext, search, avatars, cloud, ollama_api, show,
                page, web_app)
+
+# Набор не ходит в сеть — и это надо держать, а не надеяться на это. Пробы
+# способностей модели (takes_tools_now → check_model_tools_support,
+# model_supports_thinking) уходили НАСТОЯЩИМ запросом к Ollama: без неё —
+# до 10 секунд ожидания таймаута, а через прокси-шлюз в системе — до двух
+# секунд на отказ. Сорок таких проб превращали набор в полминуты ожидания
+# и засоряли чужой лог «Ошибка проверки capabilities».
+# Подменяем здесь, на весь прогон; проверке, которой нужен свой ответ,
+# достаточно поставить свою подмену поверх (см. TestCloudGateway.setUp) —
+# она снимается первой и возвращает эту.
+NO_NETWORK = (
+    ("check_model_tools_support", mock.Mock(return_value=False)),
+    ("model_supports_thinking", mock.Mock(return_value=False)),
+    ("fetch_ollama_models", mock.Mock(return_value=({}, None))),
+    ("fetch_loaded_models", mock.Mock(return_value=([], None))),
+    ("fetch_gpu_memory", mock.Mock(return_value={})),
+)
+for _name, _probe in NO_NETWORK:
+    mock.patch.object(ollama_api, _name, _probe).start()
 
 
 def app_module_of(name):
@@ -146,6 +166,14 @@ def setUpModule():
     SAVED_SETTINGS = {name: getattr(settings, name) for name, _value in CLOUD_DEFAULTS}
     for name, value in CLOUD_DEFAULTS:
         setattr(settings, name, value)
+
+    # Пауза после хода — для браузера, а не для проверок: ходов в наборе десятки,
+    # и каждая половина секунды ожидания делает набор в полминуты
+    # (см. settings.TURN_PAUSE).
+    # Проверка, которой пауза понадобится, поставит её себе сама, как и прочие
+    # настройки (см. cloud_setting)
+    SAVED_SETTINGS["TURN_PAUSE"] = settings.TURN_PAUSE
+    settings.TURN_PAUSE = 0
 
     global SCRATCH_DIR, SAVED_DUMP_FILE
     SCRATCH_DIR = tempfile.TemporaryDirectory()
@@ -4456,12 +4484,37 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(cloud.base_url(), "http://real-env/v1")
 
     def test_the_gateway_is_not_conducted_through_the_local_proxy(self):
-        """Шлюз — сам прокси до OpenAI: вести его ещё и через свой прокси = ломать запрос."""
+        """Шлюз — сам прокси до OpenAI: вести его ещё и через свой прокси = ломать запрос.
+
+        Прокси ставится сразу с двух сторон: в окружении (HTTP_PROXY) и в самом
+        urllib — так выглядит системная настройка Windows. Открыватель по
+        умолчанию слушается обоих, а нам нужен свой, без прокси вовсе.
+
+        Одного окружения здесь мало: запрос идёт на 127.0.0.1, а для местных
+        адресов urllib прокси и сам не применяет — то есть проверка проходила
+        и на вредительской правке `build_opener()` без прокси (см. мутацию
+        «запрос к шлюзу снова ведётся через локальный прокси»). Поэтому
+        закрываем и вторую дверь: ей называем мёртвый прокси для всех адресов
+        и запрещаем обход.
+        """
         os.environ["HTTP_PROXY"] = "http://127.0.0.1:1"    # мёртвый порт: достучаться нельзя
         os.environ["HTTPS_PROXY"] = "http://127.0.0.1:1"
-        content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        dead = {"http": "http://127.0.0.1:1", "https": "http://127.0.0.1:1"}
+        # Оба запроса к шлюзу — и реплика, и остаток на ключе: открывателей
+        # в cloud.py два, и оба обязаны прокси не слушаться
+        cloud_setting(self, "CLOUD_BALANCE_PATH", "/proxyapi/balance")
+        self.gateway.balances = [100.0]
+        with mock.patch.object(urllib.request, "getproxies", lambda: dict(dead)), \
+                mock.patch.object(urllib.request, "proxy_bypass", lambda host: False):
+            content, _tools = cloud.chat(
+                self.MODEL, [{"role": "user", "content": "Привет!"}])
+            chat_path = self.gateway.last_request()["path"]
+            reading, problem = cloud.balance(force=True)
+
         self.assertEqual(content, "Канберра.")
-        self.assertEqual(self.gateway.last_request()["path"], "/v1/chat/completions")
+        self.assertEqual(chat_path, "/v1/chat/completions")
+        self.assertEqual(problem, "", "остаток не доехал — запрос ушёл через прокси")
+        self.assertIsNotNone(reading)
 
     def test_without_a_key_a_cloud_participant_is_not_ready(self):
         settings.CLOUD_API_KEY = ""

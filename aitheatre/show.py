@@ -1923,7 +1923,11 @@ class DebateSession:
         close_dump_turn(post, turn)
         self.remember_turn(post["id"], turn)
         self.current_action = None
-        time.sleep(0.5)
+        # Пауза — для страницы, а не для модели: реплика уже в ленте, а браузеру
+        # надо успеть её показать, иначе ходы сливаются в один мигающий поток
+        # (см. settings.TURN_PAUSE)
+        if settings.TURN_PAUSE:
+            time.sleep(settings.TURN_PAUSE)
         return response, search_count, search_queries
 
 

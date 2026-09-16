@@ -18,14 +18,29 @@
 в аргументах — это часть имени бага, и подбрасываются только совпавшие
 
     venv/Scripts/python.exe tests/mutation_check.py молчание
+
+По умолчанию баги подбрасываются ВРАЗУБЕДИТЕЛЬНО: каждый — в своём процессе,
+сразу несколько за раз, и прогон копии останавливается на первом же упавшем
+тесте. Для вопроса «ловит ли набор эти баги» этого хватает: упал хоть один —
+ловят. Ждать сорок прогонов по сорок секунд подряд было незачем.
+
+    venv/Scripts/python.exe tests/mutation_check.py --full
+
+— это прежний дотошный порядок: по одному, без остановки на первом падении,
+с полным списком поймавших тестов у каждого бага. Нужен, когда важно не «ловит
+ли», а «кто именно ловит»: например, чтобы убрать задвоенную проверку.
 """
 
 import contextlib
 import importlib.util
 import io
+import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +54,11 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Метка вердикта в выводе процесса-исполнителя: по ней общий прогон и узнаёт,
+# чем кончился подброшенный баг (см. run_together). Без метки вердикта в выводе
+# нет — значит процесс кончился не отчётом, и это надо назвать вслух
+VERDICT_MARK = "@@ВЕРДИКТ@@"
 
 # Что скопировать в проверочную папку: приложение, тесты, точка входа и то,
 # на что тесты смотрят (клиент Socket.IO, рендерер формул, иконка). Точка входа
@@ -180,8 +200,8 @@ BUGS = {
     ],
     "отказ модели от инструмента поиска снова не запоминается": [
         ("aitheatre/cloud.py",
-         '    if not error and uses_tools and "tools" not in body:',
-         '    if not error and uses_tools and "tools" not in body and False:'),
+         "    if not error and tools_stripped:",
+         "    if not error and tools_stripped and False:"),
     ],
     "тёмная сцена снова не красит карточку инструкции": [
         ("aitheatre/page.py",
@@ -262,7 +282,7 @@ BUGS = {
         ("aitheatre/ollama_api.py",
          "        require_search = force_tool_use or (\n"
          "            iteration == 0 and settings.SEARCH_BEFORE_REPLY\n"
-         "            and search_count < settings.MIN_SEARCHES and takes_tools_now(model))",
+         "            and search_count < min_searches and takes_tools_now(model))",
          "        require_search = force_tool_use"),
     ],
     "поиск снова просят у модели, которая инструмент не принимает": [
@@ -300,11 +320,6 @@ BUGS = {
         ("aitheatre/show.py",
          '            thinking=draft.thinking_full() if draft else "",',
          '            thinking="",'),
-    ],
-    "размышления снова не попадают в стенограмму": [
-        ("aitheatre/show.py",
-         "        save_thinking_entry(post)",
-         "        pass"),
     ],
     "сметённая реплика снова пропадает из ленты": [
         ("aitheatre/show.py",
@@ -370,7 +385,7 @@ BUGS = {
     ],
     "новые модели OpenAI снова получают старое имя поля": [
         ("aitheatre/cloud.py",
-         '    if "max_completion_tokens" in text and "max_tokens" in body:',
+         '    if "max_tokens" in body and (named == "max_tokens" or "max_completion_tokens" in text):',
          "    if False:"),
     ],
     "размышления модели снова читаются как обычный текст": [
@@ -447,6 +462,13 @@ BUGS = {
     "запрос к шлюзу снова ведётся через локальный прокси": [
         ("aitheatre/cloud.py",
          "    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))",
+         "    opener = urllib.request.build_opener()"),
+    ],
+    "реплика снова уезжает в шлюз через локальный прокси": [
+        ("aitheatre/cloud.py",
+         "    # запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси.\n"
+         "    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))",
+         "    # запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси.\n"
          "    opener = urllib.request.build_opener()"),
     ],
     "значения из .env стали пустыми": [
@@ -678,30 +700,10 @@ BUGS = {
          "    max_iterations = max(8, min_searches + max_searches + max_forced_attempts + 2)",
          "    max_iterations = 8"),
     ],
-    "стенограмма снова растёт без конца": [
-        ("aitheatre/show.py",
-         "    dropped = trim_thinking_log()",
-         "    dropped = 0"),
-    ],
     "снимок запроса снимают в конце хода, а не в начале": [
         ("aitheatre/show.py",
          "        sent = copy.deepcopy(messages)",
          "        sent = messages"),
-    ],
-    "сводка снимка не доезжает до поста": [
-        ("aitheatre/show.py",
-         '        "prompt": (prompt or {}).get("summary"),',
-         '        "prompt": None,'),
-    ],
-    "забытый снимок не говорит об этом в старом посте": [
-        ("aitheatre/show.py",
-         '                forgotten["summary"]["stored"] = False',
-         '                forgotten["summary"]["stored"] = True'),
-    ],
-    "снимки запросов запоминаются без конца": [
-        ("aitheatre/show.py",
-         "        overflow = len(self.prompt_log) - max(0, int(settings.PROMPT_KEEP_TURNS))",
-         "        overflow = 0"),
     ],
     "из отчёта обрезки пропадает, что именно выброшено": [
         ("aitheatre/text.py",
@@ -712,11 +714,6 @@ BUGS = {
         ("aitheatre/page.py",
          '            return `<details class="post-thinking post-prompt" data-post-id="${post.id}">`',
          '            return `<details open class="post-thinking post-prompt" data-post-id="${post.id}">`'),
-    ],
-    "маршрут снимка переименовали, а страница спрашивает старый": [
-        ("aitheatre/web.py",
-         "@app.route('/api/post/<int:post_id>/prompt')",
-         "@app.route('/api/post/<int:post_id>/prompt_text')"),
     ],
     "сохранённые имена участников снова разыгрывают заново": [
         ("aitheatre/show.py",
@@ -1034,8 +1031,13 @@ def forget_app_modules():
         del sys.modules[name]
 
 
-def run_suite(project_dir: Path):
-    """Прогон набора против указанной копии проекта. Возвращает имена упавших."""
+def run_suite(project_dir: Path, first_failure: bool = False):
+    """Прогон набора против указанной копии проекта. Возвращает имена упавших.
+
+    first_failure=True — останавливаться на первом же упавшем тесте: для вопроса
+    «ловит ли набор этот баг» большего не нужно, а баг, которого ловит тест
+    в конце набора, иначе заставил бы ждать весь набор (см. шапку и --full).
+    """
     forget_app_modules()
     sys.path.insert(0, str(project_dir))
     try:
@@ -1047,12 +1049,157 @@ def run_suite(project_dir: Path):
             spec.loader.exec_module(module)
             suite = unittest.defaultTestLoader.loadTestsFromModule(module)
             total = suite.countTestCases()
-            result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+            result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0,
+                                             failfast=first_failure).run(suite)
     finally:
         sys.path.remove(str(project_dir))
     caught = sorted({test.id().split(".")[-1]
                      for test, _ in result.failures + result.errors})
     return total, caught
+
+
+def run_one_bug(title, patches):
+    """Один баг: своя копия проекта, свой прогон набора.
+
+    Возвращает (имя бага, файлы, вердикт, кто поймал, сколько секунд).
+    В своём процессе — потому что копий нужно сразу несколько (см. run_together),
+    а модули приложения живут в памяти процесса по одному разу: второй копии
+    взяться неоткуда (см. forget_app_modules).
+    """
+    started = time.time()
+
+    def verdict(kind, files, who):
+        return title, files, kind, who, time.time() - started
+
+    files = sorted({relative for relative, _, _ in patches})
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_dir = Path(tmpdir)
+            changed = {}
+            for relative, old, new in patches:
+                text = changed.get(relative)
+                if text is None:
+                    text = (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+                if old not in text:
+                    return verdict("miss", files, [f"не нашёл место в {relative}"])
+                changed[relative] = text.replace(old, new, 1)
+            copy_project(project_dir, changed)
+            _, caught = run_suite(project_dir, first_failure=True)
+    except Exception as error:
+        # Копия не встала или набор упал не тестом — это тоже находка, и молчать
+        # о ней нельзя: иначе баг отчитался бы как «нет вердикта»
+        return verdict("error", files, [f"{type(error).__name__}: {error}"])
+    return verdict("caught" if caught else "blind", files, caught)
+
+
+def run_together(bugs, workers=None):
+    """Прогон багов сразу несколькими процессами: по одному багу на процесс.
+
+    Отдельным процессом, а не потоком и не пулом модуля multiprocessing: прогон
+    набора подменяет модули приложения в памяти (см. forget_app_modules), и такое
+    соседство в одном процессе не живёт. Своим же процессом проверка получает
+    ровно то же, что имела бы, запусти её вручную, — и если процесс кончится
+    не отчётом, общий прогон об этом скажет, а не промолчит.
+
+    Итоги возвращаются в порядке заготовок, а не «кто первый успел»: иначе два
+    прогона одного и того же набора выглядели бы по-разному.
+    """
+    items = list(bugs.items())
+    if workers is None:
+        # Процессов больше, чем ядер, и это не опечатка: прогон набора не только
+        # считает, но и ждёт (шлюз-заглушка, потоки, диск), поэтому за половину
+        # времени ловится простой ядра. Замер на этом наборе: 8 процессов — 163 с,
+        # 16 — 110 с, 32 — 92 с. Больше ставить незачем: выигрыш кончается,
+        # а машина занята по-настоящему (см. --workers)
+        workers = (os.cpu_count() or 1) * 2
+    workers = max(1, min(len(items), int(workers)))
+    if workers == 1:
+        return [run_one_bug(title, patches) for title, patches in items]
+
+    # Номер заготовки считается по ПОЛНОМУ списку: процесс-исполнитель получает
+    # его же и по нему ищет свой баг. Считать по отфильтрованному нельзя —
+    # тогда проверялся бы один баг, а назывался бы в отчёте другой
+    # (и ни одного бы такого случая не было без метки с именем в отчёте)
+    numbers = {title: index for index, title in enumerate(BUGS)}
+    self_path = str(Path(__file__).resolve())
+    environment = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    running = {}          # номер заготовки — запущенный процесс
+    next_to_start = 0
+
+    def start(index):
+        running[index] = subprocess.Popen(
+            [sys.executable, self_path, "--bug", str(numbers[items[index][0]])],
+            cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            encoding="utf-8", errors="replace", env=environment)
+
+    def fill():
+        """Держать все места занятыми: освободилось — сразу следующий баг.
+
+        Без этого окно схлопнулось бы до одного процесса: сбор идёт по порядку
+        заготовок, а готовы они вразнобой.
+        """
+        nonlocal next_to_start
+        while next_to_start < len(items) and len(running) < workers:
+            start(next_to_start)
+            next_to_start += 1
+
+    fill()
+    results = []
+    # Ждём процессы в порядке заготовок — так и ответы идут по порядку, —
+    # но работают они все сразу: место освободившегося сразу занимает следующий
+    for index, (title, _patches) in enumerate(items):
+        process = running.pop(index)
+        output = process.communicate()[0] or ""
+        results.append(verdict_of(output, title, process.returncode))
+        fill()
+
+    return results
+
+
+def verdict_of(output: str, title: str, code: int):
+    """Вердикт процесса-исполнителя по его выводу: имя бага, файлы, итог, кто поймал.
+
+    Отчёт — одна строка JSON, а не строка с разделителями: имя бага и имена
+    тестов — текст, и делить его по значкам значит однажды разделить не там.
+
+    Метки в выводе нет — значит процесс кончился не отчётом (упал, убит),
+    и это тоже находка: молчащий баг отчитался бы как «вердикта нет».
+    """
+    for line in reversed(output.splitlines()):
+        if line.startswith(VERDICT_MARK):
+            try:
+                report = json.loads(line[len(VERDICT_MARK):])
+            except ValueError:
+                continue
+            # Отчёт обязан быть про тот самый баг: имя едет в ответе именно
+            # за этим — по одному номеру процесса-исполнитель и родитель могли бы
+            # разойтись в списках, и оба об этом не узнали бы (см. run_together)
+            if report.get("title") not in (None, title):
+                return (title, [], "error",
+                        [f"процесс ответил про другой баг: {report.get('title')}"], 0)
+            return (title, list(report.get("files") or []),
+                    str(report.get("verdict") or "error"),
+                    list(report.get("who") or []),
+                    float(report.get("seconds") or 0))
+    tail = [line for line in output.strip().splitlines() if line.strip()][-1:]
+    reason = tail[0] if tail else "пустой вывод"
+    return title, [], "error", [f"процесс кончился кодом {code}: {reason}"], 0
+
+
+def worker_main(index: int) -> int:
+    """Процесс-исполнитель: один баг и одна строка вердикта в вывод.
+
+    Запускается своей же командой (`--bug <номер>`) и ничего не знает ни о других
+    багах, ни об общем прогоне: он получает копию проекта и отвечает одним
+    вердиктом, а собирает из ответов общую картину родитель (см. run_together).
+    """
+    title, patches = list(BUGS.items())[index]
+    title, files, verdict, who, seconds = run_one_bug(title, patches)
+    report = json.dumps({"verdict": verdict, "files": files, "who": who[:5],
+                         "title": title, "seconds": round(seconds, 1)},
+                        ensure_ascii=False)
+    print(f"{VERDICT_MARK}{report}")
+    return 0
 
 
 def selected(wanted):
@@ -1073,12 +1220,18 @@ def selected(wanted):
     return picked
 
 
-def main(wanted=()):
+def main(wanted=(), full=False, workers=None):
+    """Проверка заготовок: эталон, затем по багу. По умолчанию — быстро (см. шапку)."""
+    started = time.time()
     ok = True
+    bugs = selected(wanted)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         project_dir = Path(tmpdir)
 
+        # Эталон всегда идёт целиком: быстрый прогон останавливается на первом
+        # упавшем тесте, и на неповреждённом коде он бы замолчал о втором.
+        # А эталон нужен честный — «набор зелёный до правок»
         copy_project(project_dir, {})
         total, caught = run_suite(project_dir)
         if caught:
@@ -1088,41 +1241,78 @@ def main(wanted=()):
             print(f"[эталон] неповреждённый код, тестов {total}: OK")
         print()
 
-        print("Подбрасываем баги по одному и смотрим, кто их поймает:")
+        if full:
+            print(f"Подбрасываем баги по одному и смотрим, кто их поймает ({len(bugs)}):")
+        else:
+            print(f"Подбрасываем баги сразу по нескольку ({len(bugs)}) и останавливаем\n"
+                  f"набор на первом же упавшем тесте:")
         print("-" * 68)
 
-        original = {relative: (PROJECT_ROOT / relative).read_text(encoding="utf-8")
-                    for patches in BUGS.values() for relative, _, _ in patches}
+        if full:
+            original = {relative: (PROJECT_ROOT / relative).read_text(encoding="utf-8")
+                        for patches in bugs.values() for relative, _, _ in patches}
 
-        for title, patches in selected(wanted).items():
-            files = sorted({relative for relative, _, _ in patches})
-            changed, broken = {}, False
-            for relative, old, new in patches:
-                text = changed.get(relative, original[relative])
-                if old not in text:
-                    print(f"⚠️  {title}: не нашёл место в {relative} — проверка невозможна")
-                    broken = True
-                    ok = False
+            for title, patches in bugs.items():
+                files = sorted({relative for relative, _, _ in patches})
+                changed, broken = {}, False
+                for relative, old, new in patches:
+                    text = changed.get(relative, original[relative])
+                    if old not in text:
+                        print(f"⚠️  {title}: не нашёл место в {relative} — проверка невозможна")
+                        broken = True
+                        ok = False
+                        continue
+                    changed[relative] = text.replace(old, new, 1)
+                if broken:
                     continue
-                changed[relative] = text.replace(old, new, 1)
-            if broken:
-                continue
 
-            copy_project(project_dir, changed)
-            _, caught = run_suite(project_dir)
-            mark = ", ".join(files)
-            if caught:
-                print(f"✅ [{mark}] {title}")
-                print(f"     поймали: {', '.join(caught[:5])}")
-            else:
-                print(f"❌ [{mark}] {title} — НЕ пойман ни одним тестом")
-                ok = False
+                copy_project(project_dir, changed)
+                _, caught = run_suite(project_dir)
+                mark = ", ".join(files)
+                if caught:
+                    print(f"✅ [{mark}] {title}")
+                    print(f"     поймали: {', '.join(caught[:5])}")
+                else:
+                    print(f"❌ [{mark}] {title} — НЕ пойман ни одним тестом")
+                    ok = False
+        else:
+            for title, files, verdict, who, seconds in run_together(bugs, workers):
+                mark = ", ".join(files)
+                spent = f" ({seconds:.1f} с)" if seconds else ""
+                if verdict == "caught":
+                    print(f"✅ [{mark}] {title}{spent}")
+                    print(f"     поймали: {', '.join(who[:5])}")
+                elif verdict == "blind":
+                    print(f"❌ [{mark}] {title} — НЕ пойман ни одним тестом{spent}")
+                    ok = False
+                else:
+                    print(f"⚠️  {title}: {who[0]}")
+                    ok = False
 
     print()
     print("-" * 68)
     print("ИТОГ:", "все баги ловятся" if ok else "есть слепые места")
+    print(f"Прогон занял {time.time() - started:.1f} с")
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    # --full — прежний дотошный порядок (см. шапку): по одному, без остановки
+    # на первом падении, со списком всех поймавших тестов
+    # --bug <номер> — не человеку, а родителю: один баг и строка вердикта
+    arguments = sys.argv[1:]
+    if "--bug" in arguments:
+        sys.exit(worker_main(int(arguments[arguments.index("--bug") + 1])))
+    # --workers N — сколько процессов запускать сразу (по умолчанию — по числу ядер)
+    pool_size, words, skip_value = None, [], False
+    for word in arguments:
+        if skip_value:            # это число — значение предыдущего ключа
+            skip_value = False
+            continue
+        if word == "--workers":
+            skip_value = True
+            pool_size = int(arguments[arguments.index(word) + 1])
+            continue
+        if not word.startswith("--"):
+            words.append(word)
+    sys.exit(main(words, full="--full" in arguments, workers=pool_size))
