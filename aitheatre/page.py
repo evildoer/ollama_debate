@@ -1700,6 +1700,33 @@ HTML_TEMPLATE = """
                                                           maximumFractionDigits: 2}) + ' ₽';
         }
 
+        // Сколько длилось — словами: «2 мин 15 с». Секунды до десятых здесь
+        // не нужны: это мера ожидания, а не измерение
+        function durationText(seconds) {
+            const total = Math.max(0, Math.round(Number(seconds) || 0));
+            const minutes = Math.floor(total / 60);
+            const secs = total % 60;
+            if (minutes && secs) return `${minutes} мин ${secs} с`;
+            if (minutes) return `${minutes} мин`;
+            return `${secs} с`;
+        }
+
+        // Часы хода: сколько уже думает говорящий и сколько ему осталось по сроку.
+        // Числа приходят секундами и обновляются вместе с состоянием (раз в
+        // секунду по сокету), поэтому своих часов страница не заводит и соврать
+        // не может. Срок есть только у облачного хода: без него — одно «думает…»
+        function turnClockText(data) {
+            if (data.turn_elapsed === null || data.turn_elapsed === undefined) return '';
+            let text = `⏱ думает ${durationText(data.turn_elapsed)}`;
+            if (data.turn_left !== null && data.turn_left !== undefined) {
+                text += ` · осталось ${durationText(data.turn_left)}`;
+                if (data.turn_extra) {
+                    text += ` (ход продлён на ${durationText(data.turn_extra)} за поиски)`;
+                }
+            }
+            return text;
+        }
+
         const WINDOW_WORDS = {cloud: 'окно облака', local: 'окно модели',
                               unbounded: 'окно не ограничено (CLOUD_NUM_CTX = 0)'};
         // «Уехало» ничего не говорило: ни кто, ни куда. Здесь сказано прямо,
@@ -1737,7 +1764,8 @@ HTML_TEMPLATE = """
             const who = data.who || {};
             const parts = [];
             parts.push(`<div class="prompt-line"><b>${escapeHtml(who.name || '')}</b> · `
-                + `${escapeHtml(who.model || '')} · Акт ${who.round} · ${escapeHtml(who.time || '')}</div>`);
+                + `${escapeHtml(who.model || '')} · Акт ${who.round} · ${escapeHtml(who.time || '')}`
+                + (s.seconds ? ` · ход длился ${durationText(s.seconds)}` : '') + `</div>`);
             // Четыре числа окна — не украшение, а ответ на «куда делись токены»
             // Ноль в запасе — не «ноль токенов на ответ», а «ответ не ограничиваем»:
             // именно это значит CLOUD_MAX_TOKENS = 0, и писать иначе — врать
@@ -1837,6 +1865,10 @@ HTML_TEMPLATE = """
             if (info.search_rounds) parts.push(`поисков ${info.search_rounds}`);
             if (info.thought_steps) parts.push(`размышлений ${info.thought_steps}`);
             parts.push(`${tokensText(info.tokens)} токенов на ввод`);
+            // Сколько ход длился — рядом с ценой: время здесь такая же плата,
+            // и без него видно, сколько реплика стоила, но не видно, чего
+            // она стоила зрителю (см. refresh_turn_report)
+            if (info.seconds) parts.push(`⏱ ${durationText(info.seconds)}`);
             // Цена хода — факт со счёта шлюза (разница остатков), а не оценка:
             // тарифов приложение не знает (см. settings.CLOUD_BALANCE_PATH)
             if (info.spent) parts.push(`💰 ${moneyText(info.spent)}`);
@@ -2122,7 +2154,11 @@ HTML_TEMPLATE = """
                 let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
                 // Сколько уже стоил спектакль — по факту со счёта шлюза
                 const bill = data.spent ? `<div style="font-size:12px;margin-top:6px;">💰 за спектакль ${moneyText(data.spent)}</div>` : '';
-                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>${bill}`;
+                // Часы хода — рядом с ценой: по ним видно, ждать минуту или
+                // десять, и успеешь ли сходить за пивом (см. turnClockText)
+                const clock = turnClockText(data);
+                const clockLine = clock ? `<div style="font-size:12px;margin-top:6px;">${clock}</div>` : '';
+                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>${clockLine}${bill}`;
             } else if (data.finished) {
                 statusDiv.classList.remove('active');
                 const curtain = data.spent ? `<div style="font-size:12px;margin-top:8px;">💰 за спектакль ${moneyText(data.spent)}</div>` : '';

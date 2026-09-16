@@ -830,6 +830,24 @@ class TestStreamingReply(unittest.TestCase):
         self.assertEqual(len(self.session.posts), 1)
         self.assertIn(f"Реплика от {participant['display_name']}.", self.session.posts[0]["content"])
 
+    def test_the_clock_of_the_turn_is_stopped_when_the_turn_ends(self):
+        """Часы хода гаснут вместе с ходом: иначе сайдбар показывал бы чужое время.
+
+        Ход заводит их сам (см. ollama_api.ask_model), а гасить их обязан тот,
+        кто ведёт ход: после реплики «думает 2 мин» про модель, которая давно
+        замолчала, — это то же враньё, что «спектакль закрыт» до его начала.
+        """
+        def answer(model, messages, participant_name, **kwargs):
+            # Так это и происходит: часы заводит ход, а не зритель
+            self.session.start_turn_clock(120, time.monotonic() + 120)
+            return "Реплика.", 0, []
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            self.session.handle_ai_turn(self._participant(), 1)
+
+        self.assertIsNone(self.session.turn_elapsed(), "ход кончился — часы должны встать")
+        self.assertIsNone(self.session.turn_left())
+
     def test_a_draft_is_closed_even_when_the_turn_fails(self):
         """Ход сорвался — черновик всё равно должен уйти из ленты.
 
@@ -2464,6 +2482,50 @@ class TestTurnReport(unittest.TestCase):
         self.assertEqual(paths.count("/proxyapi/balance"), 2,
                          "остаток нужен и до хода, и после него — иначе нет разницы")
 
+    def test_the_turn_says_how_long_it_lasted(self):
+        """Время хода — рядом с ценой: ожидание — такая же плата за реплику.
+
+        Считает его сам ход — от сборки сообщений до готовой реплики, а не
+        страница: часы у браузера и у сервера разные, и «с 05:39 до 05:41»
+        у зрителя значило бы гадание (см. refresh_turn_report).
+        """
+        def slow_answer(model, messages, participant_name, **kwargs):
+            time.sleep(0.05)          # такой ход, что его видно секундомером
+            return "Вот ответ.", 0, []
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=slow_answer)):
+            self.session.handle_ai_turn(self._participant(), 1)
+
+        summary = self.session.posts[-1]["turn"]
+        self.assertIsNotNone(summary.get("seconds"), "ход обязан назвать своё время")
+        self.assertGreaterEqual(summary["seconds"], 0.05,
+                                "время хода меньше самого хода быть не может")
+
+    def test_the_dump_says_how_long_the_turn_lasted(self):
+        """В ДАМПе у хода тоже есть время: его читают, чтобы понять, что было."""
+        # Секунды словами, а не измерением: «135.4 с» в тексте не читается
+        self.assertEqual(show.duration_words(135), "2 мин 15 с")
+        self.assertEqual(show.duration_words(120), "2 мин",
+                         "«2 мин 0 с» читается хуже, чем «2 мин»")
+        self.assertEqual(show.duration_words(45), "45 с")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dump = Path(tmp) / "damp.md"
+
+            def slow_answer(model, messages, participant_name, **kwargs):
+                time.sleep(1.1)      # ход, который длился хотя бы секунду
+                return "Вот ответ.", 0, []
+
+            with mock.patch.object(settings, "DUMP_FILE", dump), \
+                    mock.patch.object(ollama_api, "ask_model",
+                                      mock.Mock(side_effect=slow_answer)):
+                show.start_dump("Проверочная тема")
+                self.session.handle_ai_turn(self._participant(), 1)
+                written = dump.read_text(encoding="utf-8")
+
+        self.assertIn("**Ход длился:** 1 с", written,
+                      "у хода в файле должно быть сказано, сколько он шёл — словами")
+
     def test_the_balance_address_keeps_the_host_whole(self):
         """Адрес остатка собирается из адреса шлюза, но хоста не калечит.
 
@@ -4053,6 +4115,41 @@ class TestCloudGateway(unittest.TestCase):
         self.assertAlmostEqual(deadlines[1] - deadlines[0], 60, delta=3,
                                msg="состоявшийся поиск даёт ходу ещё времени")
 
+    def test_the_sidebar_sees_the_clock_of_the_turn_and_its_bonus(self):
+        """Сайдбар знает, сколько ход уже идёт и сколько ему осталось.
+
+        Срок — на ход целиком, и каждый поиск его продлевает. Не знай этого
+        сайдбар — «осталось» шло бы к нулю, а ход всё шёл бы: часы врали бы
+        ровно в тот миг, когда на них смотрят.
+        """
+        cloud_setting(self, "CLOUD_TURN_LIMIT", 300)
+        cloud_setting(self, "CLOUD_SEARCH_TIME", 60)
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        cloud_setting(self, "MAX_SEARCHES", 1)
+        session = show.DebateSession()
+        seen = []
+
+        def one_search_then_answer(*_args, **_kwargs):
+            seen.append((session.turn_elapsed(), session.turn_left()))
+            if len(seen) == 1:
+                return "", [{"id": "call-1", "type": "function",
+                             "function": {"name": "search_web",
+                                          "arguments": json.dumps({"query": "погода"})}}]
+            return "Готово.", []
+
+        with mock.patch.object(ollama_api, "search_web", mock.Mock(return_value="нашлось")), \
+                mock.patch.object(cloud, "chat", side_effect=one_search_then_answer):
+            ollama_api.ask_model(self.MODEL, [{"role": "user", "content": "?"}],
+                                 participant_name="Роман", show_session=session)
+
+        self.assertEqual(len(seen), 2, "поиск — это ещё один запрос к модели")
+        self.assertIsNotNone(seen[0][0], "часы обязаны идти уже на первом запросе")
+        self.assertAlmostEqual(seen[0][1], 300, delta=3,
+                               msg="остаток считается от срока хода")
+        self.assertAlmostEqual(seen[1][1], 360, delta=3,
+                               msg="поиск обязан продлить и видимый остаток")
+        self.assertEqual(session.turn_extra, 60)
+
     def test_an_error_is_not_taken_for_an_answer(self):
         """Текст ошибки — не реплика: поиск за ним не просят.
 
@@ -4504,8 +4601,34 @@ class TestRoutes(unittest.TestCase):
         data = self.client.get("/api/status").get_json()
         for key in ("running", "finished", "topic", "current_participant",
                     "current_participant_role", "current_participant_is_moderator",
-                    "new_posts", "total_posts", "waiting_for_human"):
+                    "new_posts", "total_posts", "waiting_for_human",
+                    "turn_elapsed", "turn_left", "turn_extra"):
             self.assertIn(key, data)
+
+    def test_the_status_carries_the_clock_of_the_turn(self):
+        """Сколько ход идёт и сколько осталось — берётся из часов хода.
+
+        Часы у браузера и у сервера разные: «осталось 2 мин» должно приезжать
+        секундами, а не моментом времени, иначе это гадание.
+        """
+        self.session.start_turn_clock(120, time.monotonic() + 120)
+        self.addCleanup(self.session.stop_turn_clock)
+        data = self.client.get("/api/status").get_json()
+        self.assertEqual(data["turn_limit"], 120)
+        self.assertIsNotNone(data["turn_elapsed"], "часы хода должны идти")
+        self.assertAlmostEqual(data["turn_left"], 120, delta=3)
+
+        self.session.extend_turn_clock(60)
+        data = self.client.get("/api/status").get_json()
+        self.assertAlmostEqual(data["turn_left"], 180, delta=3,
+                               msg="надбавка за поиск должна быть видна и в сайдбаре")
+        self.assertEqual(data["turn_extra"], 60)
+
+    def test_the_clock_is_off_when_no_turn_is_running(self):
+        """Хода нет — и часов нет: иначе сайдбар показывал бы чужое время."""
+        data = self.client.get("/api/status").get_json()
+        self.assertIsNone(data["turn_elapsed"])
+        self.assertIsNone(data["turn_left"])
 
     def test_status_role_is_empty_when_nobody_is_awaited(self):
         self.session.current_participant = judge_of(self.session)["display_name"]
@@ -4995,6 +5118,77 @@ class TestPageScript(unittest.TestCase):
             self.assertEqual(result.returncode, 0,
                              f"скрипт страницы (блок {number}) не разбирается:\n"
                              f"{(result.stderr or '').strip()}")
+
+    @staticmethod
+    def _function(name: str) -> str:
+        """Вытащить функцию страницы по имени — со скобками по балансу.
+
+        Проверять одни часы без остального скрипта можно именно так: разбором
+        счётом скобок, а не поиском закрывающей строки — иначе первая же
+        вложенная функция дала бы обрезанное тело и проверку не о том.
+        """
+        source = page.HTML_TEMPLATE
+        start = source.index(f"function {name}(")
+        depth = 0
+        for index in range(start, len(source)):
+            if source[index] == "{":
+                depth += 1
+            elif source[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[start:index + 1]
+        raise AssertionError(f"у функции {name} не нашлось конца")
+
+    def _run_in_node(self, *calls):
+        """Считать часы по-настоящему: тот же код, что уедет в браузер.
+
+        Ни один питоновский тест разметку не исполняет, а часов это касается
+        больше всего: «осталось» считает браузер, и ошибка в нём видна только
+        зрителю (см. turnClockText).
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node не найден: часы не с кем сверить")
+        script = "\n".join(self._function(name)
+                           for name in ("durationText", "turnClockText"))
+        script += "\nconsole.log(JSON.stringify([" + ", ".join(calls) + "]));"
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
+                                        encoding="utf-8") as handle:
+            handle.write(script)
+            path = handle.name
+        try:
+            # Без text=True: русская консоль Windows читает вывод node как cp1251,
+            # и «2 мин» превращалось бы в кракозябры — не из-за кода, а из-за
+            # кодировки чужого процесса
+            result = subprocess.run([node, path], capture_output=True)
+        finally:
+            os.unlink(path)
+        self.assertEqual(result.returncode, 0,
+                         "часы хода не считаются:\n"
+                         + result.stderr.decode("utf-8", "replace").strip())
+        return json.loads(result.stdout.decode("utf-8"))
+
+    def test_the_time_is_said_in_words(self):
+        self.assertEqual(self._run_in_node("durationText(45)", "durationText(135)",
+                                           "durationText(120)"),
+                         ["45 с", "2 мин 15 с", "2 мин"])
+
+    def test_the_clock_counts_up_and_shows_the_bonus(self):
+        """Сколько думает и сколько осталось — и с надбавкой за поиски."""
+        out = self._run_in_node(
+            "turnClockText({turn_elapsed: 12, turn_left: 108, turn_extra: 0})",
+            "turnClockText({turn_elapsed: 12, turn_left: 168, turn_extra: 60})",
+            "turnClockText({turn_elapsed: 12, turn_left: null, turn_extra: 0})",
+            "turnClockText({turn_elapsed: null, turn_left: null, turn_extra: 0})")
+
+        self.assertIn("думает 12 с", out[0])
+        self.assertIn("осталось 1 мин 48 с", out[0])
+        self.assertIn("продлён на 1 мин", out[1],
+                      "надбавка должна быть названа, иначе часы непонятно откуда берут время")
+        self.assertIn("осталось 2 мин 48 с", out[1])
+        self.assertIn("думает 12 с", out[2])
+        self.assertNotIn("осталось", out[2], "без срока нет и остатка")
+        self.assertEqual(out[3], "", "хода нет — и часов нет")
 
 
 if __name__ == "__main__":

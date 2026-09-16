@@ -88,6 +88,16 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         "current_participant": show.session.current_participant,
         "current_action": show.session.current_action,
         "search_query": show.session.search_query,
+        # Часы хода: сколько уже думает говорящий и сколько ему осталось.
+        # Именно секунды «сколько прошло / сколько осталось», а не момент
+        # времени: часы у браузера и у сервера разные, и «до 05:41» у зрителя
+        # значило бы гадание (см. show.start_turn_clock)
+        "turn_elapsed": (None if show.session.turn_elapsed() is None
+                         else round(show.session.turn_elapsed(), 1)),
+        "turn_left": (None if show.session.turn_left() is None
+                      else round(show.session.turn_left(), 1)),
+        "turn_limit": show.session.turn_limit,
+        "turn_extra": show.session.turn_extra,
         # Сколько стоил спектакль: сумма разниц остатка на ключе. Считает её
         # ход (см. show._note_money), а не страница: тарифов не знает никто,
         # а остаток знает только шлюз

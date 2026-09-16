@@ -150,6 +150,25 @@ def numbers_word(value) -> str:
         return str(value if value is not None else "—")
 
 
+def duration_words(seconds) -> str:
+    """Сколько длился ход — словами: «2 мин 15 с» читается, а «135.4 с» — нет.
+
+    Секунды до десятых в тексте не нужны: в ДАМПе и в посте это мера
+    ожидания, а не измерение. Минуты без остатка называются минутами,
+    чтобы не появлялось «2 мин 0 с».
+    """
+    try:
+        total = int(round(float(seconds or 0)))
+    except (TypeError, ValueError):
+        return "—"
+    minutes, secs = divmod(max(0, total), 60)
+    if minutes and secs:
+        return f"{minutes} мин {secs} с"
+    if minutes:
+        return f"{minutes} мин"
+    return f"{secs} с"
+
+
 def quoted(text: str) -> str:
     """Текст куском: каждая строка с «> », чтобы границы были видны в файле.
 
@@ -366,8 +385,12 @@ def message_line(index: int, message: dict) -> str:
 
 
 def dump_turn_tail(post: dict, turn: dict) -> str:
-    """Конец записи о ходе: что дописало приложение, чем ход кончился."""
+    """Конец записи о ходе: что дописало приложение, чем ход кончился, сколько шёл."""
     out = []
+    summary = turn.get("summary") or {}
+    if summary.get("seconds") is not None:
+        out.append(f"\n**Ход длился:** {duration_words(summary['seconds'])}"
+                   f" — от начала обрезки истории до готовой реплики\n")
     if turn.get("added"):
         out.append("\n### Что приложение дописало в запрос по ходу дела\n")
         out.append("Полных текстов здесь нет нарочно: найденное стоит в хронологии "
@@ -784,7 +807,8 @@ def _as_number(value, fallback: int) -> int:
 
 
 def refresh_turn_report(turn: dict, added: list, search_count: int,
-                        journal: dict = None, spent: float = None) -> None:
+                        journal: dict = None, spent: float = None,
+                        seconds: float = None) -> None:
     """Дописать в отчёт то, что стало известно только к концу хода.
 
     Отчёт собирается до запроса к модели (см. build_turn_report), а к концу надо
@@ -806,6 +830,10 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     # Цена хода — по разнице остатков на ключе, а не по тарифам (см. _note_money).
     # Не знаем — так и говорим молчанием: ноль означал бы «бесплатно»
     summary["spent"] = spent
+    # Сколько ход длился — рядом с ценой: время здесь такая же плата, и без
+    # него у реплики видно, сколько она стоила, но не видно, чего она стоила
+    # зрителю (см. handle_ai_turn)
+    summary["seconds"] = None if seconds is None else round(float(seconds), 1)
     summary["asks"] = sum(1 for step in steps if step.get("kind") == "ask")
     # Размышления — тоже шаг хронологии, и о них стоит сказать в свёрнутой
     # строке: иначе о том, что модель что-то говорила сама с собой, и не узнать
@@ -1075,6 +1103,14 @@ class DebateSession:
         self.spent = 0.0
         # Сказали ли уже вслух, что остатка нет и цены не будет
         self.money_told = False
+        # Часы хода: сколько уже идёт текущий ход и когда он оборвётся по сроку.
+        # Заводит их тот, кто ведёт ход (см. ollama_api.ask_model), а читает
+        # сайдбар — «думает 1:23, осталось 2:10» вместо немого ожидания,
+        # по которому не понятно, ждать минуту или десять
+        self.turn_started = None
+        self.turn_deadline = None
+        self.turn_limit = 0
+        self.turn_extra = 0
         # Отчёты ходов по номеру реплики: что именно вошло в запрос, что
         # происходило по порядку и чем кончилось. В памяти — за весь
         # спектакль: читают это ради разбора свежего случая, а новый спектакль
@@ -1284,6 +1320,52 @@ class DebateSession:
 
     def current_participant_is_moderator(self) -> bool:
         return self.current_participant_role() == "moderator"
+
+    # ------------------------------------------------------------
+    # Часы хода: сколько ждать
+    # ------------------------------------------------------------
+
+    def start_turn_clock(self, limit: int = 0, deadline: float = None) -> None:
+        """Завести часы хода: по ним сайдбар считает, сколько ещё ждать.
+
+        limit — сколько секунд дано ходу изначально, deadline — до какого
+        времени (time.monotonic) он дойдёт с надбавками за поиски. Срок есть
+        только у облачного хода: у местной модели его нет вовсе, и тогда
+        видно одно «думает столько-то» (см. cloud.turn_deadline).
+        """
+        self.turn_started = time.monotonic()
+        self.turn_limit = int(limit or 0)
+        self.turn_deadline = deadline
+        self.turn_extra = 0
+
+    def extend_turn_clock(self, seconds: int) -> None:
+        """Поиск состоялся — ходу прибавлено времени, и это видно в сайдбаре.
+
+        Именно прибавка, а не новый срок: иначе «осталось» прыгало бы вверх
+        на каждой поисковой попытке и не значило бы ничего (см. per_search_seconds).
+        """
+        seconds = int(seconds or 0)
+        if self.turn_deadline is not None:
+            self.turn_deadline += seconds
+        self.turn_extra += seconds
+
+    def stop_turn_clock(self) -> None:
+        """Ход кончился: часы гасим — сайдбар не должен показывать чужое время."""
+        self.turn_started = None
+        self.turn_deadline = None
+        self.turn_extra = 0
+
+    def turn_elapsed(self):
+        """Сколько секунд уже идёт ход (None — хода нет)."""
+        if self.turn_started is None:
+            return None
+        return max(0.0, time.monotonic() - self.turn_started)
+
+    def turn_left(self):
+        """Сколько секунд осталось ходу по сроку (None — без предела)."""
+        if self.turn_started is None or self.turn_deadline is None:
+            return None
+        return max(0.0, self.turn_deadline - time.monotonic())
 
     # ------------------------------------------------------------
     # Свежий буст модератора
@@ -1697,6 +1779,10 @@ class DebateSession:
 
     def handle_ai_turn(self, participant: dict, round_num: int, on_draft=None) -> tuple:
         self.current_action = "thinking"
+        # По этой метке реплика назовёт, сколько длилась её генерация: время —
+        # такая же плата за ход, как токены и поиски, и морочить им голову
+        # секундомером в руке не надо (см. refresh_turn_report)
+        started = time.time()
         # Отчёт обрезки приходит из той же сборки сообщений, что и сами
         # сообщения: отдельного пересчёта для показа нет
         trim_report = {}
@@ -1743,12 +1829,19 @@ class DebateSession:
                 on_delta=draft.feed if draft else None,
                 on_thought=draft.think if draft else None,
                 report=journal,
+                # Сайдбару — «Ищет: …» прямо на ходу и часы: сколько уже
+                # думает и сколько осталось (см. start_turn_clock)
+                show_session=self,
             )
         finally:
             # Черновик закрываем при любом выходе, в том числе при ошибке: иначе
             # недописанная реплика осталась бы висеть в ленте навсегда
             if draft is not None:
                 draft.finish()
+            # И часы хода гасим тут же: модель уже не думает, а по этим часам
+            # сайдбар считает, сколько ей осталось (чтобы после хода там
+            # не висело чужое время)
+            self.stop_turn_clock()
 
         # Размышления, не попавшие в хронологию шагами (модель без потока, шлюз,
         # отдавший размышления одним куском): мысли оплачены, и это единственный
@@ -1764,7 +1857,8 @@ class DebateSession:
         # То, что стало известно к концу хода: сколько он дописал сам и сколько
         # раз просил поиск. Шаги при этом уже в отчёте — журнал у них общий
         spent = self._note_money(journal, money_before, money_error) if cloud_turn else None
-        refresh_turn_report(turn, messages[len(sent):], search_count, journal, spent)
+        refresh_turn_report(turn, messages[len(sent):], search_count, journal, spent,
+                            seconds=max(0.0, time.time() - started))
 
         post = self.add_post(
             display_name=participant["display_name"],

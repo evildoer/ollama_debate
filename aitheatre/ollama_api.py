@@ -1057,6 +1057,12 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
     # а не внутри запроса: круг поиска — это ещё один запрос, и брать на него
     # свежий срок значило бы не иметь срока вовсе (см. cloud.turn_deadline)
     deadline = cloud.turn_deadline() if cloud.is_cloud_model(model) else None
+    if show_session is not None:
+        # Часы хода — для сайдбара: сколько модель уже думает и сколько ей
+        # осталось. Срок есть только у облачного хода: у местной модели его
+        # нет вовсе, и тогда видно одно «думает столько-то» (см. show.start_turn_clock)
+        show_session.start_turn_clock(cloud.turn_limit() if deadline is not None else 0,
+                                      deadline)
     force_tool_use = False  # Флаг для принудительного использования инструмента через tool_choice
     forced_attempts = 0     # Счётчик попыток принудительного поиска
     content = ""
@@ -1204,6 +1210,12 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
                 # ход бесконечно (см. cloud.per_search_seconds)
                 if deadline is not None:
                     deadline += cloud.per_search_seconds()
+                if show_session is not None:
+                    # И в сайдбаре видно, что ход получил надбавку: без этого
+                    # «осталось» шло бы к нулю, а обрыв наступил бы позже —
+                    # то есть часы врали бы ровно там, где на них и смотрят
+                    # (см. show.extend_turn_clock)
+                    show_session.extend_turn_clock(cloud.per_search_seconds())
                 
                 if tc.get("textual"):
                     # Найденное — обычным сообщением: с этой моделью мы говорим

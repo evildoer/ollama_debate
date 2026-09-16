@@ -877,6 +877,28 @@ BUGS = {
          "    deadline = cloud.turn_deadline() if cloud.is_cloud_model(model) else None",
          "    deadline = None"),
     ],
+    # Из жизни: сайдбар не показывал ни сколько ход идёт, ни сколько осталось —
+    # по нему нельзя было понять, ждать минуту или десять
+    "часы хода снова не гаснут вместе с ходом": [
+        ("aitheatre/show.py",
+         "            self.stop_turn_clock()",
+         "            pass"),
+    ],
+    "часы хода снова не помнят про надбавку за поиск": [
+        ("aitheatre/ollama_api.py",
+         "                    show_session.extend_turn_clock(cloud.per_search_seconds())",
+         "                    pass"),
+    ],
+    "время хода снова не доезжает до реплики": [
+        ("aitheatre/show.py",
+         '    summary["seconds"] = None if seconds is None else round(float(seconds), 1)',
+         '    summary["seconds"] = None'),
+    ],
+    "часы страницы снова молчат про надбавку": [
+        ("aitheatre/page.py",
+         "                if (data.turn_extra) {",
+         "                if (false) {"),
+    ],
     "состоявшийся поиск снова не даёт ходу времени": [
         ("aitheatre/ollama_api.py",
          "                if deadline is not None:\n"
