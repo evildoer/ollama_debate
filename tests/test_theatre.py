@@ -2329,6 +2329,63 @@ class TestTurnReport(unittest.TestCase):
         self.assertIn("CLOUD_MAX_TOKENS = 0", line)
         self.assertNotIn("0 оставлено на ответ", line)
 
+    def test_a_message_without_text_says_what_it_has_instead(self):
+        """«assistant · 0 токенов» объясняет себя: тело пустое, а поля — вот они.
+
+        Именно этого не хватало в ДАМПе: ход модели, целиком состоящий
+        из просьбы о поиске, — это пустой текст плюс поле tool_calls. Запись
+        «0 токенов» была верным сигналом (что-то было!) и ни капли смысла:
+        ни какие поля там есть, ни с какими значениями.
+        """
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+
+        def answer(model, messages, participant_name, **kwargs):
+            # Так это и происходит в жизни: модель просит поиск (текста нет, есть
+            # вызов) и получает найденное — оба сообщения приложение дописало само
+            messages.append({
+                "role": "assistant", "content": "", "name": participant_name.lower(),
+                "tool_calls": [{"id": "call-1", "type": "function",
+                                 "function": {"name": "search_web",
+                                              "arguments": json.dumps(
+                                                  {"query": "Сыктывкар новости"})}}]})
+            messages.append({"role": "tool", "content": "Сыктывкар — столица Коми.",
+                             "tool_name": "search_web", "name": "search_web"})
+            return "Вот ответ.", 1, ["Сыктывкар новости"]
+
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Проверочная тема")
+            with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+                self.session.handle_ai_turn(self._participant(), 1)
+            written = dump.read_text(encoding="utf-8")
+
+        self.assertIn("### Что приложение дописало в запрос по ходу дела", written)
+        self.assertIn("0 токенов текста", written,
+                      "ноль — это ноль ТЕКСТА, и так и надо писать")
+        self.assertIn("тела текста нет", written)
+        self.assertIn("`tool_calls` = 1 вызов(ов): search_web «Сыктывкар новости»", written,
+                      "надо назвать поле и его значение, а не оставить одно число")
+        self.assertIn("ответ инструмента поиска", written,
+                      "у найденного тоже должно быть сказано, что это такое")
+
+    def test_the_answer_code_is_translated_into_words(self):
+        """Код ответа вендора — словами: «конец: tool_calls (слов модель не сказала…)».
+
+        finish_reason и есть тот самый код ответа, о котором спрашивал режиссёр:
+        сам по себе он ничего не говорит, а ход им и объясняется.
+        """
+        line = show.ask_line({"n": 1, "tokens_in": 3431, "tokens_out": 1246,
+                              "finish_reason": "tool_calls", "tools": True})
+
+        self.assertIn("конец: tool_calls", line)
+        self.assertIn("попросила вызвать инструмент", line,
+                      "у кода должен быть перевод, иначе он читается как код")
+        # Код, которого мы не знаем, не выдумывается: он остаётся как есть
+        unknown = show.ask_line({"n": 1, "tokens_in": 1, "tokens_out": 1,
+                                 "finish_reason": "something_new"})
+        self.assertIn("конец: something_new", unknown)
+        self.assertNotIn("(None)", unknown)
+
     def test_the_dump_is_written_while_the_turn_is_still_going(self):
         """ДАМП пишется по ходу дела, а не в конце: у оборванного хода не было следов.
 
@@ -2529,6 +2586,12 @@ class TestTurnPanel(unittest.TestCase):
         self.assertIn("turnAskText(step)", body, "запрос без чисел не объясняет, откуда они")
         self.assertIn("step.query", body, "у поиска должна быть формулировка запроса")
         self.assertIn("step.results", body, "и то, что по нему нашлось")
+        self.assertIn("promptMessagesHtml(data.added)", body,
+                      "дописанное приложением — тоже сообщения запроса, и пустые из них "
+                      "надо объяснить, а не сводить к одному числу")
+        self.assertIn("m.note", self.page, "у сообщения без текста должно быть объяснение")
+        self.assertIn("0 токенов текста", self.page,
+                      "«0 токенов» — верный сигнал, но без «текста» он ничего не говорит")
 
     def test_the_ask_line_explains_what_the_numbers_mean(self):
         """«3431 + 1246» — это ввод и вывод, и в ленте это должно быть сказано."""
@@ -2537,6 +2600,10 @@ class TestTurnPanel(unittest.TestCase):
         self.assertIn("ввод", body)
         self.assertIn("вывод", body)
         self.assertIn("reasoning_tokens", body, "размышления считаются в вывод — их надо назвать")
+        self.assertIn("FINISH_WORDS", body,
+                      "код ответа без перевода читается как код: нужен его смысл")
+        self.assertIn("tool_calls:", self.page,
+                      "самый частый такой код — ход, в котором модель попросила инструмент")
 
 
 # ---------------------------------------------------------------- посты

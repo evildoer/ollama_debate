@@ -139,6 +139,9 @@ HTML_TEMPLATE = """
         .prompt-role-assistant { background: #dbead4; }
         .prompt-tokens, .prompt-num { margin-left: 10px; }
         .prompt-text { white-space: pre-wrap; word-wrap: break-word; font-family: inherit; font-size: 13px; line-height: 1.55; margin: 6px 0 0 0; padding: 8px 10px; background: #ffffff; border: 1px solid #eeeeee; color: #333333; max-height: 340px; overflow: auto; }
+        /* Объяснение к сообщению: почему у него ноль токенов текста и что есть вместо */
+        .prompt-note { font-size: 12px; line-height: 1.5; color: #8a6d3b; margin: 4px 0 0 0; }
+        .prompt-note code { background: #f3efe6; padding: 0 3px; border-radius: 3px; }
         .prompt-removed { font-size: 13px; line-height: 1.5; color: #999999; }
         .prompt-removed b { color: #777777; }
         body.dark .post-prompt { border-left-color: #35485c; }
@@ -150,6 +153,8 @@ HTML_TEMPLATE = """
         body.dark .prompt-msg-head { color: #8c8c8c; }
         body.dark .prompt-role { background: #2a2a2a; color: #b0b0b0; }
         body.dark .prompt-text { background: #101010; border-color: #262626; color: #cccccc; }
+        body.dark .prompt-note { color: #c9a86a; }
+        body.dark .prompt-note code { background: #2a2620; }
         body.dark .prompt-removed { color: #7a7a7a; }
         body.dark .prompt-removed b { color: #9a9a9a; }
         /* Формулы: LaTeX от сервера, MathML от браузера */
@@ -1628,6 +1633,13 @@ HTML_TEMPLATE = """
         // (запросы с их вводом и выводом, поиски с формулировкой и находками),
         // и только потом — что модель сказала.
         const SKETCH_HINT = 'Так бывает, когда модель сначала отвечает, а потом её просят поискать.';
+        // Смысл кода ответа вендора: тот же словарь, что в show.FINISH_MEANINGS
+        const FINISH_WORDS = {stop: 'вендор считает, что модель договорила',
+                              length: 'ответ оборвался по пределу вывода',
+                              tool_calls: 'слов модель не сказала: она попросила вызвать инструмент',
+                              function_call: 'слов модель не сказала: она попросила вызвать функцию',
+                              content_filter: 'вендор вырезал содержимое своим фильтром'};
+
         const TURN_HINT = 'Весь путь к этой реплике по порядку: что вошло в каждый запрос к модели, что она попросила, что ей принесли и сколько токенов за это заплачено. Ввод — это то, что театр отправил в одном запросе, вывод — то, что вернул вендор (включая оплаченные размышления); «наш счёт» — то, что театр посчитал сам (tiktoken), а число рядом — счёт вендора.';
 
         function thinkingBlockHtml(hint, text) {
@@ -1663,7 +1675,11 @@ HTML_TEMPLATE = """
                 parts.push(`ввод ${tokensText(step.tokens_in)}${estimate} → вывод ${tokensText(step.tokens_out)} токенов`);
             }
             if (step.reasoning_tokens) parts.push(`из них размышлений ${tokensText(step.reasoning_tokens)}`);
-            if (step.finish_reason) parts.push(`конец: ${escapeHtml(step.finish_reason)}`);
+            // Код ответа без перевода читается как код: рядом с ним — его смысл
+            if (step.finish_reason) {
+                const meaning = FINISH_WORDS[String(step.finish_reason).toLowerCase()];
+                parts.push(`конец: ${escapeHtml(step.finish_reason)}` + (meaning ? ` (${meaning})` : ''));
+            }
             parts.push(step.tools ? 'с инструментом поиска' : 'без инструмента поиска');
             return parts.join(' · ');
         }
@@ -1691,9 +1707,14 @@ HTML_TEMPLATE = """
                 // Имя системного сообщения — то же слово «system»: второй раз
                 // оно не нужно, а у остальных оно говорит, кто именно говорил
                 + `${(m.name && m.name !== m.role) ? escapeHtml(m.name) + ' · ' : ''}${ROLE_WORDS[m.role] || ''}`
-                + `<span class="prompt-tokens">${tokensText(m.tokens)} токенов</span>`
+                // «0 токенов» — верный сигнал и ни капли смысла: по протоколу
+                // просьба о поиске приходит пустым текстом плюс полем tool_calls.
+                // Поэтому ноль назван нулём текста, а объяснение идёт строкой ниже
+                + `<span class="prompt-tokens">${Number(m.tokens || 0) ? tokensText(m.tokens) + ' токенов' : '0 токенов текста'}</span>`
                 + `<span class="prompt-num">${i + 1}/${messages.length}</span></div>`
-                + `<pre class="prompt-text">${escapeHtml(m.content || '')}</pre></div>`).join('');
+                + (m.note ? `<div class="prompt-note">${escapeHtml(m.note)}</div>` : '')
+                + (m.content ? `<pre class="prompt-text">${escapeHtml(m.content)}</pre>` : '')
+                + `</div>`).join('');
         }
 
         function promptRemovedHtml(removed) {
@@ -1761,13 +1782,17 @@ HTML_TEMPLATE = """
                 parts.push('<div class="prompt-line">✂️ что выбросила обрезка — самое раннее:</div>'
                     + promptRemovedHtml(data.removed));
             }
-            if (s.extra_messages) {
-                // Не «ход дописал», а кто и что: дописывают две вещи, и обе —
-                // наши (модель ничего в запрос не докладывает)
+            if ((data.added || []).length) {
+                // Не «ход дописал», а кто и что: дописывает та самая пара
+                // «прошу поиск + найденное», и делает это приложение, а не модель.
+                // Полных текстов здесь нет нарочно — они в хронологии выше
+                parts.push(`<div class="prompt-line">🔍 после первого запроса приложение дописало в этот ход <b>${data.added.length}</b> `
+                    + `сообщ. (${tokensText(s.extra_tokens)} токенов) — по паре на каждый поиск, плюс напоминания. `
+                    + `Текстов здесь нет нарочно: найденное стоит в хронологии выше, со своим весом</div>`);
+                parts.push(promptMessagesHtml(data.added));
+            } else if (s.extra_messages) {
                 parts.push(`<div class="prompt-line">🔍 после первого запроса приложение дописало в этот ход ещё <b>${s.extra_messages}</b> `
-                    + `сообщ. (${tokensText(s.extra_tokens)} токенов): строку «прошу поиск» и найденное по ней `
-                    + `(по паре на каждый поиск), а также напоминания от приложения — `
-                    + `все они видны в хронологии со своим весом</div>`);
+                    + `сообщ. (${tokensText(s.extra_tokens)} токенов) — все они видны в хронологии со своим весом</div>`);
             }
             parts.push('<div class="prompt-line"><b>Что вошло в запрос к модели целиком</b> — в том порядке, как это читала модель, и ровно так, как ход начинался (дальше приложение дописало найденное — см. хронологию):</div>');
             parts.push(promptMessagesHtml(data.messages));

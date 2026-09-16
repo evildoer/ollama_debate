@@ -583,6 +583,18 @@ BUGS = {
          '                f"{self.SEARCH_CALL_EXAMPLE} — приложение выполнит поиск "',
          '                ""'),
     ],
+    # «assistant · 0 токенов» был верным сигналом и ни капли смысла: по протоколу
+    # такой ход — пустой текст плюс поле tool_calls
+    "пустое сообщение снова не объясняет, чем оно полно": [
+        ("aitheatre/show.py",
+         '        "note": message_note(msg),',
+         '        "note": "",'),
+    ],
+    "код ответа вендора снова оставляют без перевода": [
+        ("aitheatre/show.py",
+         '        meaning = finish_meaning(step["finish_reason"])',
+         '        meaning = ""'),
+    ],
     "кругов хода снова жёстко восемь, а поисков разрешено больше": [
         ("aitheatre/ollama_api.py",
          "    max_iterations = max(8, min_searches + max_searches + max_forced_attempts + 2)",

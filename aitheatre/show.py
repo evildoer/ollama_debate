@@ -213,7 +213,9 @@ def ask_line(step: dict) -> str:
     if step.get("reasoning_tokens"):
         parts.append(f"из них размышлений {numbers_word(step['reasoning_tokens'])}")
     if step.get("finish_reason"):
-        parts.append(f"конец: {step['finish_reason']}")
+        # Код ответа без перевода читается как код: рядом с ним — его смысл
+        meaning = finish_meaning(step["finish_reason"])
+        parts.append(f"конец: {step['finish_reason']}" + (f" ({meaning})" if meaning else ""))
     parts.append("инструмент поиска отправлен" if step.get("tools")
                  else "без инструмента поиска")
     return ", ".join(parts)
@@ -319,10 +321,9 @@ def dump_turn_header(post_id: int, turn: dict) -> str:
     out.append(history_line(summary, budget))
     out.append("### Что вошло в запрос к модели\n")
     for index, message in enumerate(turn.get("messages") or [], 1):
-        out.append(f"- №{index} · {message.get('role')} · "
-                   f"{message.get('name') or '—'} · "
-                   f"{numbers_word(message.get('tokens'))} токенов")
-        out.append(quoted(message.get("content")))
+        out.append(message_line(index, message))
+        if message.get("content"):
+            out.append(quoted(message.get("content")))
     if summary.get("removed_messages"):
         out.append("\n**Что выбросила обрезка (самое раннее):**")
         for gone in turn.get("removed") or []:
@@ -332,9 +333,31 @@ def dump_turn_header(post_id: int, turn: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def message_line(index: int, message: dict) -> str:
+    """Одно сообщение запроса одной строкой — с объяснением, если текста нет.
+
+    Ноль токенов у сообщения — не пустое место, а сигнал: по протоколу OpenAI
+    просьба о поиске приходит пустым текстом плюс полем `tool_calls`. Поэтому
+    у такого сообщения названы и его поля со значениями, и что они значат.
+    """
+    weight = (f"{numbers_word(message.get('tokens'))} токенов"
+              if int(message.get("tokens") or 0) else "0 токенов текста")
+    line = (f"- №{index} · {message.get('role')} · "
+            f"{message.get('name') or '—'} · {weight}")
+    if message.get("note"):
+        line += f"\n  - {message['note']}"
+    return line
+
+
 def dump_turn_tail(post: dict, turn: dict) -> str:
-    """Конец записи о ходе: чем он кончился — репликой и прежней её версией."""
+    """Конец записи о ходе: что дописало приложение, чем ход кончился."""
     out = []
+    if turn.get("added"):
+        out.append("\n### Что приложение дописало в запрос по ходу дела\n")
+        out.append("Полных текстов здесь нет нарочно: найденное стоит в хронологии "
+                   "выше, вместе с формулировкой запроса и своим весом.\n")
+        for index, message in enumerate(turn["added"], 1):
+            out.append(message_line(index, message))
     if post.get("sketch"):
         out.append("\n### Сказано раньше — прежняя версия реплики\n")
         out.append(quoted(post["sketch"]))
@@ -481,12 +504,101 @@ def save_dump_entry(post: dict, turn: dict = None) -> None:
         return
     dump_write(dump_human_markdown(post))
 
+# Смысл кода ответа вендора словами: сам по себе он ничего не говорит, а ход
+# им и объясняется. `tool_calls` — та самая строка, которую видели у харитона:
+# сообщение есть, текста в нём ноль, и понять это можно было только рядом
+# с хронологией.
+FINISH_MEANINGS = {
+    "stop": "вендор считает, что модель договорила",
+    "length": "ответ оборвался по пределу вывода",
+    "tool_calls": "слов модель не сказала: она попросила вызвать инструмент",
+    "function_call": "слов модель не сказала: она попросила вызвать функцию",
+    "content_filter": "вендор вырезал содержимое своим фильтром",
+}
+
+
+def finish_meaning(reason: str = "") -> str:
+    """Что значит код ответа вендора — словами, а не «конец: tool_calls»."""
+    return FINISH_MEANINGS.get(str(reason or "").strip().lower(), "")
+
+
+# Поля сообщения, которые не текст, а другое: у протокола инструментов их три,
+# и как раз они оказываются у сообщения там, где текста нет вовсе
+_MESSAGE_FIELDS = ("tool_calls", "function_call", "tool_name", "tool_call_id")
+
+
+def _calls_summary(calls) -> str:
+    """Вызовы инструмента одной строкой: имя и запрос — «search_web «Сыктывкар...»»."""
+    written = []
+    for call in calls or []:
+        if not isinstance(call, dict):
+            continue
+        func = call.get("function") if isinstance(call.get("function"), dict) else call
+        name = str(func.get("name") or "?")
+        args = func.get("arguments")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (TypeError, ValueError):
+                args = {}
+        query = str((args or {}).get("query") or "") if isinstance(args, dict) else ""
+        written.append(f"{name} «{query}»" if query else name)
+    return ", ".join(written)
+
+
+def message_fields(msg: dict) -> list:
+    """Поля сообщения кроме текста — с их значениями: «tool_calls: 1 вызов — …»."""
+    found = []
+    for key in _MESSAGE_FIELDS:
+        value = msg.get(key)
+        if not value:
+            continue
+        if key in ("tool_calls", "function_call"):
+            calls = value if isinstance(value, list) else [value]
+            found.append(f"`{key}` = {len(calls)} вызов(ов): {_calls_summary(calls)}")
+        else:
+            found.append(f"`{key}` = {value}")
+    return found
+
+
+def message_note(msg: dict) -> str:
+    """Чем это сообщение полно, если текста в нём нет.
+
+    «assistant · харитон · 0 токенов» — верный сигнал (что-то было!) и ни капли
+    смысла: по протоколу OpenAI ход, целиком состоящий из просьбы о поиске, —
+    это пустой текст плюс поле `tool_calls`. Здесь сказано, какие поля в нём есть
+    с их значениями и что из этого следует.
+    """
+    filled = bool(str(msg.get("content") or "").strip())
+    fields = message_fields(msg)
+    # У ответа инструмента (роль tool или поле tool_name) объяснять надо другое:
+    # его тело — это найденное поиском, и лежит оно отдельно, в хронологии
+    if msg.get("tool_name") or msg.get("role") == "tool":
+        head = ("это не слова модели, а ответ инструмента поиска: тело сообщения — "
+                "найденное, и текст его стоит в хронологии, вместе с формулировкой "
+                "запроса" if filled
+                else "это ответ инструмента поиска, и тела текста в нём нет")
+        return head + (f" — {'; '.join(fields)}" if fields else "")
+    if filled:
+        return ""
+    if not fields:
+        return ("тела текста нет и других полей тоже — приложение отправило пустое "
+                "сообщение (это уже наша ошибка, а не хитрость протокола)")
+    if msg.get("tool_calls") or msg.get("function_call"):
+        head = ("тела текста нет, но сообщение не пустое: слова у модели "
+                "заменены вызовом инструмента —")
+    else:
+        head = "тела текста нет, но у сообщения есть поля —"
+    return f"{head} {'; '.join(fields)}"
+
+
 def _message_view(msg: dict) -> dict:
     """Сообщение в том виде, в каком его показывают: роль, говорящий, вес и текст.
 
     Токены считаются тем же счётом, каким приложение меряет историю: строка
     «запрос состоял из столько-то» должна сходиться с тем, чем резали,
-    иначе она врёт.
+    иначе она врёт. И у каждого сообщения есть `note` — чем оно полно, если
+    текста в нём нет (см. message_note).
     """
     content = msg.get("content", "") or ""
     return {
@@ -494,6 +606,7 @@ def _message_view(msg: dict) -> dict:
         "name": str(msg.get("name", "") or ""),
         "tokens": text.estimate_tokens(content),
         "content": content,
+        "note": message_note(msg),
     }
 
 
