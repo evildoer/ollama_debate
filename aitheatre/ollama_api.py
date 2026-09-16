@@ -863,7 +863,7 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         
         # Местный запрос тоже попадает в хронологию со своими метками времени:
         # у судьи на облаке и у судьи на Ollama ход должен читаться одинаково,
-        # и у обоих видно, что запрос ушёл и сколько в нём уехало
+        # и у обоих видно, что запрос ушёл и сколько в нём было
         cloud.journal_ask_start(report,
                                 tokens_in_est=cloud.messages_tokens(data.get("messages")),
                                 tools=bool(data.get("tools")),
@@ -959,7 +959,7 @@ def journal_search(report: dict, index: int, query: str, results: str,
     cloud.journal_push(report, {
         "kind": "search", "n": int(index), "query": query,
         "limit": int(limit), "results": results,
-        # Вес найденного — как и у всего остального в журнале: найденное уезжает
+        # Вес найденного — как и у всего остального в журнале: найденное уходит
         # к модели сверх истории и платится входными токенами
         "tokens": text.estimate_tokens(results),
         "t": time.time() if started is None else float(started),
