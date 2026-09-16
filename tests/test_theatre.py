@@ -3267,6 +3267,56 @@ class TestPlayKeptInDump(unittest.TestCase):
         self.assertEqual(self.session.conversation_history, [])
         self.assertFalse(self.session.resumed)
 
+    def test_the_models_hear_the_replies_of_the_returned_play(self):
+        """Продолжение — это разговор с прежними репликами, а не с чистого листа.
+
+        Иначе модель отвечала бы не на то, что говорилось на сцене, а в пустоту:
+        история собирается из тех же реплик, что вернулись в ленту
+        (см. start_show и build_messages_for_ai).
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            _, dump = self._play(folder)
+            self.session.posts = []
+            self.session.turn_log = {}
+            with mock.patch.object(settings, "DUMP_FILE", dump):
+                show.load_play_from_dump("continue")
+                self.session.start_show("Продолжение")
+            aloud = [p["content"] for p in self.session.conversation_history]
+            messages = self.session.build_messages_for_ai(self._participant(), 2)
+
+        self.assertIn("Вот ответ.", aloud,
+                      "реплика модели из прежнего спектакля должна стать историей")
+        self.assertIn("Сказано руками.", aloud, "и реплика человека тоже")
+        spoken = "\n".join(str(m.get("content") or "") for m in messages)
+        self.assertIn("Вот ответ.", spoken, "прежняя реплика не доехала до модели")
+        self.assertIn("Сказано руками.", spoken)
+
+    def test_the_dump_keeps_the_old_records_and_appends_the_continuation(self):
+        """ДАМП дописывается, а не переписывается: прежнее — это то же самое начало."""
+        with tempfile.TemporaryDirectory() as folder:
+            _, dump = self._play(folder)
+            before = dump.read_text(encoding="utf-8")
+            self.session.posts = []
+            self.session.turn_log = {}
+            with mock.patch.object(settings, "DUMP_FILE", dump):
+                show.load_play_from_dump("continue")
+                self.session.start_show("Продолжение")
+                show.start_dump("Продолжение", keep=self.session.resumed)
+                self.session.add_post("Живой", "human", "Сказано после занавеса.", 2,
+                                      gender="female")
+            written = dump.read_text(encoding="utf-8")
+            play = show.parse_dump(written)
+
+        self.assertIn("Формат записи: " + str(show.DUMP_FORMAT), written[:200],
+                      "шапка продолжения должна остаться прежней")
+        self.assertIn("**Продолжение спектакля:**", written)
+        self.assertLess(written.index("## 1 · "), written.index("**Продолжение спектакля:**"),
+                        "запись о продолжении должна идти после прежних реплик")
+        self.assertNotEqual(before, written)
+        self.assertEqual([p["id"] for p in play["posts"]], [1, 2, 3],
+                         "прежние реплики стёрлись или номер новой не продолжился")
+        self.assertIn("Сказано после занавеса.", play["posts"][-1]["content"])
+
     def test_the_portrait_comes_back_with_the_reply(self):
         """У вернувшейся реплики то же лицо: портрет назван в составе записи.
 
@@ -5787,15 +5837,32 @@ class TestRoutes(unittest.TestCase):
                          "в ленте должно стоять лицо из состава, а не из реплики")
 
     def test_start_reports_that_the_play_is_being_continued(self):
-        """Страница не должна стирать ленту, если спектакль доигрывается."""
+        """Доиграть прежний спектакль можно и из пульта, а не только по вопросу в консоли.
+
+        Странице надо при этом знать, что прежние реплики — свои: иначе она
+        стирала бы ленту перед продолжением (см. startDebate).
+        """
         self.session.posts.append(show.create_post(
             "Живой", "human", "Сказано раньше.", 1, gender="male"))
-        self.session.resume_ready = True
-        data = self.client.post("/api/start", json={"topic": "Продолжение"}).get_json()
+        data = self.client.post("/api/start",
+                                json={"topic": "Продолжение", "continue": True}).get_json()
 
         self.assertTrue(data["success"], data.get("error"))
         self.assertTrue(data["resumed"], "странице надо знать, что прежние реплики — свои")
         self.assertEqual(data["total_posts"], 1)
+        self.assertTrue(self.session.resumed)
+        self.assertFalse(self.session.resume_ready,
+                         "разрешение достаётся одному старту, а не всем следующим")
+
+    def test_a_plain_start_does_not_continue_anything(self):
+        """Без просьбы о продолжении старт — обычный: прежние реплики уходят."""
+        self.session.posts.append(show.create_post(
+            "Живой", "human", "Сказано раньше.", 1, gender="male"))
+        data = self.client.post("/api/start", json={"topic": "Новый"}).get_json()
+
+        self.assertTrue(data["success"], data.get("error"))
+        self.assertFalse(data["resumed"])
+        self.assertEqual(data["total_posts"], 0, "прежние реплики должны были уйти")
 
     def test_participants_get_explains_effective_options(self):
         data = self.client.get("/api/participants").get_json()
@@ -5805,6 +5872,98 @@ class TestRoutes(unittest.TestCase):
         for person in data["participants"]:
             if person.get("model") != "human":
                 self.assertIn("effective_options", person)
+
+
+# ------------------------------------------- доиграть прежний спектакль
+
+class TestContinuingAPlay(unittest.TestCase):
+    """Прежний спектакль можно доиграть: модели слышат сказанное, акт и цена идут дальше.
+
+    Доиграть — это не «показать ещё раз»: прежние реплики остаются в ленте,
+    уезжают моделям историей, акт нумеруется следующим, цена не обнуляется,
+    а ДАМП дописывается тем же файлом (см. show.start_show, start_dump(keep=True)).
+    """
+
+    # Прежний спектакль: ход модели с ценой и реплика живого участника
+    PLAY = (
+        "# ДАМП · 16.09.2026 22:01 · порт 5000\n\n"
+        "Формат записи: 4\n\n"
+        "**Тема:**\n> Прежний разговор\n\n"
+        "**Состав:** 🦊 Проверка ♀ · Участник · fake-model · — ‖ 🐺 Второй ♂ · Участник · fake-model · —\n\n"
+        "## 1 · 22:01 · 🦊 Проверка ♀ · fake-model · Участник · Акт 1 · ⏱ 1 мин · 💰 2,50 ₽\n\n"
+        "### 👤 Кто говорит и когда\n\n"
+        "**Кто:** **Проверка** ♀ · fake-model · Акт 1 · 22:01\n\n"
+        "### 💬 Реплика, которой ход кончился\n\n"
+        "> Прежнее слово модели.\n\n"
+        "## 2 · 22:02 · 🐺 Второй ♂ · human · Участник · Акт 1\n\n"
+        "Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
+        "> Сказано руками до занавеса.\n")
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.said, self.seen = [], []
+        for name, value in (
+            ("ask_model", mock.Mock(side_effect=self._answer)),
+            ("check_models_available",
+             mock.Mock(return_value={"ok": True, "missing": [], "error": None})),
+            ("unload_model", mock.Mock()),
+            ("unload_other_show_models", mock.Mock()),
+        ):
+            patcher = mock.patch.object(ollama_api, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.dump = Path(folder.name) / "damp.md"
+        self.dump.write_text(self.PLAY, encoding="utf-8")
+        patcher = mock.patch.object(settings, "DUMP_FILE", self.dump)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _answer(self, model, messages, participant_name, **kwargs):
+        self.seen.append([str(m.get("content") or "") for m in messages])
+        return f"{participant_name} говорит дальше.", 0, []
+
+    def returned_play(self) -> list:
+        """Прежний спектакль вернулся и ждёт продолжения — как после вопроса в консоли."""
+        self.assertEqual(show.load_play_from_dump("continue"), 2,
+                         "прежний спектакль не вернулся — продолжать нечего")
+        self.session.start_show("Прежний разговор")
+        return list(self.session.posts)
+
+    def test_the_continuation_is_played_as_the_next_act_and_keeps_the_bill(self):
+        played = self.returned_play()
+        self.assertEqual(self.session.current_round, 1, "акт из записи не прочитался")
+
+        def on_post(post):
+            self.said.append(post)
+            self.session.moderator_finished = True
+
+        with mock.patch("time.sleep"):
+            show.run_debate_thread("Прежний разговор", on_post=on_post)
+
+        self.assertTrue(self.said, "продолжение так и не заговорило")
+        self.assertEqual(self.said[0]["round"], 2,
+                         "продолжение сыграно как первый акт — прежние реплики будто пропали")
+        self.assertGreaterEqual(self.session.spent, 2.5,
+                                "цена прежнего спектакля не переехала")
+        self.assertEqual([p["display_name"] for p in self.session.posts][:len(played)],
+                         [p["display_name"] for p in played],
+                         "продолжение подменило прежние реплики")
+        self.assertIn("Прежнее слово модели.",
+                      "\n".join("\n".join(one) for one in self.seen),
+                      "модель не слышала прежнюю реплику")
+        self.assertIn("Сказано руками до занавеса.",
+                      "\n".join("\n".join(one) for one in self.seen))
+
+        written = self.dump.read_text(encoding="utf-8")
+        self.assertIn("**Продолжение спектакля:**", written)
+        self.assertIn("## 1 · 22:01", written, "прежние записи стёрлись из файла")
+        play = show.parse_dump(written)
+        self.assertEqual([p["id"] for p in play["posts"]], [1, 2, 3],
+                         "новая запись не дописалась в тот же файл")
+        self.assertEqual(play["round"], 2)
 
 
 # ---------------------------------------------------- лицо участника
@@ -6504,6 +6663,54 @@ class TestPageScript(unittest.TestCase):
         self.assertEqual(out[0], ["👰", "💃", "🦊", "🎭"],
                          "значки своего пола идут первыми, потом общие")
         self.assertEqual(out[1], ["🤴", "🧔", "🦊", "🎭"])
+
+    def test_the_page_returns_to_the_play_even_without_a_session_number(self):
+        """Лента из ДАМПа показывается и тогда, когда сессии уже нет.
+
+        Номер сессии заводит только старт спектакля, а прежний спектакль его
+        не имеет вовсе. Возвращаться при этом есть к чему: реплики лежат
+        в ДАМПе и приходят странице (см. tryRestoreSession). Иначе под занавесом
+        было пусто, а кнопка «Доиграть» — без ленты, к которой она относится.
+        """
+        restore = self._function("tryRestoreSession")
+        self.assertIn("data.total_posts", restore,
+                      "признак возврата — реплики, а не номер сессии")
+        self.assertNotIn("if (!data.session_id) return;", restore)
+        self.assertIn("playRestored", restore)
+        self.assertIn("updatePanel();", restore)
+
+    def test_the_curtain_offers_to_finish_the_returned_play(self):
+        """Доиграть прежний спектакль можно из пульта — и только когда есть что доигрывать.
+
+        Кнопка живёт под занавесом и зависит от того, что лента вернулась из ДАМПа
+        (см. playRestored): продолжать пустую сцену или только что сыгранный
+        спектакль нечем, а старт обязан попросить продолжение у сервера.
+        """
+        source = page.HTML_TEMPLATE
+        self.assertIn('id="continueBtn"', source)
+        self.assertIn("function continueShow", source)
+        panel = self._function("updatePanel")
+        self.assertIn("playRestored", panel,
+                      "кнопка должна зависеть от того, что это прежний спектакль")
+        self.assertIn("canContinue", panel)
+        start = self._function("startDebate")
+        self.assertIn("resumePlay", start, "старт должен уметь попросить продолжение")
+        self.assertIn("continue", start)
+        # Прежние реплики при продолжении остаются: стирается лента только
+        # в ветке обычного старта, и вынос очистки из неё — уже потеря реплик
+        self.assertIn("if (data.resumed)", start)
+        self.assertIn("data.total_posts", start)
+        self.assertLess(start.index("if (data.resumed)"), start.index("innerHTML = ''"),
+                        "лента должна очищаться только когда продолжения не просили")
+        # И признак прежнего спектакля ставится до отрисовки пульта: иначе под
+        # занавесом кнопки не видно, пока не придёт следующий опрос
+        status = self._function("applyStatus")
+        flags = status[status.index("showFinished = !!data.finished;"):
+                       status.index("if (data.waiting_for_human)")]
+        self.assertIn("playRestored", flags,
+                      "признак прежнего спектакля ставится вместе с остальными флагами")
+        self.assertLess(flags.index("playRestored"), flags.index("updatePanel();"),
+                        "флаги должны стоять до отрисовки пульта")
 
     def test_the_emoji_avatar_is_clickable_and_the_name_is_not_in_the_handler(self):
         """По эмодзи в ленте можно кликнуть — и имя уезжает в данные, а не в код.

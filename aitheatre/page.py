@@ -463,6 +463,10 @@ HTML_TEMPLATE = """
                             <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
                             <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
                             <button class="btn btn-secondary" id="newBtn" onclick="newShow()" style="display:none;">🎭 Новый спектакль</button>
+                            <!-- Доиграть прежний спектакль: кнопка появляется только под занавесом
+                                 и только если лента — из ДАМПа прошлого запуска (см. playRestored) -->
+                            <button class="btn btn-secondary" id="continueBtn" onclick="continueShow()" style="display:none;"
+                                    title="Прежние реплики останутся в ленте и станут историей для моделей: акт и цена продолжатся, а ДАМП допишется">↩ Доиграть прежний</button>
                         </div>
                     </div>
                 </div>
@@ -534,6 +538,9 @@ HTML_TEMPLATE = """
         let sectionsPhase = null;      // фаза пульта: настройка / спектакль идёт / занавес
         let turnSectionState = null;   // раскрыт ли раздел «Ваша реплика» на этом ходу
         let lastPostCount = 0;
+        // Занавес был не сейчас: лента вернулась из ДАМПа прошлого запуска
+        // (см. show.session.restored). По этому признаку пульт предлагает доиграть
+        let playRestored = false;
         let instructionsTick = 0;
         let defaultJudgePrompt = '';  // им заполняется пустое поле промпта судьи
         let mySessionId = null;        // id текущей сессии; следим за сменой на сервере
@@ -641,17 +648,22 @@ HTML_TEMPLATE = """
         
         // Восстановление активной сессии при загрузке страницы: спектакль идёт
         // (или уже отыгран) — возвращаемся к нему, а не начинаем новый.
+        //
+        // Признак того, что возвращаться есть к чему, — сами реплики, а не номер
+        // сессии: у прежнего спектакля, вернувшегося из ДАМПа, сессии уже нет
+        // (её заводит только старт), а лента есть — и без этого под занавесом
+        // было пусто, пока что-нибудь не дёрнет опрос вручную (см. load_play_from_dump)
         function tryRestoreSession() {
             fetch('/api/status?lastPostCount=0', {cache: 'no-store'})
                 .then(r => r.json())
                 .then(data => {
-                    if (!data.session_id) return;
                     if (!data.running && !data.finished) return;
-                    if (!data.running && !data.total_posts) return;
+                    if (!data.total_posts) return;
 
-                    mySessionId = data.session_id;
+                    mySessionId = data.session_id || null;
                     debateRunning = true;
                     showFinished = !!data.finished;
+                    playRestored = !!data.restored;
 
                     setTopicDisplay(data.topic);
                     if (data.topic) document.getElementById('topicInput').value = data.topic;
@@ -660,6 +672,7 @@ HTML_TEMPLATE = """
                     addNewPosts(data.new_posts);
                     lastPostCount = data.total_posts || lastPostCount;
 
+                    updatePanel();
                     if (data.running) startPolling();
                     updatePosts();
                 })
@@ -1403,10 +1416,21 @@ HTML_TEMPLATE = """
                 .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
         }
         
-        function startDebate() {
+        // «Доиграть прежний» — тот же старт, только с разрешением продолжить:
+        // прежние реплики в ленте — свои, и история для моделей начинается с них
+        // (см. /api/start и show.start_show)
+        function continueShow() {
+            if (confirm('Доиграть прежний спектакль? Прежние реплики останутся в ленте, акт и цена продолжатся.')) {
+                startDebate(true);
+            }
+        }
+
+        function startDebate(resume) {
             // Пустое поле — не ошибка: тема могла быть применена раньше и жить на сервере.
             // Пересылаем её только если поле заполнено, иначе берём ту, что уже есть
             const topic = document.getElementById('topicInput').value.trim();
+            const resumePlay = !!resume;
+            if (resumePlay) document.getElementById('continueBtn').disabled = true;
             document.getElementById('startBtn').disabled = true;
             
             // Сначала отправляем правки из формы, потом стартуем: состав живёт на сервере
@@ -1418,7 +1442,9 @@ HTML_TEMPLATE = """
             .then(data => {
                 if (!data.success) throw new Error(data.error || 'не удалось применить состав');
                 cast = data.participants || cast;
-                return fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(topic ? {topic: topic} : {}) });
+                const body = topic ? {topic: topic} : {};
+                if (resumePlay) body.continue = true;
+                return fetch('/api/start', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
             })
             .then(r => r.json())
             .then(data => {
@@ -1426,6 +1452,8 @@ HTML_TEMPLATE = """
                 if (data.session_id) mySessionId = data.session_id;
                 debateRunning = true;
                 showFinished = false;
+                playRestored = false;
+                document.getElementById('continueBtn').style.display = 'none';
                 finishRequested = false;
                 if (data.resumed) {
                     // Спектакль доигрывается: прежние реплики уже в ленте, и стирать
@@ -1452,6 +1480,7 @@ HTML_TEMPLATE = """
         function showStartError(message) {
             debateRunning = false;
             document.getElementById('startBtn').disabled = false;
+            document.getElementById('continueBtn').disabled = false;
             const box = document.getElementById('modelsWarning');
             if (box) { box.innerHTML = `⚠️ Не удалось начать спектакль: ${escapeHtml(message)}`; box.style.display = 'block'; }
             updatePanel();
@@ -1464,6 +1493,7 @@ HTML_TEMPLATE = """
             stopPolling();
             debateRunning = false;
             showFinished = false;
+            playRestored = false;
             finishRequested = false;
             lastPostCount = 0;
             mySessionId = null;
@@ -1494,10 +1524,15 @@ HTML_TEMPLATE = """
             const startBtn = document.getElementById('startBtn');
             const finishBtn = document.getElementById('finishBtn');
             const newBtn = document.getElementById('newBtn');
+            // Доиграть можно только то, что вернулось из ДАМПа: пустая сцена
+            // продолжать нечего (см. show.session.resumed)
+            const continueBtn = document.getElementById('continueBtn');
+            const canContinue = showFinished && playRestored;
             const title = document.getElementById('controlPanelTitle');
             if (debateRunning && !showFinished) {
                 startBtn.style.display = 'none';
                 newBtn.style.display = 'none';
+                continueBtn.style.display = 'none';
                 // Пока сервер не подтвердил занавес, повторно не показываем: иначе
                 // кнопка мелькала бы обратно, пока модель доигрывает реплику
                 finishBtn.style.display = finishRequested ? 'none' : 'inline-block';
@@ -1505,12 +1540,16 @@ HTML_TEMPLATE = """
             } else if (showFinished) {
                 startBtn.style.display = 'none';
                 newBtn.style.display = 'inline-block';
+                continueBtn.style.display = canContinue ? 'inline-block' : 'none';
                 finishBtn.style.display = 'none';
-                title.textContent = 'Режиссёрский пульт — занавес';
+                title.textContent = canContinue
+                    ? 'Режиссёрский пульт — занавес (прежний спектакль можно доиграть)'
+                    : 'Режиссёрский пульт — занавес';
             } else {
                 startBtn.style.display = 'inline-block';
                 startBtn.disabled = false;
                 newBtn.style.display = 'none';
+                continueBtn.style.display = 'none';
                 finishBtn.style.display = 'none';
                 title.textContent = 'Режиссёрский пульт — настройка';
             }
@@ -2402,6 +2441,10 @@ HTML_TEMPLATE = """
             // он должен сразу знать, что спектакль идёт, а не ждать нового старта
             debateRunning = true;
             showFinished = !!data.finished;
+            // И признак того, что лента вернулась из ДАМПа: от него зависит
+            // кнопка «Доиграть» (см. updatePanel), и она не должна ждать
+            // следующего опроса — иначе под занавесом её просто не видно
+            playRestored = !!data.restored;
             if (data.topic) setTopicDisplay(data.topic);
             updatePanel();
             if (data.waiting_for_human) {

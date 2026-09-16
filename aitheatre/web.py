@@ -393,11 +393,18 @@ def start():
     """
     Начать спектакль тем составом, который уже собран в сессии. Тело запроса может
     уточнить тему: {"topic": "..."} - остальное режиссёр всё равно правит через пульт.
+
+    "continue": true — доиграть прежний спектакль, вернувшийся из ДАМПа: прежние
+    реплики остаются в ленте и становятся историей для моделей, акт и цена
+    продолжаются. Это то же разрешение, которое даёт консольный вопрос при чужом
+    формате (см. show.load_play_from_dump), только из пульта.
     """
     if show.session.running:
         return jsonify({"success": False, "error": "Уже запущено"})
 
     data = request.get_json(silent=True) or {}
+    if data.get("continue"):
+        show.session.resume_ready = True
     topic = str(data.get("topic", "") or "").strip() or (show.session.topic or "").strip()
     if not topic:
         return jsonify({"success": False,

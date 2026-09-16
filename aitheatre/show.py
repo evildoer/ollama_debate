@@ -3794,7 +3794,9 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     # Продолжение спектакля пишется в тот же файл: прежние реплики —
     # это его же начало, и сносить их, чтобы записать заново, нечего
     start_dump(topic, keep=session.resumed)
-    print(f"  🗒  ДАМП спектакля: {settings.DUMP_FILE} (пишется заново на каждый спектакль)")
+    print(f"  🗒  ДАМП спектакля: {settings.DUMP_FILE}"
+          + (" (продолжение дописывается в тот же файл)" if session.resumed
+             else " (пишется заново на каждый спектакль)"))
     runtime_participants = session.runtime_participants
     print(f"👥 Участников в сессии: {len(runtime_participants)}")
     
@@ -3819,7 +3821,10 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
         else:
             print(f"  ⚠️  {display_name}: грим не подготовлен (будет эмодзи)")
     
-    round_num = 0
+    # Продолжение спектакля идёт дальше с того же акта, а не с первого: прежние
+    # реплики уже в ленте и уже прочитаны моделями, и акт 1 на свежую голову
+    # в середине разговора — это не нумерация, а путаница (см. session.resumed)
+    round_num = session.current_round if session.resumed else 0
     
     try:
         while True:

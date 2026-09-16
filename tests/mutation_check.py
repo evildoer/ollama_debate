@@ -1139,6 +1139,26 @@ BUGS = {
          '            str(p.get("avatar_url") or "").strip() or "—",',
          '            "—",'),
     ],
+    "продолжение спектакля снова начинается с первого акта": [
+        ("aitheatre/show.py",
+         "    round_num = session.current_round if session.resumed else 0",
+         "    round_num = 0"),
+    ],
+    "из пульта снова нельзя доиграть прежний спектакль": [
+        ("aitheatre/web.py",
+         "    if data.get(\"continue\"):\n        show.session.resume_ready = True",
+         "    if False:\n        show.session.resume_ready = True"),
+    ],
+    "страница снова стирает ленту перед продолжением": [
+        ("aitheatre/page.py",
+         "                if (data.resumed) {",
+         "                if (false) {"),
+    ],
+    "кнопка «Доиграть» снова не показывается под занавесом": [
+        ("aitheatre/page.py",
+         "            const canContinue = showFinished && playRestored;",
+         "            const canContinue = false;"),
+    ],
     "клик по эмодзи-аватару в ленте снова не работает": [
         ("aitheatre/page.py",
          """
