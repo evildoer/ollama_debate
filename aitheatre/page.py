@@ -105,6 +105,11 @@ HTML_TEMPLATE = """
            в конце строки и говорит, что реплика не кончилась */
         .post.streaming .post-text::after { content: '▍'; margin-left: 2px; animation: streamCaret 1s steps(2, start) infinite; }
         @keyframes streamCaret { to { visibility: hidden; } }
+        /* Ход, оборванный смертью процесса: реплики в записи нет вовсе — хвост
+           записи пишется в самом конце хода (см. show.dump_turn_tail). Пустая
+           рамка читалась бы как «модель промолчала», поэтому говорим словами */
+        .post-cut { color: #8a5a00; font-size: 15px; font-style: italic; border-left: 3px solid #e0c080; padding: 6px 0 6px 12px; }
+        body.dark .post-cut { color: #d7b070; border-left-color: #5a4a20; }
         /* Мысли модели: то, что она говорит сама с собой, пока не сказала вслух.
            Мелче и бледнее реплики: это не сказанное, а процесс. Свёрткой можно
            убрать их с глаз — но по умолчанию они видны, они уже оплачены */
@@ -2086,9 +2091,21 @@ HTML_TEMPLATE = """
                 + 'дописало уже после него (см. раздел выше).',
                 promptMessagesHtml(data.messages)));
             parts.push(turnBlock('💬 Реплика, которой ход кончился',
-                'То же, что в ленте этой репликой ниже: здесь — чтобы ход читался до конца, не отрываясь.',
-                `<pre class="prompt-text">${escapeHtml(data.answer || '')}</pre>`));
+                data.interrupted
+                    ? 'Реплика не сохранилась: ход оборвался до ответа. Всё, что он успел сделать, — в разделах выше.'
+                    : 'То же, что в ленте этой репликой ниже: здесь — чтобы ход читался до конца, не отрываясь.',
+                turnAnswerHtml(data)));
             return parts.join('');
+        }
+
+        // Чем ход кончился — или что ему не дали кончиться. У оборванного хода
+        // реплики нет вовсе: её не успели записать (см. show._parse_record),
+        // и пустой блок тут читался бы как «модель промолчала»
+        function turnAnswerHtml(turn) {
+            if (turn.interrupted && !(turn.answer || '').trim()) {
+                return '<div class="prompt-step">реплики нет: ход оборван — процесс завершился до ответа</div>';
+            }
+            return `<pre class="prompt-text">${escapeHtml(turn.answer || '')}</pre>`;
         }
 
         // Сколько строк длинного текста видно до раскрытия
@@ -2190,6 +2207,17 @@ HTML_TEMPLATE = """
                 + `<div class="prompt-body"></div></details>`;
         }
 
+        // Текст реплики в ленте. У хода, оборванного смертью процесса, текста нет
+        // вовсе — и сказать об этом надо словами, а не пустым местом
+        // (см. show._parse_record — признак post.interrupted)
+        function postTextHtml(post) {
+            if (post.interrupted && !(post.content_html || post.content)) {
+                return '<div class="post-cut">🔌 Ход оборван: процесс спектакля завершился до ответа, '
+                     + 'и реплика не сохранилась. Что модель успела сделать — видно в «ходе реплики» ниже.</div>';
+            }
+            return post.content_html || post.content || '';
+        }
+
         function addPost(post) {
             const postsDiv = document.getElementById('posts');
             // Черновик, чей ход уже закончился, уступает место настоящему посту:
@@ -2201,7 +2229,7 @@ HTML_TEMPLATE = """
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}<div class="post-text">${post.content_html || post.content}</div>${searchInfo}</div>`;
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${searchInfo}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
             // Отчёт о ходе спрашиваем только когда его открыли: событие toggle

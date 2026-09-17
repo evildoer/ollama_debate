@@ -5966,6 +5966,222 @@ class TestContinuingAPlay(unittest.TestCase):
         self.assertEqual(play["round"], 2)
 
 
+# -------------------------------------- спектакль, оборванный на середине
+
+class TestAPlayCutInHalf(unittest.TestCase):
+    """Спектакль, оборванный смертью процесса, читается как оборванный, а не как молчание.
+
+    Смерть процесса — это не ответ модели: ход обрывается там, где оборвался,
+    и хвост записи, а с ним и сама реплика, в файл не попадает (см.
+    dump_turn_tail — он пишется одним куском в самом конце хода). Пустая рамка
+    в ленте после этого читалась бы как «модель промолчала в этом ходу» —
+    и это была бы неправда про ход, который шёл и что-то делал.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.session.topic = "Оборванная тема"
+        for name, value in (
+            ("ask_model", mock.Mock()),
+            ("check_models_available",
+             mock.Mock(return_value={"ok": True, "missing": [], "error": None})),
+            ("unload_model", mock.Mock()),
+            ("unload_other_show_models", mock.Mock()),
+        ):
+            patcher = mock.patch.object(ollama_api, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.dump = Path(folder.name) / "damp.md"
+        patcher = mock.patch.object(settings, "DUMP_FILE", self.dump)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Процесс убит — значит, файлы он всё-таки закрыл: в тесте это делаем сами,
+        # иначе временная папка не удалится на Windows
+        self.addCleanup(show._dump_reset)
+
+    def _participant(self, name: str) -> dict:
+        return {"display_name": name, "model": "fake-model", "gender": "female",
+                "avatar_emoji": "🦊"}
+
+    def _cut_in_half(self) -> str:
+        """Спектакль с одной сказанной репликой и вторым ходом, убитым посреди него.
+
+        Ход обрывается тем же, чем и в жизни: модель просит запрос, начинает
+        думать — и процесс кончается (см. dump_step_sink: события ложатся
+        в файл сразу, поэтому они в нём и остаются).
+        """
+        now = time.time()
+
+        def live(model, messages, participant_name, **kwargs):
+            cloud.journal_push(kwargs["report"],
+                               {"kind": "ask", "n": 1, "t": now, "t_end": now + 2,
+                                "tokens_in": 100, "tokens_out": 20, "tools": False})
+            return "Сказано до обрыва.", 0, []
+
+        def die(model, messages, participant_name, **kwargs):
+            # События хода кладутся в журнал так же, как их кладёт шлюз:
+            # сначала запрос (он уходит до ответа), потом порция размышлений
+            cloud.journal_ask_start(kwargs["report"], tokens_in_est=3400, tools=True)
+            cloud.journal_thought(kwargs["report"], "Думаю, что сказать…")
+            raise RuntimeError("процесс упал посреди хода")
+
+        second = self._participant("Оборванный")
+        self.session.runtime_participants.extend([self._participant("Первый"), second])
+        self.session.sync_cast_media()
+        show.start_dump("Оборванная тема")
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=live)):
+            self.session.handle_ai_turn(self._participant("Первый"), 1)
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=die)):
+            with self.assertRaises(RuntimeError):
+                self.session.handle_ai_turn(second, 1)
+        return self.dump.read_text(encoding="utf-8")
+
+    def test_a_cut_turn_comes_back_as_cut_not_as_silence(self):
+        play = show.parse_dump(self._cut_in_half())
+
+        self.assertIsNotNone(play, "свой же ДАМП после обрыва не читается")
+        self.assertEqual(len(play["posts"]), 2,
+                         "оборванный ход пропал из спектакля целиком")
+        said, cut = play["posts"]
+        self.assertFalse(said["interrupted"], "закрытый ход оборванным не считается")
+        self.assertEqual(said["content"], "Сказано до обрыва.")
+        self.assertTrue(cut["interrupted"],
+                        "оборванный ход снова выглядит как реплика без слов")
+        self.assertEqual(cut["display_name"], "Оборванный")
+        self.assertEqual(cut["content"], "",
+                         "реплики у оборванного хода нет — в файл она не попала")
+        # А хронология — есть: ради неё ДАМП и пишется по ходу дела
+        steps = play["turns"][cut["id"]]["steps"]
+        self.assertEqual([step["kind"] for step in steps], ["ask", "thought"],
+                         "чем модель занималась до обрыва — должно читаться")
+        self.assertEqual(steps[1]["text"], "Думаю, что сказать…")
+        self.assertTrue(play["turns"][cut["id"]]["interrupted"])
+
+    def test_a_cut_turn_does_not_report_zero_tokens_on_input(self):
+        """У оборванного хода ввод назван настоящим числом, а не нулём.
+
+        Запрос уехал и был оплачен — значит, «0 токенов на ввод» было бы ложью
+        на месте числа. Знает его раздел «📐 место под историю»: он пишется
+        до запроса (см. history_line) — оттуда и берётся.
+        """
+        written = self._cut_in_half()
+        play = show.parse_dump(written)
+        summary = play["turns"][2]["summary"]
+
+        # Число — то самое, что написано в записи рядом: раздел «место под
+        # историю» пишется до запроса, и у оборванного хода он единственный
+        # свидетель (берём последнее — оно про второй, оборванный ход)
+        found = re.findall(r"\*\*Запрос к модели состоял из:\*\* (\d+) сообщ\. "
+                           r"\(([\d\s\u00a0]+) токенов\)", written)
+        self.assertEqual(len(found), 2, "у оборванного хода нет раздела «место под историю»")
+        messages, tokens = int(found[-1][0]), int(
+            found[-1][1].replace("\u00a0", "").replace(" ", ""))
+
+        self.assertEqual(summary["messages"], messages)
+        self.assertEqual(summary["tokens"], tokens)
+        self.assertGreater(summary["tokens"], 0,
+                           "ввод оборванного хода снова показывают нулём")
+        self.assertEqual(summary["asks"], 1)
+
+    def test_an_unfinished_request_keeps_its_search_flag(self):
+        """У запроса, который ещё шёл, признак «с инструментом поиска» не теряется.
+
+        У такого запроса числа вендора не пришли, и разбор брал только наш счёт —
+        а признак инструмента терялся по дороге: в ленте стояло «без инструмента
+        поиска» про запрос, который уехал с ним, а в файле — «с». Одно и то же
+        событие говорило разное в двух местах.
+        """
+        play = show.parse_dump(self._cut_in_half())
+        ask = next(step for step in play["turns"][2]["steps"] if step["kind"] == "ask")
+
+        self.assertIs(ask["tools"], True,
+                      "признак инструмента у незакрытого запроса снова потерян")
+        self.assertEqual(ask["tokens_in_est"], 3400,
+                         "наш счёт запроса — единственное, что о нём известно")
+
+    def test_a_closed_turn_still_counts_its_own_way(self):
+        """У закрытого хода числа по-прежнему считаются по его частям.
+
+        Место под историю — второй свидетель, а не первый: для хода, который
+        дошёл до конца, и сообщения, и их вес читаются из самого запроса.
+        """
+        play = show.parse_dump(self._cut_in_half())
+        restored = play["turns"][1]["summary"]
+        original = self.session.turn_report(1)["summary"]
+
+        self.assertEqual(restored["messages"], original["messages"])
+        self.assertEqual(restored["tokens"], original["tokens"],
+                         "вес запроса должен считаться по самому запросу")
+
+    def test_a_cut_turn_is_not_heard_as_a_reply_of_the_show(self):
+        """Продолжение слышит сказанное, а оборванный ход ему не пересказывают.
+
+        Пустая реплика в истории — это не «модель молчала», а наша выдумка:
+        продолжать разговор надо с того, что было сказано (см. start_show).
+        """
+        self.dump.write_text(self._cut_in_half(), encoding="utf-8")
+        self.assertEqual(show.load_play_from_dump("continue"), 2)
+        self.session.start_show("Оборванная тема")
+
+        self.assertEqual([one["content"] for one in self.session.conversation_history],
+                         ["Сказано до обрыва."],
+                         "оборванный ход уехал моделям как пустая реплика")
+
+    def test_a_dump_without_a_single_reply_says_so(self):
+        """Файл нашего формата без реплик — это не чужой формат, и сказать надо так.
+
+        Так выглядит спектакль, убитый до первой реплики: тема и состав в шапке
+        есть, а читать нечего. «Записан не нашим форматом» послало бы искать
+        причину не там, где она есть.
+        """
+        self.dump.write_text(
+            "# ДАМП · 17.09.2026 23:00 · порт 5000\n\n"
+            f"Формат записи: {show.DUMP_FORMAT}\n\n"
+            "**Тема:**\n> Оборванная тема\n\n"
+            "**Состав:** 🦊 Проверка ♀ · Участник · fake-model · —\n",
+            encoding="utf-8")
+        shown = io.StringIO()
+        with mock.patch.object(sys, "stdout", shown):
+            self.assertEqual(show.load_play_from_dump(), 0)
+
+        said = shown.getvalue()
+        self.assertIn("нет ни одной реплики", said)
+        self.assertNotIn("не нашим форматом", said,
+                         "о своём файле сказано как о чужом")
+
+    def test_a_leftover_piece_of_a_crashed_fix_does_not_stay(self):
+        """Временный файл правки — след смерти посреди самой правки строки (см. _dump_replace_line).
+
+        В нём лежит переписанный файл, до которого правка не доехала: сам спектакль
+        от этого цел, а вот место в папке театра он занимает зря.
+        """
+        stale = self.dump.with_name(self.dump.name + ".fix")
+        stale.write_text("недописанная правка", encoding="utf-8")
+        show.start_dump("Оборванная тема")
+
+        self.assertFalse(stale.exists(), "осиротевшая правка осталась в папке театра")
+        self.assertTrue(self.dump.exists(), "а сам ДАМП должен остаться")
+
+    def test_a_human_reply_is_never_called_interrupted(self):
+        """У реплики человека разделов нет вовсе — и оборванной она быть не может."""
+        self.dump.write_text(
+            "# ДАМП · 17.09.2026 23:00 · порт 5000\n\n"
+            f"Формат записи: {show.DUMP_FORMAT}\n\n"
+            "**Тема:**\n> Оборванная тема\n\n"
+            "**Состав:** 🦊 Живой ♀ · Участник · human · —\n\n"
+            "## 1 · 23:00 · 🦊 Живой ♀ · human · Участник · Акт 1\n\n"
+            "Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
+            "> Сказано руками.\n",
+            encoding="utf-8")
+        play = show.parse_dump(self.dump.read_text(encoding="utf-8"))
+
+        self.assertEqual(play["posts"][0]["content"], "Сказано руками.")
+        self.assertFalse(play["posts"][0]["interrupted"])
+
+
 # ---------------------------------------------------- лицо участника
 
 class TestAvatarBelongsToTheCast(unittest.TestCase):
@@ -6450,6 +6666,41 @@ class TestPageScript(unittest.TestCase):
         self.assertNotIn("заминок", mute,
                          "общего «заминок» больше нет: оно ни о чём не говорит")
 
+    def test_the_reply_section_of_a_cut_turn_says_what_happened(self):
+        """Раздел «чем ход кончился» у оборванного хода не пустует.
+
+        Реплики у него нет вовсе — и пустое место в этом разделе читалось бы как
+        «модель промолчала». Проверяю в node: то же, что уедет в браузер.
+        """
+        out = self._run_page(("escapeHtml", "turnAnswerHtml"),
+                             "turnAnswerHtml({interrupted: true, answer: ''})",
+                             "turnAnswerHtml({interrupted: false, answer: '<b>да</b>'})")
+
+        self.assertIn("оборван", out[0].lower())
+        self.assertNotIn("prompt-text", out[0], "пустой реплики рисовать нечего")
+        self.assertIn("да", out[1], "реплика закрытого хода должна остаться как была")
+
+    def test_a_cut_turn_says_so_instead_of_showing_nothing(self):
+        """У оборванного хода в ленте не пусто, а сказано словами.
+
+        Реплики у такого хода нет вовсе (её не успели записать), и пустая рамка
+        читалась бы как «модель промолчала». Проверяю не строку в шаблоне,
+        а сам текст поста — тем же кодом, который уедет в браузер.
+        """
+        out = self._run_page(
+            ("postTextHtml",),
+            "postTextHtml({interrupted: true, content: '', content_html: ''})",
+            "postTextHtml({interrupted: false, content_html: '<p>Слово модели</p>'})",
+            "postTextHtml({interrupted: true, content: 'Половина ответа'})")
+
+        self.assertIn("оборван", out[0].lower(), "об оборванном ходе не сказано")
+        self.assertIn("ходе реплики", out[0],
+                      "надо сказать, где искать остальное: хронология сохранилась")
+        self.assertEqual(out[1], "<p>Слово модели</p>",
+                         "обычная реплика должна остаться как была")
+        self.assertEqual(out[2], "Половина ответа",
+                         "то, что всё-таки уцелело, подменять отпиской нельзя")
+
     def test_the_heading_of_a_dump_record_repeats_the_summary_of_the_page(self):
         """Шапка записи в файле — та же сводка, что свёрнутая строка в ленте.
 
@@ -6560,7 +6811,7 @@ class TestPageScript(unittest.TestCase):
         script += "\n" + "\n".join(self._function(name) for name in (
             "escapeHtml", "tokensText", "durationText", "stepClock", "turnAskText",
             "promptMessagesHtml", "promptRemovedHtml", "thinkingBlockHtml",
-            "addedPurpose", "turnBlock", "turnBodyHtml"))
+            "addedPurpose", "turnBlock", "turnAnswerHtml", "turnBodyHtml"))
         script += f"\nconsole.log(turnBodyHtml({payload}));"
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
                                         encoding="utf-8") as handle:

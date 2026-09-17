@@ -1159,6 +1159,43 @@ BUGS = {
          "            const canContinue = showFinished && playRestored;",
          "            const canContinue = false;"),
     ],
+    "оборванный ход снова читается как молчание": [
+        ("aitheatre/show.py",
+         '    interrupted = "answer" not in sections',
+         "    interrupted = False"),
+    ],
+    "страница снова показывает оборванный ход пустым": [
+        ("aitheatre/page.py",
+         "            if (post.interrupted && !(post.content_html || post.content)) {",
+         "            if (false) {"),
+    ],
+    "о своём файле без реплик снова говорят как о чужом формате": [
+        ("aitheatre/show.py",
+         "        if readable:\n            print(f\"  🗒  В {settings.DUMP_FILE.name} нет ни одной реплики — \"",
+         "        if False:\n            print(f\"  🗒  В {settings.DUMP_FILE.name} нет ни одной реплики — \""),
+    ],
+    "у незакрытого запроса снова теряется признак инструмента": [
+        ("aitheatre/show.py",
+         '        found = re.search(rf"наш счёт ≈({_GROUPED}) токенов", body)\n'
+         '        if found:\n'
+         '            step["tokens_in_est"] = _as_int(found.group(1))\n'
+         '    else:',
+         '        found = re.search(rf"наш счёт ≈({_GROUPED}) токенов", body)\n'
+         '        if found:\n'
+         '            step["tokens_in_est"] = _as_int(found.group(1))\n'
+         '        return step\n'
+         '    else:'),
+    ],
+    "раздел о реплике оборванного хода снова пустует": [
+        ("aitheatre/page.py",
+         "            if (turn.interrupted && !(turn.answer || '').trim()) {",
+         "            if (false) {"),
+    ],
+    "осиротевшая правка ДАМПа снова остаётся в папке театра": [
+        ("aitheatre/show.py",
+         "        stray_fix.unlink()",
+         "        stray_fix.exists()"),
+    ],
     "клик по эмодзи-аватару в ленте снова не работает": [
         ("aitheatre/page.py",
          """

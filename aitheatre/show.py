@@ -928,7 +928,16 @@ def start_dump(topic: str, keep: bool = False) -> None:
     дописывается). Так бывает, когда спектакль вернули из ДАМПа чужого формата
     и решили доиграть (см. load_play_from_dump).
     """
-    if keep and Path(settings.DUMP_FILE).exists():
+    # Осиротевший временный файл — след смерти процесса в самой середине правки
+    # строки (см. _dump_replace_line): правка в нём не доехала до файла, а он
+    # остался. Спектакль от этого не страдает, но и хранить его незачем
+    dump_path = Path(settings.DUMP_FILE)
+    stray_fix = dump_path.with_name(dump_path.name + ".fix")
+    try:
+        stray_fix.unlink()
+    except OSError:
+        pass
+    if keep and dump_path.exists():
         # Состав записывается заново: доигрывать можно другим составом,
         # а лицо участника — часть записи (см. cast_line)
         when = time.strftime("%d.%m.%Y %H:%M")
@@ -1113,17 +1122,21 @@ def _ask_body(body: str) -> dict:
         return {"error": body[len("не прошёл — "):]}
     step = {}
     if "числа токенов вендор не сообщил" in body:
+        # Запрос, который ещё шёл (или оборвался): числа вендора появятся только
+        # с ответом, а до тех пор есть один наш счёт. Дальше разбор общий —
+        # именно тут терялся признак «с инструментом поиска», и в ленте стояло
+        # «без инструмента» про запрос, который уехал с ним
         found = re.search(rf"наш счёт ≈({_GROUPED}) токенов", body)
         if found:
             step["tokens_in_est"] = _as_int(found.group(1))
-        return step
-    for key, pattern in (("tokens_in", rf"ввод ({_GROUPED})"),
-                         ("tokens_in_est", rf"наш счёт ≈({_GROUPED})\)"),
-                         ("tokens_out", rf"→ вывод ({_GROUPED}) токенов"),
-                         ("reasoning_tokens", rf"из них размышлений ({_GROUPED})")):
-        found = re.search(pattern, body)
-        if found:
-            step[key] = _as_int(found.group(1))
+    else:
+        for key, pattern in (("tokens_in", rf"ввод ({_GROUPED})"),
+                             ("tokens_in_est", rf"наш счёт ≈({_GROUPED})\)"),
+                             ("tokens_out", rf"→ вывод ({_GROUPED}) токенов"),
+                             ("reasoning_tokens", rf"из них размышлений ({_GROUPED})")):
+            found = re.search(pattern, body)
+            if found:
+                step[key] = _as_int(found.group(1))
     found = re.search(r"конец: (\S+)", body)
     if found:
         step["finish_reason"] = found.group(1)
@@ -1257,11 +1270,16 @@ def _parse_place(lines: list) -> dict:
             budget["system_tokens"] = _as_int(found.group("system"))
             budget["kept_tokens"] = _as_int(found.group("kept"))
             budget["history_tokens"] = _as_int(found.group("tokens"))
+            # А это числа самого запроса — они живут в этом же разделе, потому
+            # что он пишется до запроса: у хода, оборванного посреди него,
+            # другого свидетеля нет (см. _parse_record)
             budget["messages_after"] = int(found.group("scene"))
             # Сколько было до обрезки — не отдельным числом, а суммой:
             # выброшенное и оставленное — и есть вся сцена
             budget["messages_before"] = (budget["messages_after"]
                                          + _as_int(found.group("removed")))
+            budget["request_messages"] = int(found.group("messages"))
+            budget["request_tokens"] = budget["history_tokens"]
     return budget
 
 
@@ -1370,8 +1388,13 @@ def restored_summary(turn: dict, seconds=None, spent=None) -> dict:
 
 
 def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str,
-               summary, queries: list, faces: dict = None) -> dict:
+               summary, queries: list, faces: dict = None,
+               interrupted: bool = False) -> dict:
     """Реплика ленты из разобранной записи — теми же полями, что create_post.
+
+    interrupted=True — ход оборвала смерть процесса, а не модель (см. _parse_record):
+    у такой записи нет хвоста, а значит и реплики; в ленте это надо сказать словами,
+    иначе пустая рамка читалась бы как «модель промолчала в этом ходу».
 
     Лицо берётся у состава из шапки файла (см. parse_cast_line), а если имени
     там нет — у состава, который сейчас в пульте: имя то же — значит и лицо то же.
@@ -1409,6 +1432,7 @@ def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str
         "role_name": ROLE_NAMES.get(role, "Участник"),
         "gender": gender,
         "gender_symbol": gender_symbol(gender),
+        "interrupted": bool(interrupted),
     }
 
 
@@ -1431,6 +1455,12 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> di
                                    _last_quoted(body) or _section_text(body),
                                    "", "", None, [], faces),
                 "turn": None}
+    # Записи без раздела «💬 Реплика, которой ход кончился» обрывает не модель,
+    # а смерть процесса: хвост записи пишется одним куском в самом конце хода
+    # (см. dump_turn_tail), и у хода, убитого посреди генерации, этого раздела
+    # просто нет. Молчащей модели тут быть не может: даже про пустой ответ театр
+    # говорит словами, и слова эти лежат в том же разделе
+    interrupted = "answer" not in sections
     steps = _parse_steps(sections.get("history") or [])
     turn = {
         "who": who,
@@ -1448,9 +1478,19 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> di
     }
     turn["summary"] = restored_summary(
         turn, seconds if seconds is not None else _record_seconds(body), spent)
+    if interrupted:
+        # Раздела «📨 первый запрос» в оборванной записи нет, и считать сообщения
+        # не по чему — но их знает раздел «📐 место под историю»: он пишется
+        # ДО запроса. Без этого в свёрнутой строке хода стояло бы «0 токенов
+        # на ввод» про запрос, который на самом деле уехал — то есть ложь на месте
+        # числа (в файле рядом стоит настоящее: см. history_line)
+        budget = turn.get("budget") or {}
+        turn["summary"]["messages"] = int(budget.get("request_messages") or 0)
+        turn["summary"]["tokens"] = int(budget.get("request_tokens") or 0)
     queries = [step.get("query") or "" for step in steps if step.get("kind") == "search"]
     post = _post_dict(post_id, who, turn["answer"], turn["sketch"], turn["thinking"],
-                      turn["summary"], queries, faces)
+                      turn["summary"], queries, faces, interrupted=interrupted)
+    turn["interrupted"] = interrupted
     return {"post": post, "turn": turn}
 
 
@@ -1609,8 +1649,16 @@ def load_play_from_dump(mode: str = None) -> int:
         return 0
     play = parse_dump(written, tolerant=not readable)
     if not play:
-        print(f"  ⚠️  Прежний спектакль не возвращается: {settings.DUMP_FILE.name} "
-              f"записан не нашим форматом (ожидается {DUMP_FORMAT}), сцена будет пустой")
+        # Файл нашего формата без единой записи — это не чужой формат, а спектакль,
+        # убитый до первой реплики (например, посреди хода модератора): в шапке темы
+        # и состава хватает, а читать нечего. Сказать про него «чужого формата»
+        # значило бы соврать — и послать искать причину не там, где она есть
+        if readable:
+            print(f"  🗒  В {settings.DUMP_FILE.name} нет ни одной реплики — "
+                  f"сцена пустая, прошлый спектакль оборвался в самом начале")
+        else:
+            print(f"  ⚠️  Прежний спектакль не возвращается: {settings.DUMP_FILE.name} "
+                  f"записан не нашим форматом (ожидается {DUMP_FORMAT}), сцена будет пустой")
         return 0
     session.posts = play["posts"]
     session.turn_log = play["turns"]
