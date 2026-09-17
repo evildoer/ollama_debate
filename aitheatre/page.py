@@ -632,6 +632,7 @@ HTML_TEMPLATE = """
                 // а не через три секунды. Пустое состояние не принимаем — иначе
                 // до первого спектакля оно «оживило» бы пустой театр
                 socket.on('status_update', data => {
+                    if (noteServerBoot(data)) return;
                     if (!data.running && !data.finished && !data.total_posts) return;
                     applyStatus(data);
                 });
@@ -651,6 +652,24 @@ HTML_TEMPLATE = """
             }
         }
         
+        // Театр перезапустили — а открытая страница осталась от прежнего
+        // процесса: на ней прежний спектакль, прежняя вёрстка и прежняя лента,
+        // хотя в консоли вы уже выбрали другое (браузер ту же вкладку сам
+        // не обновляет). Поэтому у состояния есть номер запуска
+        // (см. web.SERVER_BOOT): разошёлся с тем, что помнит страница, —
+        // значит страница устарела целиком, и собирать её надо заново.
+        // Проверка стоит до всех остальных: у нового процесса сцена пуста,
+        // и по «пусто» про перезапуск уже не узнать
+        let serverBootId = null;
+
+        function noteServerBoot(data) {
+            const id = data && data.boot_id;
+            if (!id) return false;
+            if (serverBootId === null) { serverBootId = id; return false; }
+            if (serverBootId !== id) { location.reload(); return true; }
+            return false;
+        }
+
         // Восстановление активной сессии при загрузке страницы: спектакль идёт
         // (или уже отыгран) — возвращаемся к нему, а не начинаем новый.
         //
@@ -662,6 +681,7 @@ HTML_TEMPLATE = """
             fetch('/api/status?lastPostCount=0', {cache: 'no-store'})
                 .then(r => r.json())
                 .then(data => {
+                    if (noteServerBoot(data)) return;
                     if (!data.running && !data.finished) return;
                     if (!data.total_posts) return;
 
@@ -2455,6 +2475,7 @@ HTML_TEMPLATE = """
         // роспись жила внутри опроса, и состояние пульта зависело от того, кто
         // его принёс — теперь путь один
         function applyStatus(data) {
+            if (noteServerBoot(data)) return;
             statusFailures = 0;
             // Сессия сменилась на сервере — сбросить локальный UI.
             if (data.session_id) {

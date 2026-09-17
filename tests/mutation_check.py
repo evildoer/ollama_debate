@@ -1081,8 +1081,24 @@ BUGS = {
     ],
     "о чужом формате снова не спрашивают, а догадываются": [
         ("aitheatre/show.py",
-         '        mode = "read" if readable else ask_about_dump(version)',
+         '        mode = "read" if readable else ask_about_dump(version, written)',
          '        mode = "read"'),
+    ],
+    "в вопросе о чужом формате снова не видно, что в файле": [
+        ("aitheatre/show.py",
+         "    preview = dump_preview(written)\n"
+         "    if preview:\n"
+         '        print(f"   В файле: {preview}.")',
+         "    preview = ''"),
+    ],
+    "прогон проверок снова пишет в экземпляр режиссёра": [
+        ("tests/test_theatre.py",
+         "    for name in (\"DUMP_FILE\", \"SETTINGS_FILE\", \"VRAM_MEASUREMENTS_FILE\"):\n"
+         "        SAVED_FILES[name] = getattr(settings, name)\n"
+         "        setattr(settings, name, Path(SCRATCH_DIR.name) / getattr(settings, name).name)",
+         "    for name in (\"DUMP_FILE\",):\n"
+         "        SAVED_FILES[name] = getattr(settings, name)\n"
+         "        setattr(settings, name, Path(SCRATCH_DIR.name) / getattr(settings, name).name)"),
     ],
     "чужую запись снова читают наполовину — без реплик": [
         ("aitheatre/show.py",
@@ -1257,6 +1273,26 @@ BUGS = {
         ("aitheatre/page.py",
          "                    if (data.replay) {",
          "                    if (false) {"),
+    ],
+    "состояние снова не несёт номера запуска театра": [
+        ("aitheatre/web.py",
+         '        "boot_id": SERVER_BOOT,',
+         '        "boot_id": None,'),
+    ],
+    "перезапуск театра снова не видит открытая страница": [
+        ("aitheatre/page.py",
+         "                    if (noteServerBoot(data)) return;",
+         "                    if (false) return;"),
+    ],
+    "с занятым портом снова открывают браузер на чужой спектакль": [
+        ("aitheatre/web.py",
+         "    if not busy:\n",
+         "    if True:\n"),
+    ],
+    "о занятом порте снова молчат, и браузер открывается": [
+        ("aitheatre/web.py",
+         '        print("🌐 Браузер не открываю: по этому адресу отвечает прежний экземпляр.")',
+         '        print("")'),
     ],
 }
 

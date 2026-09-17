@@ -176,15 +176,25 @@ def setUpModule():
     SAVED_SETTINGS["TURN_PAUSE"] = settings.TURN_PAUSE
     settings.TURN_PAUSE = 0
 
-    global SCRATCH_DIR, SAVED_DUMP_FILE
+    # И третье, главное: файлы спектакля уводим во временную папку ЦЕЛИКОМ.
+    # Сцена, правила, тема и ДАМП лежат в папке экземпляра рядом с проектом,
+    # а экземпляр в это время может быть открыт у режиссёра. Проверка, которая
+    # сохраняет сцену, писала бы в его файл: пропали бы имена, модели, личные
+    # инструкции и тема — и выглядело бы это как «настройки сами сбросились»
+    # от одного прогона проверок. ДАМП так уводился и раньше, а сцена — нет,
+    # и именно ею затирало живой спектакль (см. test_the_run_does_not_write_into...).
+    global SCRATCH_DIR, SAVED_FILES
     SCRATCH_DIR = tempfile.TemporaryDirectory()
-    SAVED_DUMP_FILE = settings.DUMP_FILE
-    settings.DUMP_FILE = Path(SCRATCH_DIR.name) / "damp.md"
+    SAVED_FILES = {}
+    for name in ("DUMP_FILE", "SETTINGS_FILE", "VRAM_MEASUREMENTS_FILE"):
+        SAVED_FILES[name] = getattr(settings, name)
+        setattr(settings, name, Path(SCRATCH_DIR.name) / getattr(settings, name).name)
 
 
 def tearDownModule():
     """После прогона возвращаем настройки как были и убираем временную папку."""
-    settings.DUMP_FILE = SAVED_DUMP_FILE
+    for name, value in SAVED_FILES.items():
+        setattr(settings, name, value)
     for name, value in SAVED_SETTINGS.items():
         setattr(settings, name, value)
     SCRATCH_DIR.cleanup()
@@ -737,6 +747,22 @@ class TestInstanceFiles(unittest.TestCase):
                          "временные файлы живут в подпапке, а не россыпью в корне проекта")
         self.assertNotEqual(one[0].parent, settings.PROJECT_ROOT)
 
+    def test_the_run_does_not_write_into_the_theatre_where_i_am_playing(self):
+        """Прогон проверок не трогает экземпляр, который открыт у режиссёра.
+
+        Сцена, правила, тема и ДАМП живут в папке экземпляра рядом с проектом,
+        и проверка, которая сохраняет сцену, затирала бы тот театр, который
+        прямо сейчас идёт в браузере: от одного прогона пропали бы имена,
+        модели, личные инструкции и тема (так и случилось — файл экземпляра
+        переписался «Оборванной темой» и проверочными местами). Все файлы
+        набора уводятся во временную папку (см. setUpModule).
+        """
+        for name in ("SETTINGS_FILE", "DUMP_FILE", "VRAM_MEASUREMENTS_FILE"):
+            path = getattr(settings, name).resolve()
+            self.assertNotIn(settings.INSTANCE_ROOT.resolve(), path.parents,
+                             f"{name} снова смотрит в экземпляр режиссёра: "
+                             f"прогон проверок затрёт его сцену")
+
     def test_the_old_files_move_into_the_instance_folder(self):
         """Файлы прежних запусков переносятся в папку экземпляра.
 
@@ -859,6 +885,22 @@ class TestInstanceFiles(unittest.TestCase):
         blind = "\n".join(web_app.port_conflict_notice(5000, []))
         self.assertIn("netstat -ano | findstr :5000", blind,
                       "без номеров надо дать команду, которой их ищут")
+
+    def test_a_busy_port_does_not_open_the_browser_on_someone_elses_show(self):
+        """При занятом порте браузер не открывают: он показал бы чужой спектакль.
+
+        Соединения отдаются тому, кто занял порт раньше. Открытый браузер
+        показал бы его страницу — и всё, что выбрано в консоли при запуске
+        («открыть прежний спектакль на чтение», «начать с пустой сцены»),
+        выглядело бы несделанным: на экране‑то чужое. Экземпляр при этом
+        поднимается как и раньше — просто молча ждёт своей очереди.
+        """
+        source = Path(web_app.__file__).read_text(encoding="utf-8")
+        self.assertIn("    if not busy:\n"
+                      "        threading.Timer(1.5, lambda: webbrowser.open(",
+                      source, "браузер открывается только когда порт наш")
+        self.assertIn("Браузер не открываю", source,
+                      "и об этом надо сказать вслух, а не молчать")
 
     def test_the_server_plays_on_the_port_it_was_given(self):
         """Порт из аргумента доходит и до сервера, и до браузера, и до файлов."""
@@ -3214,6 +3256,32 @@ class TestPlayKeptInDump(unittest.TestCase):
                     mock.patch.object(settings, "AVATAR_DIR", Path(folder)):
                 self.assertEqual(show.load_play_from_dump("read"), 2,
                                  "согласие читать чужую запись должно вернуть реплики")
+
+    def test_the_question_names_what_is_in_the_file(self):
+        """«Открыть прежний спектакль» — не вслепую: в вопросе видно, что открывают.
+
+        Решается это числами — сколько реплик, каких актов и о чём, — и без них
+        вариант [ч] ничем не отличается от гадания. Тема берётся из раздела
+        «Тема», а если его нет (так писали записи прежних версий) — из шапки
+        файла (см. dump_preview).
+        """
+        stranger = (
+            "# ДАМП · 01.09.2026 12:00 · Прежний спектакль про чай\n\n"
+            "## 1 · 10:00 · 🦊 Мария ♀ · fake-model · Участник · Акт 1\n\n"
+            "### Реплика\n\n> Сказано раз.\n\n"
+            "## 2 · 10:05 · 🦊 Пётр ♂ · fake-model · Участник · Акт 1\n\n"
+            "### Реплика\n\n> Сказано дважды.\n")
+        shown = io.StringIO()
+        with mock.patch.object(sys, "stdin", io.StringIO("")), \
+                mock.patch.object(sys, "stdout", shown):
+            show.ask_about_dump(7, stranger)
+
+        text = shown.getvalue()
+        self.assertIn("В файле: реплик 2, актов 1", text,
+                      "в вопросе не видно, сколько реплик и актов открывают")
+        self.assertIn("про чай", text, "о чём запись — тоже часть вопроса")
+        self.assertIn("не удалять", text,
+                      "про [Enter] надо сказать прямо: он ничего не удаляет")
 
     def test_the_answer_to_the_question_decides_the_mode(self):
         """Ответ режиссёра и есть выбор: отменить, читать или доиграть."""
@@ -6469,6 +6537,35 @@ class TestLiveChannelAndPanel(unittest.TestCase):
         # поста — реплика из события просто пропала бы
         self.assertIn("if (data.posts_included && typeof data.total_posts === 'number') {",
                       self.page)
+
+    def test_a_restarted_theatre_rebuilds_the_open_page(self):
+        """Перезапуск театра видит открытая страница — и собирается заново.
+
+        Страница держит прежний спектакль, прежнюю пустую ленту и прежнюю
+        вёрстку: браузер ту же вкладку не перезагружает, и всё, что выбрано
+        в консоли при запуске (например, «начать с пустой сцены»), на экране
+        не появляется — а новый спектакль начинается уже на новом процессе.
+        Номер запуска приходит в состоянии (см. web.SERVER_BOOT).
+        """
+        self.assertIn("function noteServerBoot(data)", self.page)
+        self.assertIn("if (noteServerBoot(data)) return;", self.page)
+        self.assertIn("location.reload()", self.page)
+        # Проверка стоит ДО пропуска пустого состояния: у нового процесса сцена
+        # пуста, и после пропуска про перезапуск уже не узнать
+        boot = self.page.index("if (noteServerBoot(data)) return;")
+        skip = self.page.index(
+            "if (!data.running && !data.finished && !data.total_posts) return;")
+        self.assertLess(boot, skip,
+                        "про перезапуск надо спрашивать раньше, чем пропускать пустую сцену")
+
+    def test_the_state_carries_the_launch_number(self):
+        """Состояние несёт номер запуска: по нему видно, что театр перезапустили."""
+        first = web_app.app.test_client().get("/api/status?lastPostCount=0").get_json()
+        again = web_app.app.test_client().get("/api/status?lastPostCount=0").get_json()
+        self.assertEqual(first.get("boot_id"), web_app.SERVER_BOOT,
+                         "в состоянии нет номера запуска — страница о перезапуске не узнает")
+        self.assertEqual(first["boot_id"], again["boot_id"],
+                         "номер запуска не меняется на ходу")
 
     def test_the_reply_comes_as_a_post_and_is_not_asked_for_again(self):
         """Реплика по сокету — готовый пост: перепрашивать её незачем."""

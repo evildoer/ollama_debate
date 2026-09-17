@@ -1629,7 +1629,41 @@ def parse_dump(written: str, tolerant: bool = False) -> dict:
     }
 
 
-def ask_about_dump(version: int) -> str:
+def _title_topic(written: str) -> str:
+    """Тема из шапки ДАМПа: «# ДАМП · 16.09.2026 22:01 · тема».
+
+    У записей прежних версий раздела «Тема» могло и не быть, а название
+    спектакля в шапке было всегда — и для вопроса «а что там?» его хватает
+    (см. dump_preview).
+    """
+    first = str(written or "").strip().splitlines()
+    if not first or not first[0].startswith("#"):
+        return ""
+    parts = [piece.strip() for piece in first[0].split("·")]
+    return parts[2] if len(parts) > 2 else ""
+
+
+def dump_preview(written: str) -> str:
+    """Что в ДАМПе — одной строкой: сколько реплик, актов, о чём и на сколько.
+
+    Нужен вопросу о чужом формате (см. ask_about_dump): «открыть прежний
+    спектакль» без этих чисел — выбор вслепую, а решается он именно ими.
+    Чтение терпимое: речь как раз о записи, которую мы не обещаем понимать.
+    """
+    play = parse_dump(written, tolerant=True)
+    if not play:
+        return ""
+    parts = [f"реплик {len(play['posts'])}, актов {play['round']}"]
+    # Тема — с начала и до первой строки: в ДАМПе она может быть длинной цитатой
+    topic = " ".join(str(play.get("topic") or "").split()) or _title_topic(written)
+    if topic:
+        parts.append(f"тема «{topic[:60].rstrip() + '…' if len(topic) > 60 else topic}»")
+    if play.get("spent"):
+        parts.append(f"цена {money(play['spent'])}")
+    return ", ".join(parts)
+
+
+def ask_about_dump(version: int, written: str = "") -> str:
     """Спросить, что делать с ДАМПом незнакомого формата.
 
     Формат меняется вместе с тем, как устроена запись, и обещать совместимость
@@ -1638,16 +1672,27 @@ def ask_about_dump(version: int) -> str:
     режиссёр: отказаться от прежнего спектакля, открыть его только на чтение
     или открыть и доиграть. Без консоли (запуск из IDE, из службы) спрашивать
     некого — тогда прежний спектакль просто не трогается.
+
+    written — сам файл: по нему видно, что именно предстоит открыть (число
+    реплик, актов и тему). Без этого «открыть прежний спектакль» — выбор вслепую,
+    а вопрос «а он мне нужен?» решается именно этими числами (см. dump_preview).
     """
     known = ", ".join(str(v) for v in sorted(DUMP_FORMATS_READABLE))
     print(f"  ⚠️  {settings.DUMP_FILE.name} записан форматом "
           f"{version or 'без номера'}, а этот театр читает {known}.")
-    print("   Формат — это устройство записи: прочитать чужую можно, но что-то")
-    print("   в ней может оказаться не тем, чем было записано.")
-    print("   [Enter] отменить — сцена останется пустой (а новый спектакль")
-    print("            перепишет файл, как и всегда)")
-    print("   [ч] открыть только на чтение")
-    print("   [п] открыть и доиграть прежним составом")
+    print("   Формат — это устройство записи: чужая запись читается, но часть её")
+    print("   полей может оказаться не тем, чем была записана.")
+    preview = dump_preview(written)
+    if preview:
+        print(f"   В файле: {preview}.")
+    print("   [Enter] ничего не читать и ничего не удалять: сцена будет пустой,")
+    print("            а файл останется на месте, пока его не перепишет новый")
+    print("            спектакль — в нём же и прежний, другой его копии нет.")
+    print("   [ч] читать прежний спектакль: реплики в ленте со своими ходами,")
+    print("       продолжать нельзя. Потом можно и доиграть — кнопкой")
+    print("       «↩ Доиграть прежний» под занавесом, выбор не окончательный.")
+    print("   [п] читать и доиграть: прежние реплики станут историей для моделей,")
+    print("       акт и цена продолжатся, запись допишется в тот же файл.")
     if not (sys.stdin and sys.stdin.isatty()):
         print("   Консоли нет, спросить некого — оставляю как есть.")
         return "skip"
@@ -1684,7 +1729,7 @@ def load_play_from_dump(mode: str = None) -> int:
     version = dump_version(written)
     readable = version in DUMP_FORMATS_READABLE
     if mode is None:
-        mode = "read" if readable else ask_about_dump(version)
+        mode = "read" if readable else ask_about_dump(version, written)
     if mode == "skip":
         if not readable:
             print(f"  ⚠️  Прежний спектакль не возвращается: {settings.DUMP_FILE.name} "
