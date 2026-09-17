@@ -457,6 +457,11 @@ def start():
     return jsonify({"success": True, "session_id": show.session.session_id,
                     "topic": show.session.topic,
                     "resumed": show.session.resumed,
+                    # Ход, оборванный смертью процесса, театр переспросит и запишет
+                    # тем же номером (см. show.replay_broken_turn): странице надо
+                    # собрать ленту заново, иначе показанная пустая рамка осталась бы
+                    # рядом с настоящим ответом
+                    "replay": bool(show.session.replay_plan),
                     "total_posts": len(show.session.posts)})
 
 @app.route('/api/reset', methods=['POST'])

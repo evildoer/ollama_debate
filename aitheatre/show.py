@@ -843,6 +843,49 @@ def dump_fix_heading(post_id: int, turn: dict) -> None:
     _dump_replace_line(f"## {post_id} · ", turn_heading(post_id, turn))
 
 
+def drop_dump_turn(post_id) -> bool:
+    """Убрать из ДАМПа незаконченную запись — перед тем как переспросить её ход.
+
+    Ход, оборванный смертью процесса, остался в файле без хвоста: хвост пишется
+    одним куском в самом конце хода (см. dump_turn_tail). Переспрошенный ляжет
+    тем же номером (см. replay_broken_turn) — значит прежнюю запись надо убрать:
+    две записи об одном ходе читались бы как две реплики, и разобрать файл
+    было бы нельзя.
+
+    Убирается только сама запись: всё, что записано после неё (например, шапка
+    «Продолжение спектакля»), остаётся на месте — читать дальше надо по порядку.
+    False — записи не нашлось или файл не читается; тогда переспрос отменяется,
+    а оборванная реплика так и остаётся помеченной.
+    """
+    try:
+        post_id = int(post_id)
+    except (TypeError, ValueError):
+        return False
+    path = Path(settings.DUMP_FILE)
+    _dump_reset()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return False
+    start = next((index for index, line in enumerate(lines)
+                  if line.startswith(f"## {post_id} · ")), None)
+    if start is None:
+        return False
+    end = start + 1
+    while end < len(lines) and not (lines[end].startswith("## ")
+                                    or lines[end].startswith("**Продолжение")):
+        end += 1
+    rest = lines[end:]
+    temp = path.with_name(path.name + ".fix")
+    try:
+        temp.write_text("".join(lines[:start] + rest), encoding="utf-8")
+        temp.replace(path)
+    except Exception as e:
+        print(f"  ⚠️  Не убирается прежняя запись из {path.name}: {e}")
+        return False
+    return True
+
+
 def dump_reopen() -> None:
     """Открыть ДАМП дальше на дописывание — после того как строка исправлена."""
     try:
@@ -2309,6 +2352,11 @@ class DebateSession:
         self.resume_ready = False
         # А это — про этот запуск: продолжает ли спектакль только что сыгранный
         self.resumed = False
+        # Ход, оборванный смертью процесса, ждёт переспроса: прежние реплики
+        # вернулись целыми, а эта — прерванной, и без неё цепочка разговора
+        # рвётся (см. plan_replay и replay_broken_turn). Решается это на старте
+        # продолжения, а играется там же, где и сам спектакль — первым делом
+        self.replay_plan = None
         # Сцена: места состава без имён, аватаров и личных инструкций — роли,
         # модели, порядок и числа. None значит «своей сцены нет»: места берутся
         # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
@@ -2420,6 +2468,9 @@ class DebateSession:
             self.money_told = False
             # Новый спектакль — новые реплики: отчёты прежних ходов к ним не подходят
             self.turn_log = {}
+            # И переспрашивать нечего: оборванный ход был у прежнего спектакля,
+            # а этот начинается с чистой ленты (см. plan_replay)
+            self.replay_plan = None
         else:
             # Прежние реплики — это и есть история для моделей: продолжение
             # не начинается с чистого листа, иначе модель отвечала бы не на то,
@@ -2433,7 +2484,90 @@ class DebateSession:
                 for post in self.posts if str(post.get("content") or "").strip()]
             # Цена продолжения — вся цена спектакля: он всё ещё тот же
             self.money_told = bool(self.spent)
+            # А ход, оборванный смертью процесса, переспрашивается: реплики
+            # в нём нет вовсе (см. _parse_record), и считать его сказанным
+            # нельзя — оставленная дыра слышна всем, кто говорит после
+            self.replay_plan = self.plan_replay()
         self.sync_cast_media()
+
+    def plan_replay(self) -> dict:
+        """Кого переспросить из-за хода, оборванного смертью процесса.
+
+        Прежний спектакль возвращается целым, кроме одного хода: у того, что
+        оборвала смерть процесса, реплики нет вовсе — она живёт только в памяти
+        и в файл не попала (см. _parse_record). Дыра эта не пустая: остальные
+        модели слышат разговор, в котором очередь дошла до кого-то — и он
+        промолчал. Поэтому такой ход переспрашивается первым же делом
+        (см. replay_broken_turn), и стоит это одной реплики: дешевле один раз
+        заплатить за неё, чем продолжать разговор с оборванной цепочкой.
+
+        Возвращает план или None. None — переспрашивать некого: оборванного
+        хода нет, говорящего убрали из состава или его место стало живым. Тогда
+        реплика остаётся в ленте помеченной как оборванная — это честнее, чем
+        выдумывать за него слова.
+        """
+        if not self.posts:
+            return None
+        last = self.posts[-1]
+        if not last.get("interrupted"):
+            return None
+        name = last.get("display_name") or ""
+        who = next((p for p in self.runtime_participants
+                    if p.get("display_name") == name), None)
+        if who is None:
+            print(f"  ⚠️  Ход {last.get('id')} ({name}) оборван, но {name} больше "
+                  f"не в составе — переспрашивать некого, реплика остаётся "
+                  f"помеченной оборванной")
+            return None
+        if not who.get("model") or who.get("model") == "human":
+            print(f"  ⚠️  Ход {last.get('id')} ({name}) оборван, а место теперь "
+                  f"живое — переспрашивать модель нечего")
+            return None
+        # Реплика уходит из ленты: переспрошенная встанет ровно на её место —
+        # тем же номером и в том же акте. Иначе рядом с настоящим ответом
+        # так и висела бы пустая рамка оборванного хода
+        self.posts.pop()
+        return {"post": last,
+                "turn": self.turn_log.pop(int(last.get("id") or 0), None),
+                "participant": dict(who),
+                "round": int(last.get("round") or 0) or self.current_round}
+
+    def replay_broken_turn(self, on_draft=None) -> dict:
+        """Переспросить ход, оборванный смертью процесса (см. plan_replay).
+
+        Играется он с того самого места, где оборвался: та же реплика, тот же
+        акт, тот же номер — но история и состав нынешние. Запись о прежнем ходе
+        в ДАМПе незакончена, а новая ляжет тем же номером: прежнюю убираем
+        (см. drop_dump_turn), иначе в файле оказались бы две записи об одном
+        ходе и читать его стало бы нельзя.
+
+        Возвращает новую реплику или None — если переспрашивать нечего.
+        """
+        plan = self.replay_plan
+        if not plan:
+            return None
+        self.replay_plan = None
+        participant = plan["participant"]
+        name = participant.get("display_name", "")
+        print(f"  🔁 Ход {plan['post'].get('id')} ({name}, "
+              f"{participant.get('model', '')}) оборвала смерть процесса — "
+              f"переспрашиваю его первым: без него цепочка разговора рвётся")
+        if not drop_dump_turn(plan["post"].get("id")):
+            # Прежнюю запись из файла не убрать — переспрашивать нельзя: две
+            # записи об одном ходе сделали бы ДАМП нечитаемым. Тогда реплика
+            # возвращается в ленту помеченной оборванной — как если бы
+            # переспрашивать было некого (см. plan_replay)
+            print(f"  ⚠️  Прежняя запись об этом ходе не убирается из "
+                  f"{settings.DUMP_FILE.name} — оставляю его оборванным")
+            self.posts.append(plan["post"])
+            if plan.get("turn"):
+                self.turn_log[int(plan["post"].get("id") or 0)] = plan["turn"]
+            return None
+        self.current_participant = name
+        self.current_action = "thinking"
+        self.handle_ai_turn(participant, plan["round"], on_draft=on_draft)
+        self.current_action = None
+        return self.posts[-1] if self.posts else None
 
     def new_show(self):
         """«Новый спектакль»: новые имена и характеры, настройки, сцена и тема — те же."""
@@ -3869,6 +4003,13 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
         else:
             print(f"  ⚠️  {display_name}: грим не подготовлен (будет эмодзи)")
     
+    # Ход, оборванный смертью процесса, переспрашивается первым делом: прежние
+    # реплики целы, а в этом ходу говорящий не сказал ничего (см. plan_replay),
+    # и дальше разговор идёт уже с его репликой — так цепочка и восстанавливается
+    replay = session.replay_broken_turn(on_draft=on_draft)
+    if replay and on_post:
+        on_post(replay)
+
     # Продолжение спектакля идёт дальше с того же акта, а не с первого: прежние
     # реплики уже в ленте и уже прочитаны моделями, и акт 1 на свежую голову
     # в середине разговора — это не нумерация, а путаница (см. session.resumed)

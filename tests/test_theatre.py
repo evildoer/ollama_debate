@@ -6130,6 +6130,160 @@ class TestAPlayCutInHalf(unittest.TestCase):
                          ["Сказано до обрыва."],
                          "оборванный ход уехал моделям как пустая реплика")
 
+    def _returned(self, cast: bool = True):
+        """Спектакль вернулся и доигрывается — план переспроса уже решён (см. start_show)."""
+        self.dump.write_text(self._cut_in_half(), encoding="utf-8")
+        self.assertEqual(show.load_play_from_dump("continue"), 2,
+                         "прежний спектакль не вернулся — продолжать нечего")
+        if not cast:
+            self.session.runtime_participants = [
+                p for p in self.session.runtime_participants
+                if p["display_name"] != "Оборванный"]
+        self.session.start_show("Оборванная тема")
+        return self.session
+
+    def test_a_broken_turn_is_asked_again_on_continuation(self):
+        """Оборванный ход на продолжении переспрашивается — цепочка не рвётся.
+
+        Прежние реплики вернулись целыми, а этот ход — прерванным: реплики
+        в нём нет вовсе (см. _parse_record). Считать его сказанным нельзя —
+        иначе остальные слышат тишину на месте чьей-то очереди, поэтому театр
+        переспрашивает его первым делом, и стоит это одной реплики.
+        """
+        self._returned()
+        plan = self.session.replay_plan
+
+        self.assertIsNotNone(plan, "переспрашивать оборванный ход никто не собрался")
+        self.assertEqual(plan["participant"]["display_name"], "Оборванный")
+        self.assertEqual(plan["round"], 1,
+                         "переспрошенный ход сыграется в чужом акте")
+        self.assertEqual([p["id"] for p in self.session.posts], [1],
+                         "оборванная реплика осталась висеть рядом с ответом")
+
+        def answer(model, messages, participant_name, **kwargs):
+            return "Договорил до конца.", 0, []
+
+        played = []
+
+        def on_post(post):
+            played.append(post)
+            self.session.moderator_finished = True
+
+        with mock.patch.object(ollama_api, "ask_model", mock.Mock(side_effect=answer)):
+            with mock.patch("time.sleep"):
+                show.run_debate_thread("Оборванная тема", on_post=on_post)
+
+        self.assertTrue(played, "переспрошенного хода в ленте нет")
+        again = self.session.posts[-1]
+        self.assertEqual(again["display_name"], "Оборванный")
+        self.assertEqual(again["content"], "Договорил до конца.")
+        self.assertEqual(again["round"], 1)
+        self.assertEqual(again["id"], 2,
+                         "переспрошенная реплика встала не на место оборванной")
+        self.assertFalse(again.get("interrupted"),
+                         "переспрошенная реплика всё ещё считается оборванной")
+        played_back = show.parse_dump(self.dump.read_text(encoding="utf-8"))
+        self.assertEqual([p["id"] for p in played_back["posts"]], [1, 2],
+                         "ДАМП после переспроса не читается назад")
+        self.assertEqual(played_back["posts"][1]["content"], "Договорил до конца.")
+        self.assertFalse(played_back["posts"][1]["interrupted"])
+
+    def test_a_broken_turn_is_not_written_into_the_dump_twice(self):
+        """Переспрошенный ход ложится в ДАМП один раз: две записи — один ход — нечитаемы.
+
+        Запись оборванного хода в файле осталась без хвоста (её писал
+        open_dump_turn, а хвост пишется в самом конце хода). Новая ляжет тем же
+        номером, поэтому прежнюю надо убрать — вместе с ней ушла бы и шапка
+        продолжения, если бы убиралось всё до конца файла.
+        """
+        self._returned()
+        # Так доигрывание и идёт: сначала шапка продолжения, потом переспрос
+        # (см. run_debate_thread) — и уборка прежней записи её не уносит
+        show.start_dump("Оборванная тема", keep=True)
+
+        with mock.patch.object(ollama_api, "ask_model",
+                               mock.Mock(return_value=("Договорил.", 0, []))):
+            with mock.patch("time.sleep"):
+                self.session.replay_broken_turn()
+
+        written = self.dump.read_text(encoding="utf-8")
+        self.assertEqual(len(re.findall(r"^## 2 · ", written, re.M)), 1,
+                         "в ДАМПе две записи об одном ходе")
+        self.assertEqual(len(re.findall(r"^## 1 · ", written, re.M)), 1,
+                         "прежняя целая запись исчезла")
+        self.assertIn("**Продолжение спектакля:**", written,
+                      "шапка продолжения ушла вместе с оборванной записью")
+
+    def test_a_speaker_gone_from_the_cast_is_not_asked_again(self):
+        """Говорящего убрали из состава — переспрашивать некого, и это так и называется.
+
+        Место ему на сцене не вернуть, а приписывать ему слова — врать. Реплика
+        остаётся в ленте помеченной оборванной.
+        """
+        self._returned(cast=False)
+
+        self.assertIsNone(self.session.replay_plan,
+                          "убранного из состава собираются переспрашивать")
+        self.assertEqual([p["id"] for p in self.session.posts], [1, 2],
+                         "оборванная реплика пропала из ленты")
+        self.assertTrue(self.session.posts[-1]["interrupted"])
+
+    def test_a_new_show_does_not_pull_the_old_broken_turn_behind_it(self):
+        """Новый спектакль — новая сцена: чужой оборванный ход за ним не переспрашивают.
+
+        Прежний спектакль мог быть открыт и только на чтение: старт после этого
+        начинает всё заново, а переспрос — часть продолжения, а не нового вечера.
+        """
+        self.dump.write_text(self._cut_in_half(), encoding="utf-8")
+        self.assertEqual(show.load_play_from_dump("read"), 2)
+        self.session.start_show("Оборванная тема")
+
+        self.assertIsNone(self.session.replay_plan,
+                          "новый спектакль тянет за собой прежний оборванный ход")
+        self.assertEqual(self.session.posts, [], "новая сцена началась не с пустой ленты")
+
+    def test_a_broken_turn_stays_broken_when_its_record_will_not_go(self):
+        """Запись из файла не убрать — переспрашивать нельзя: ДАМП станет нечитаемым.
+
+        Лучше оставить оборванную реплику оборванной, чем завести в файле две
+        записи об одном ходе: разобрать такое чтение уже не сможет.
+        """
+        self._returned()
+        before = self.dump.read_text(encoding="utf-8")
+
+        with mock.patch.object(show, "drop_dump_turn", mock.Mock(return_value=False)):
+            self.assertIsNone(self.session.replay_broken_turn(),
+                              "переспрос пошёл, хотя прежнюю запись не убрали")
+
+        self.assertEqual(self.dump.read_text(encoding="utf-8"), before,
+                         "файл переписан, хотя убирать было нечего")
+        self.assertEqual([p["id"] for p in self.session.posts], [1, 2],
+                         "оборванная реплика не вернулась в ленту")
+        self.assertTrue(self.session.posts[-1]["interrupted"])
+        self.assertIsNotNone(self.session.turn_report(2),
+                             "отчёт об оборванном ходе не вернулся вместе с репликой")
+
+    def test_the_page_is_told_to_rebuild_the_feed_for_the_second_asking(self):
+        """Пульта предупреждают, что оборванную рамку заменит переспрошенная реплика.
+
+        Переспрошенная ляжет тем же номером и в том же акте (см. replay_broken_turn),
+        а страница помнит показанное по номеру: без этого признака она считала бы
+        ответ уже показанным и оставила бы на экране пустую рамку.
+        """
+        self.dump.write_text(self._cut_in_half(), encoding="utf-8")
+        self.assertEqual(show.load_play_from_dump("continue"), 2)
+
+        with mock.patch.object(show, "run_debate_thread", mock.Mock()):
+            data = web_app.app.test_client().post(
+                "/api/start",
+                json={"topic": "Оборванная тема", "continue": True}).get_json()
+
+        self.assertTrue(data["success"], data.get("error"))
+        self.assertTrue(data["replay"],
+                        "страница не знает, что ленту надо собрать заново")
+        self.assertEqual(data["total_posts"], 1,
+                         "оборванная реплика осталась в ленте рядом с ответом")
+
     def test_a_dump_without_a_single_reply_says_so(self):
         """Файл нашего формата без реплик — это не чужой формат, и сказать надо так.
 
@@ -6962,6 +7116,22 @@ class TestPageScript(unittest.TestCase):
                       "признак прежнего спектакля ставится вместе с остальными флагами")
         self.assertLess(flags.index("playRestored"), flags.index("updatePanel();"),
                         "флаги должны стоять до отрисовки пульта")
+
+    def test_the_page_rebuilds_the_feed_for_the_second_asking(self):
+        """Ленту собирают заново, когда оборванный ход переспрашивают.
+
+        Переспрошенная реплика ляжет тем же номером, что и оборванная
+        (см. show.replay_broken_turn): показанную пустую рамку страница узнала бы
+        по номеру как «это уже на экране» и пропустила бы ответ мимо ленты.
+        Поэтому по признаку `data.replay` лента берётся с сервера целиком.
+        """
+        start = self._function("startDebate")
+        self.assertIn("data.replay", start,
+                      "страница не знает, что оборванный ход переспросят")
+        self.assertLess(start.index("if (data.resumed)"), start.index("data.replay"),
+                        "собирать ленту заново — часть продолжения, а не нового старта")
+        self.assertIn("updatePosts()", start[start.index("data.replay"):],
+                      "ленту надо перечитать с сервера, а не ждать опроса")
 
     def test_the_emoji_avatar_is_clickable_and_the_name_is_not_in_the_handler(self):
         """По эмодзи в ленте можно кликнуть — и имя уезжает в данные, а не в код.

@@ -1228,6 +1228,36 @@ BUGS = {
          "            spent = rubles(part[2:])",
          "    return who, seconds, spent"),
     ],
+    "оборванный ход снова считается сказанным (переспроса нет)": [
+        ("aitheatre/show.py",
+         '        if not last.get("interrupted"):\n            return None',
+         "        if True:\n            return None"),
+    ],
+    "переспрошенный ход снова не играется": [
+        ("aitheatre/show.py",
+         "    replay = session.replay_broken_turn(on_draft=on_draft)",
+         "    replay = None"),
+    ],
+    "в ДАМПе снова остаётся незаконченная запись и новая рядом": [
+        ("aitheatre/show.py",
+         '        temp.write_text("".join(lines[:start] + rest), encoding="utf-8")',
+         '        temp.write_text("".join(lines), encoding="utf-8")'),
+    ],
+    "уборка оборванной записи снова уносит конец файла": [
+        ("aitheatre/show.py",
+         '        temp.write_text("".join(lines[:start] + rest), encoding="utf-8")',
+         '        temp.write_text("".join(lines[:start]), encoding="utf-8")'),
+    ],
+    "о переспросе снова не говорят пульту": [
+        ("aitheatre/web.py",
+         '                    "replay": bool(show.session.replay_plan),',
+         '                    "replay": False,'),
+    ],
+    "лента снова остаётся с пустой рамкой после переспроса": [
+        ("aitheatre/page.py",
+         "                    if (data.replay) {",
+         "                    if (false) {"),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,

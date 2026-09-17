@@ -1465,6 +1465,15 @@ HTML_TEMPLATE = """
                     // их значило бы начать с чистого листа после согласия продолжить
                     // (см. show.start_show)
                     lastPostCount = data.total_posts || 0;
+                    if (data.replay) {
+                        // А ход, оборванный смертью процесса, театр переспросит и
+                        // запишет тем же номером (см. show.replay_broken_turn):
+                        // показанную пустую рамку надо убрать, а сами реплики —
+                        // вернуть на место, поэтому ленту собираем заново с сервера
+                        document.getElementById('posts').innerHTML = '';
+                        lastPostCount = 0;
+                        updatePosts();
+                    }
                 } else {
                     lastPostCount = 0;
                     document.getElementById('posts').innerHTML = '';
