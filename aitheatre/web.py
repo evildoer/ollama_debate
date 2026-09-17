@@ -131,6 +131,9 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         "loaded_models": loaded_models if not loaded_models_error else [],
         "loaded_models_error": loaded_models_error or "",
         "gpu_memory": ollama_api.fetch_gpu_memory(),
+        # След последней записи пульта: по нему страница объявляет о правке,
+        # даже если её сделала другая вкладка (см. show.last_settings_write)
+        "settings_write": show.last_settings_write(),
     }
     # Для внешних клиентов (и для события подключения) — те же поля, но реплики целиком
     if with_posts:
@@ -272,6 +275,18 @@ def cast_payload() -> list:
     return cast
 
 
+def saved_payload() -> dict:
+    """Сведение о последней записи пульта — в ответ на ту правку, что её сделала.
+
+    Режиссёр нажимает «Применить» и должен узнать, что файл действительно
+    записан, а не поверить в это (см. page.noteSettingsWrite). Поэтому ответ на
+    каждую пишущую правку говорит, что именно ушло на диск, во сколько и сколько
+    весит файл. Ответа на правку нет (запись отказала) — тогда и следа нет:
+    пустой словарь страница молча пропустит.
+    """
+    return {"saved": show.last_settings_write()}
+
+
 @app.route('/api/participant/emoji', methods=['POST'])
 def set_participant_emoji():
     """Сменить эмодзи-аватар участника — кликом по нему в ленте или в составе.
@@ -287,7 +302,8 @@ def set_participant_emoji():
         return jsonify({"success": False, "error": error})
     print(f"🎭 {data.get('name')}: аватар-эмодзи сменён на {data.get('emoji')}")
     publish_status()
-    return jsonify({"success": True, "participants": cast_payload()})
+    return jsonify({"success": True, "participants": cast_payload(),
+                    **saved_payload()})
 
 
 @app.route('/api/participants', methods=['GET', 'POST'])
@@ -312,9 +328,10 @@ def participants():
             return jsonify({"success": False, "error": error})
         # Сцена правится вместе с составом: именно она переживёт новый спектакль
         # и перезапуск приложения
-        show.save_theatre_settings()
+        show.save_theatre_settings("состав")
         print(f"🎭 Состав обновлён: {[p.get('display_name') for p in show.session.runtime_participants]}")
-        return jsonify({"success": True, "participants": cast_payload()})
+        return jsonify({"success": True, "participants": cast_payload(),
+                        **saved_payload()})
 
     models = [p.get("model", "") for p in show.session.runtime_participants]
     return jsonify({
@@ -391,11 +408,11 @@ def refresh_avatar(keywords):
         show.session.sync_cast_media()
         # Аватар — часть пульта: его видит и следующий запуск, а не только
         # текущая страница (иначе «Найти аватар» приходилось бы повторять)
-        show.save_theatre_settings()
-        
+        show.save_theatre_settings("аватар участника")
+
         if avatar_url:
-            return jsonify({"avatar_url": avatar_url})
-        return jsonify({"avatar_url": None})
+            return jsonify({"avatar_url": avatar_url, **saved_payload()})
+        return jsonify({"avatar_url": None, **saved_payload()})
     except Exception as e:
         print(f"⚠️  Ошибка при поиске аватара: {e}")
         return jsonify({"avatar_url": None, "error": str(e)})
@@ -422,7 +439,9 @@ def start():
         return jsonify({"success": False,
                         "error": "Тема не указана — напишите её в блоке «01 · Сюжет»"})
     show.session.topic = topic
-    show.save_theatre_settings()
+    # Перед спектаклем на диск уходит и тема, и состав: «нажал старт» — значит
+    # настроенное уже в файле, а не осталось в памяти процесса
+    show.save_theatre_settings("старт спектакля: тема и состав")
 
     cast = show.session.runtime_participants
     if not cast:
@@ -469,6 +488,7 @@ def start():
     return jsonify({"success": True, "session_id": show.session.session_id,
                     "topic": show.session.topic,
                     "resumed": show.session.resumed,
+                    **saved_payload(),
                     # Ход, оборванный смертью процесса, театр переспросит и запишет
                     # тем же номером (см. show.replay_broken_turn): странице надо
                     # собрать ленту заново, иначе показанная пустая рамка осталась бы
@@ -482,12 +502,12 @@ def reset():
     show.session.new_show()
     # Новые имена — это тоже пульт: сохраняем, чтобы после перезапуска вернуться
     # именно к этому составу, а не к тому, что был до «Нового спектакля»
-    show.save_theatre_settings()
+    show.save_theatre_settings("новая сцена: имена разыграны заново")
     print(f"🎭 Новый состав: {[p.get('display_name') for p in show.session.runtime_participants]}")
     # Тему возвращаем вместе с составом: «Новый спектакль» имена меняет,
     # а тему оставляет — поле в пульте должно остаться заполненным
     return jsonify({"success": True, "participants": cast_payload(),
-                    "topic": show.session.topic})
+                    "topic": show.session.topic, **saved_payload()})
 
 
 @app.route('/api/settings/reset', methods=['POST'])
@@ -501,11 +521,11 @@ def reset_settings():
     даже полный сброс: она про сюжет, а не про труппу.
     """
     show.session.reset_to_defaults()
-    show.forget_theatre_settings()
+    show.forget_theatre_settings("полный сброс: состав и правила — из settings.py, тема осталась")
     print("🧹 Полный сброс: состав и правила взяты из settings.py, "
           f"сохранённое забыто (тема осталась: {show.session.topic[:40] or '—'})")
     return jsonify({"success": True, "participants": cast_payload(),
-                    "topic": show.session.topic})
+                    "topic": show.session.topic, **saved_payload()})
 
 @app.route('/api/post/<int:post_id>/turn')
 def post_turn(post_id):
@@ -576,9 +596,9 @@ def moderator_topic():
     show.session.topic = new_topic
     # Тема — часть пульта: придуманное однажды не должно спрашиваться заново
     # в каждом запуске
-    show.save_theatre_settings()
+    show.save_theatre_settings("тема")
     print(f"🎬 Режиссёр сменил тему: {new_topic}")
-    return jsonify({"success": True, "topic": new_topic})
+    return jsonify({"success": True, "topic": new_topic, **saved_payload()})
 
 @app.route('/api/moderator/finish', methods=['POST'])
 def moderator_finish():
@@ -658,9 +678,9 @@ def update_moderator_instructions():
     # Редактор — часть режиссёрского пульта, поэтому его правки тоже переживают
     # перезапуск: раньше сохранялись только правила судьи, а правила общения
     # и руководства после перезапуска тихо возвращались к дефолтным
-    show.save_theatre_settings()
+    show.save_theatre_settings("правила и инструкции")
 
-    return jsonify({"success": True})
+    return jsonify({"success": True, **saved_payload()})
 
 @app.route('/api/shutdown', methods=['POST'])
 def shutdown():

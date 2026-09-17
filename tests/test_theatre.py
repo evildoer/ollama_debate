@@ -5482,6 +5482,116 @@ class TestCloudPanel(unittest.TestCase):
 
 # ---------------------------------------------------------------- опрос статуса
 
+class TestTheWriteSpeaksUp(unittest.TestCase):
+    """О каждой записи пульта театр говорит вслух: что записано, когда и сколько весит файл.
+
+    Режиссёр нажимает «Применить» и ждёт, а не верит. Молчание после нажатия
+    выглядит одинаково и когда записалось, и когда нет, поэтому каждая пишущая
+    правка оставляет след (см. show.last_settings_write) и отдаёт его в ответе,
+    а состояние спектакля носит его с собой — чтобы о записи узнала и та вкладка,
+    которая её не делала.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        for name, value in (
+            ("check_models_available", mock.Mock(
+                return_value={"ok": True, "missing": [], "error": None})),
+            ("run_debate_thread", mock.Mock()),
+            ("check_vram_fit", mock.Mock(return_value={"checked": False})),
+            ("fetch_model_parameters", mock.Mock(return_value={})),
+        ):
+            patcher = mock.patch.object(app_module_of(name), name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        patcher = mock.patch.object(settings, "SETTINGS_FILE",
+                                    Path(self.tmpdir.name) / "settings.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # След записи — общий на процесс: обнуляем, чтобы чужая запись
+        # из соседнего теста не зачлась за нынешнюю
+        show._last_settings_write = {}
+        self.client = web_app.app.test_client()
+
+    def test_the_write_remembers_what_was_written(self):
+        """След говорит словами, что ушло на диск, — и сколько оно весит."""
+        first = show.save_theatre_settings("тема")
+        self.assertEqual(first["note"], "тема")
+        self.assertEqual(first["file"], "settings.json")
+        self.assertGreater(first["size"], 0, "файл записан — значит и вес у него есть")
+        self.assertEqual(first["stamp"], 1)
+
+        second = show.save_theatre_settings("состав")
+        self.assertEqual(second["stamp"], 2, "знак не растёт — правку примут за прежнюю")
+        self.assertEqual(show.last_settings_write()["note"], "состав")
+
+    def test_a_write_that_failed_leaves_no_trace(self):
+        """Не записалось — и обещать запись нельзя: следа нет, знак не растёт."""
+        show.save_theatre_settings("тема")
+        self.session.topic = "Новая тема"
+        # Путь к папке, а не файлу: запись в него не удастся
+        with mock.patch.object(settings, "SETTINGS_FILE", Path(self.tmpdir.name)):
+            self.assertIsNone(show.save_theatre_settings("тема"))
+        self.assertEqual(show.last_settings_write()["stamp"], 1,
+                         "отказ в записи выдал себя за запись")
+
+    def test_the_answer_to_each_edit_says_the_file_was_written(self):
+        """Каждая правка пульта отвечает тем, что именно ушло в файл."""
+        self.session.topic = "Тема"
+        applied = self.client.post("/api/participants", json={
+            "participants": [{"cast_id": p.get("cast_id"),
+                              "display_name": p.get("display_name"),
+                              "model": p.get("model")}
+                             for p in self.session.runtime_participants]
+        }).get_json()
+        self.assertTrue(applied["success"], applied.get("error"))
+        self.assertEqual(applied["saved"]["note"], "состав")
+
+        topic = self.client.post("/api/moderator/topic",
+                                 json={"topic": "Новая"}).get_json()
+        self.assertEqual(topic["saved"]["note"], "тема")
+
+        started = self.client.post("/api/start", json={}).get_json()
+        self.assertTrue(started["success"], started.get("error"))
+        self.assertIn("старт спектакля", started["saved"]["note"])
+
+    def test_the_resets_say_what_they_did_with_the_file(self):
+        """У нового состава и у полного сброса — свои слова о записи."""
+        new_show = self.client.post("/api/reset", json={}).get_json()
+        self.assertIn("новая сцена", new_show["saved"]["note"])
+
+        self.session.topic = "Тема"
+        reset = self.client.post("/api/settings/reset", json={}).get_json()
+        self.assertIn("полный сброс", reset["saved"]["note"])
+
+    def test_the_state_carries_the_last_write(self):
+        """О записи рассказывает и состояние: её мог сделать кто-то другой."""
+        show.save_theatre_settings("правила и инструкции")
+        status = self.client.get("/api/status").get_json()
+        self.assertEqual(status["settings_write"]["note"], "правила и инструкции")
+        self.assertFalse(status["running"])
+
+    def test_the_page_shows_the_write_and_wires_every_edit_to_it(self):
+        """Страница рисует уведомление и зовёт его из каждой пишущей правки."""
+        source = page.HTML_TEMPLATE
+        self.assertIn('id="saveAlert"', source, "на странице нет места для уведомления")
+        self.assertIn('.save-alert.show', source, "уведомление нечем показать")
+        for name in ("saveWriteDecision", "noteSettingsWrite", "showSaveAlert",
+                     "hideSaveAlert"):
+            self.assertIn(f"function {name}(", source, f"нет функции {name}")
+        self.assertIn("onclick=\"hideSaveAlert()\"", source,
+                      "уведомление нельзя закрыть кликом")
+        # Каждая правка, о которой сервер сказал, должна быть услышана
+        for call in ("noteSettingsWrite(data.saved, true);",
+                     "noteSettingsWrite(data.settings_write);"):
+            self.assertIn(call, source, f"не слышно {call}")
+        self.assertGreaterEqual(source.count("noteSettingsWrite(data.saved, true);"), 6,
+                                "правки пульта молчат о записи")
+
+
 class TestStatusPolling(unittest.TestCase):
     """Оборванная связь — ещё не закрытый театр, и опрос не должен умирать с первой неудачи.
 
@@ -6777,6 +6887,32 @@ class TestPageScript(unittest.TestCase):
             "в шаблоне страницы питоновские эскейпы: они превращаются в настоящие "
             "переводы строк и ломают скрипт. Для строки в JS нужен `\\\\n`:\n  "
             + "\n  ".join(found)))
+
+    def test_the_write_alert_speaks_once_about_one_write(self):
+        """Уведомление о записи пульта: один раз про одну запись и только про новое.
+
+        Решение вынесено отдельной функцией именно ради этой проверки: ошибка
+        в нём снаружи выглядит как «нажал — и тишина», и заметить её можно только
+        глазами (см. page.noteSettingsWrite).
+        """
+        out = self._run_page(
+            ("saveWriteDecision",),
+            # Ответ на нажатие о новой записи — показываем
+            "saveWriteDecision({stamp: 5, note: 'тема'}, true, 4).show",
+            # Состояние успело сказать об этой же записи раньше — второй раз молчим:
+            # уведомление уже на экране, повторять его незачем
+            "saveWriteDecision({stamp: 5, note: 'тема'}, true, 5).show",
+            # Запись новее виденного, пришла состоянием (её сделала другая вкладка)
+            "saveWriteDecision({stamp: 6, note: 'состав'}, false, 5).show",
+            # Об одной и той же записи второй раз не говорим
+            "saveWriteDecision({stamp: 6, note: 'состав'}, false, 6).show",
+            # Первую запись после открытия страницы видит состояние: молча —
+            # иначе каждое обновление извещало бы о давней правке
+            "saveWriteDecision({stamp: 9, note: 'тема'}, false, null).show",
+            # Записи нет (файл не записался) — молчим и знак не портим
+            "saveWriteDecision(null, true, 7).stamp",
+            "saveWriteDecision({}, true, 7).show")
+        self.assertEqual(out, [True, False, True, False, False, 7, False])
 
     def test_the_page_script_parses(self):
         """Скрипт страницы разбирается настоящим интерпретатором JavaScript."""

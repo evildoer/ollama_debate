@@ -1294,6 +1294,37 @@ BUGS = {
          '        print("🌐 Браузер не открываю: по этому адресу отвечает прежний экземпляр.")',
          '        print("")'),
     ],
+    "о записи пульта снова молчат в ответе на правку": [
+        ("aitheatre/web.py",
+         '        return jsonify({"success": True, "participants": cast_payload(),\n'
+         '                        **saved_payload()})',
+         '        return jsonify({"success": True, "participants": cast_payload()})'),
+    ],
+    "запись настроек снова не оставляет следа": [
+        ("aitheatre/show.py",
+         '        return None\n    return _note_settings_write(note)\n\n\ndef forget_theatre_settings(note: str = "пульт записан заново"):',
+         '        return None\n    return {}\n\n\ndef forget_theatre_settings(note: str = "пульт записан заново"):'),
+    ],
+    "правку пульта снова называют не своим именем": [
+        ("aitheatre/web.py",
+         '    show.save_theatre_settings("тема")',
+         '    show.save_theatre_settings()'),
+    ],
+    "след записи снова не едет вместе с состоянием": [
+        ("aitheatre/web.py",
+         '        "settings_write": show.last_settings_write(),',
+         '        "settings_write": {},'),
+    ],
+    "страница снова молчит о записи пульта": [
+        ("aitheatre/page.py",
+         "            return {show: fresh && (direct || !first), stamp: stamp, info: info};",
+         "            return {show: false, stamp: stamp, info: info};"),
+    ],
+    "уведомление о записи снова появляется на каждое обновление страницы": [
+        ("aitheatre/page.py",
+         "            return {show: fresh && (direct || !first), stamp: stamp, info: info};",
+         "            return {show: fresh, stamp: stamp, info: info};"),
+    ],
 }
 
 # Разбор скрипта страницы сверяется с настоящим интерпретатором JavaScript,

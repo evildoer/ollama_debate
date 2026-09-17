@@ -84,12 +84,56 @@ def _load_saved_instructions(data: dict):
             print(f"📝 Загружены сохранённые {title}: {len(lines)} пунктов")
 
 
-def save_theatre_settings():
+# ── СЛЕД ЗАПИСИ ПУЛЬТА ─────────────────────────────────────────────────────
+#
+# Каждая запись настроек на диск оставляет о себе след: что именно записано,
+# когда и сколько весит файл. Нужен он пульту: режиссёр нажимает «Применить» и
+# хочет знать, что файл правда записан, а не верить в это (см. web.saved_payload,
+# page.noteSettingsWrite). След один на процесс, поэтому о записи узнаёт и та
+# вкладка, которая её не делала: он едет вместе с состоянием спектакля.
+_last_settings_write = {}
+
+
+def last_settings_write() -> dict:
+    """Последняя запись пульта: {stamp, at, note, file, size}.
+
+    Копия, а не сам словарь: читатель не должен править след у театра.
+    """
+    return dict(_last_settings_write)
+
+
+def _note_settings_write(note: str) -> dict:
+    """Отметить запись пульта: что записано, во сколько и сколько весит файл.
+
+    Знак (stamp) растёт с каждой записью: по нему страница понимает, что запись
+    новая, а не та же самая, о которой она уже сказала.
+    """
+    global _last_settings_write
+    try:
+        size = settings.SETTINGS_FILE.stat().st_size
+    except OSError:
+        size = 0
+    _last_settings_write = {
+        "stamp": int(_last_settings_write.get("stamp", 0)) + 1,
+        "at": time.strftime("%H:%M:%S"),
+        "note": str(note or "пульт"),
+        "file": settings.SETTINGS_FILE.name,
+        "size": size,
+    }
+    return dict(_last_settings_write)
+
+
+def save_theatre_settings(note: str = "пульт"):
     """Сохраняет пульт целиком рядом с проектом (файл в .gitignore).
 
     Состав сохраняется вместе с именами и личными инструкциями: режиссёр,
     вернувшись к театру после перезапуска, хочет видеть прежний спектакль.
     История при этом начинается с нуля — посты и снимки ходов живут в памяти.
+
+    note — что именно изменилось («тема», «состав», «старт спектакля»): это
+    уходит в след записи, и пульт говорит об этом режиссёру словами, а не
+    молчанием (см. _note_settings_write). Не записалось — следа не оставляем:
+    обещать запись, которой не было, нельзя.
     """
     try:
         settings.SETTINGS_FILE.write_text(
@@ -109,9 +153,11 @@ def save_theatre_settings():
             encoding="utf-8")
     except Exception as e:
         print(f"  ⚠️  Не сохраняется {settings.SETTINGS_FILE.name}: {e}")
+        return None
+    return _note_settings_write(note)
 
 
-def forget_theatre_settings():
+def forget_theatre_settings(note: str = "пульт записан заново"):
     """Забыть сохранённый пульт, оставив тему.
 
     Нужен полному сбросу: если файл оставить как есть, следующий запуск вернул бы
@@ -128,6 +174,8 @@ def forget_theatre_settings():
             encoding="utf-8")
     except OSError as e:
         print(f"  ⚠️  Не сохраняется {settings.SETTINGS_FILE.name}: {e}")
+        return None
+    return _note_settings_write(note)
 
 
 # ── ДАМП СПЕКТАКЛЯ ─────────────────────────────────────────────────────────
@@ -3747,7 +3795,7 @@ def set_participant_emoji(name: str, emoji: str) -> str:
         if place.get("display_name") == str(name or ""):
             place["avatar_emoji"] = emoji
             session.sync_cast_media()
-            save_theatre_settings()
+            save_theatre_settings("эмодзи-аватар участника")
             return ""
     return f"Участника «{name}» в составе нет"
 

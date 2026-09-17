@@ -236,6 +236,20 @@ HTML_TEMPLATE = """
         /* Меню эмодзи-аватара: то же затемнение, что у полного портрета,
            но внутри — набор значков, а не одна картинка */
         .emoji-menu { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #ffffff; border: 1px solid #000000; padding: 20px; max-width: 90vw; max-height: 80vh; overflow: auto; cursor: default; }
+        /* Запись пульта на диск. Живёт поверх всего и уходит само: это не вопрос
+           к режиссёру, а сообщение о факте — что именно записано, когда и сколько
+           весит файл (см. noteSettingsWrite) */
+        .save-alert { display: none; position: fixed; right: 20px; bottom: 20px; z-index: 1200; background: #ffffff; border: 1px solid #000000; border-left: 4px solid #1a7f37; padding: 12px 16px; max-width: 340px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+        .save-alert.show { display: block; }
+        .save-alert-head { font-size: 13px; font-weight: bold; color: #1a7f37; margin-bottom: 4px; }
+        .save-alert-note { font-size: 13px; color: #000000; margin-bottom: 4px; line-height: 1.4; }
+        .save-alert-file { font-size: 11px; color: #666666; font-family: monospace; }
+        .save-alert-hint { font-size: 10px; color: #999999; margin-top: 6px; }
+        body.dark .save-alert { background: #141414; border-color: #3a3a3a; border-left-color: #4ec97a; }
+        body.dark .save-alert-head { color: #4ec97a; }
+        body.dark .save-alert-note { color: #e8e8e8; }
+        body.dark .save-alert-file { color: #9a9a9a; }
+        body.dark .save-alert-hint { color: #6f6f6f; }
         .emoji-menu-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 14px; }
         .emoji-menu-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(56px, 1fr)); gap: 8px; }
         .emoji-choice { display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; font-size: 30px; border: 1px solid #000000; cursor: pointer; background: #ffffff; }
@@ -507,6 +521,9 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </div>
+    <!-- Запись пульта на диск объявляет о себе здесь: режиссёр нажимает
+         «Применить» и видит, что файл действительно записан, а не верит в это -->
+    <div id="saveAlert" class="save-alert" onclick="hideSaveAlert()"></div>
     <div id="avatarModal" class="modal" onclick="closeAvatarModal()">
         <span class="modal-close">&times;</span>
         <img class="modal-content" id="avatarModalImg">
@@ -554,6 +571,59 @@ HTML_TEMPLATE = """
         // Счётчик для строк, добавленных кнопками «➕»: индекс по длине контейнера
         // повторялся после удаления строки выше, и ❌ у новой строки удалял чужую
         let editorRowSeq = 0;
+
+        // ── ЗАПИСЬ ПУЛЬТА НА ДИСК ВИДНО ──────────────────────────────────
+        // Каждая правка, уходящая в файл настроек, объявляет о себе здесь:
+        // после нажатия режиссёр не должен догадываться, записалось ли (см.
+        // web.saved_payload, show.last_settings_write). Знак записи приходит и
+        // в ответе на само действие (показать сразу), и в состоянии спектакля
+        // (если записал кто-то другой — например, другая вкладка)
+        const SAVE_ALERT_MS = 7000;
+        let lastSaveStamp = null;   // о какой записи уже сказано
+        let saveAlertTimer = null;
+
+        // Показывать ли эту запись — решает отдельная функция: решение,
+        // которое не проверить, легко разойтись с тем, что видит режиссёр
+        function saveWriteDecision(info, direct, seenStamp) {
+            if (!info || !info.stamp) return {show: false, stamp: seenStamp};
+            const first = seenStamp === null;
+            const fresh = first || info.stamp > seenStamp;
+            const stamp = Math.max(seenStamp || 0, info.stamp);
+            // Ответ на нажатие показываем всегда. Пришедшее состоянием — только
+            // если запись новее виденного, и молча про ту, что случилась до
+            // открытия страницы: иначе каждое обновление извещало бы о старом
+            return {show: fresh && (direct || !first), stamp: stamp, info: info};
+        }
+
+        function noteSettingsWrite(info, direct) {
+            const verdict = saveWriteDecision(info, direct, lastSaveStamp);
+            lastSaveStamp = verdict.stamp;
+            if (!verdict.show) return false;
+            showSaveAlert(verdict.info);
+            return true;
+        }
+
+        function showSaveAlert(info) {
+            const box = document.getElementById('saveAlert');
+            if (!box) return;
+            const file = (info && info.file) || 'settings.json';
+            const at = (info && info.at) || '';
+            const size = (info && info.size) ? (info.size + ' байт') : 'записан';
+            box.innerHTML =
+                `<div class="save-alert-head">💾 Пульт записан на диск</div>` +
+                `<div class="save-alert-note">${escapeHtml((info && info.note) || 'пульт')}</div>` +
+                `<div class="save-alert-file">${escapeHtml(file)} · ${escapeHtml(at)} · ${escapeHtml(size)}</div>` +
+                `<div class="save-alert-hint">клик — скрыть; само уйдёт через ${SAVE_ALERT_MS / 1000} с</div>`;
+            box.classList.add('show');
+            if (saveAlertTimer) clearTimeout(saveAlertTimer);
+            saveAlertTimer = setTimeout(hideSaveAlert, SAVE_ALERT_MS);
+        }
+
+        function hideSaveAlert() {
+            const box = document.getElementById('saveAlert');
+            if (box) box.classList.remove('show');
+            if (saveAlertTimer) { clearTimeout(saveAlertTimer); saveAlertTimer = null; }
+        }
         
         // Разделы пульта сворачиваются со заголовка: обёртки расставляет этот вызов
         decoratePanelSections();
@@ -979,6 +1049,7 @@ HTML_TEMPLATE = """
                 // Редактор показывает то, что сейчас на сервере: после сброса
                 // в его полях должен быть заводской текст, а не старый
                 loadInstructionsForEdit();
+                noteSettingsWrite(data.saved, true);
             })
             .catch(err => alert('❌ ' + err.message));
         }
@@ -1273,6 +1344,7 @@ HTML_TEMPLATE = """
                 renderCastEditor();
                 updateSidebarParticipants();
                 loadCast();   // заодно обновляем проверки моделей и видеопамяти
+                noteSettingsWrite(data.saved, true);
             })
             .catch(err => { console.error('Ошибка правки состава:', err); alert('❌ ' + err.message); });
         }
@@ -1323,6 +1395,8 @@ HTML_TEMPLATE = """
                 }
                 btn.disabled = false;
                 btn.textContent = '🔍 Найти аватар';
+                // Найденный аватар тоже ушёл в состав и записан в файл
+                noteSettingsWrite(data.saved, true);
             }).catch(err => { console.error('Ошибка поиска аватара:', err); preview.innerHTML = '❌'; setTimeout(() => preview.innerHTML = fallbackEmoji, 2000); btn.disabled = false; btn.textContent = '🔍 Найти аватар'; });
         }
         
@@ -1397,6 +1471,7 @@ HTML_TEMPLATE = """
                 if (typeof spot.index === 'number') renderCastEditor();
                 else refreshAvatars(spot.name, emoji);
                 updateSidebarParticipants();
+                noteSettingsWrite(data.saved, true);
             })
             .catch(err => alert('⚠️ ' + err.message))
             .finally(() => closeEmojiPicker());
@@ -1437,6 +1512,7 @@ HTML_TEMPLATE = """
                     if (!data.success) { alert('❌ ' + (data.error || 'не удалось сменить тему')); return; }
                     input.value = data.topic;
                     setTopicDisplay(data.topic);
+                    noteSettingsWrite(data.saved, true);
                 })
                 .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
         }
@@ -1507,6 +1583,10 @@ HTML_TEMPLATE = """
                 renderCastEditor();
                 updateSidebarParticipants();
                 updatePanel();
+                // «Начать спектакль» — это тоже запись пульта: тема и состав
+                // уходят в файл, и пульт говорит об этом, а не оставляет
+                // надеяться, что всё настроено
+                noteSettingsWrite(data.saved, true);
             })
             .catch(err => { console.error('Ошибка запуска:', err); showStartError(err.message); });
         }
@@ -1545,6 +1625,7 @@ HTML_TEMPLATE = """
                         document.getElementById('topicInput').value = data.topic;
                         setTopicDisplay(data.topic);
                     }
+                    noteSettingsWrite(data.saved, true);
                     return loadCast();
                 })
                 .then(() => { updateSidebarParticipants(); updatePanel(); })
@@ -2503,6 +2584,8 @@ HTML_TEMPLATE = """
             // кнопка «Доиграть» (см. updatePanel), и она не должна ждать
             // следующего опроса — иначе под занавесом её просто не видно
             playRestored = !!data.restored;
+            // Запись пульта могла быть и не отсюда: о ней рассказывает состояние
+            noteSettingsWrite(data.settings_write);
             if (data.topic) setTopicDisplay(data.topic);
             updatePanel();
             if (data.waiting_for_human) {
@@ -2686,7 +2769,10 @@ HTML_TEMPLATE = """
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
-                    alert('✅ Инструкции обновлены!');
+                    // Правка редактора тоже ушла в файл — объявляем об этом тем же
+                    // уведомлением, а не отдельным подтверждением: подтверждение
+                    // должно быть одно и про одно и то же (см. noteSettingsWrite)
+                    noteSettingsWrite(data.saved, true);
                     // Редактор не прячем: он и есть содержимое вкладки, а в его
                     // полях после сохранения — ровно то, что уехало на сервер
                     // Обновляем сайдбар с актуальными инструкциями
