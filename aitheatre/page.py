@@ -83,6 +83,10 @@ HTML_TEMPLATE = """
         .keyword-row input { flex: 1; min-width: 0; }
         .status-bar { background: #ffffff; border: none; border-left: 3px solid #000000; color: #000000; padding: 15px 20px; font-size: 16px; margin-bottom: 20px; font-style: italic; line-height: 1.6; }
         .status-bar.active { border-left: 4px solid #000000; }
+        /* Сорвавшаяся связь: ждут не модель, и это видно отдельной строкой.
+           Цвет — тёмная медь на белом (на светлом #d9822b не читается) */
+        .status-link { color: #8a5a00; }
+        body.dark .status-link { color: #d7b070; }
         .post { background: #ffffff; border: none; border-top: 1px solid #000000; padding: 40px 0; margin-bottom: 0; display: flex; gap: 30px; }
         .post-avatar { flex-shrink: 0; }
         .post-avatar img { width: 150px; height: 150px; object-fit: cover; border: 1px solid #000000; filter: grayscale(100%); }
@@ -2014,13 +2018,34 @@ HTML_TEMPLATE = """
             return `${secs} с`;
         }
 
+        // Связь со шлюзом: пока её нет, «думает» — неправда. Решает это сервер
+        // (см. cloud.link_state), а страница только называет словами: у неё для
+        // этого есть и числа — какая это попытка и сколько ждать следующей
+        function linkWaiting(data) {
+            return !!(data && data.link && data.link.waiting);
+        }
+
+        // Строка про сорвавшуюся связь — отдельно от часов: ждут тут не модель,
+        // и путать эти два ожидания нельзя (их и по времени не сравнить)
+        function linkLine(data) {
+            if (!linkWaiting(data)) return '';
+            const link = data.link;
+            let text = `🔌 нет связи со шлюзом — попытка ${link.attempt} из ${link.attempts}`;
+            if (link.retry_in) text += ` · следующая через ${durationText(link.retry_in)}`;
+            return `<div class="status-link" style="font-size:12px;margin-top:6px;">${escapeHtml(text)}</div>`;
+        }
+
         // Часы хода: сколько уже думает говорящий и сколько ему осталось по сроку.
         // Числа приходят секундами и обновляются вместе с состоянием (раз в
         // секунду по сокету), поэтому своих часов страница не заводит и соврать
         // не может. Срок есть только у облачного хода: без него — одно «думает…»
         function turnClockText(data) {
             if (data.turn_elapsed === null || data.turn_elapsed === undefined) return '';
-            let text = `⏱ думает ${durationText(data.turn_elapsed)}`;
+            // Ждать модель и ждать связь — разные ожидания: «думает» в это время
+            // было бы неправдой, а именно её и читает режиссёр в сайдбаре
+            let text = linkWaiting(data)
+                ? `⏱ ждём связь ${durationText(data.turn_elapsed)}`
+                : `⏱ думает ${durationText(data.turn_elapsed)}`;
             if (data.turn_left !== null && data.turn_left !== undefined) {
                 text += ` · осталось ${durationText(data.turn_left)}`;
                 if (data.turn_extra) {
@@ -2158,7 +2183,8 @@ HTML_TEMPLATE = """
                         + `${tokensText(step.tokens)} токенов, в реплику не попали</div>`
                         + `<pre class="prompt-text">${escapeHtml(step.text || '')}</pre>`);
                 } else {
-                    const marks = {refused: '⛔', silence: '⚠️', force: '🔍', money: '💰', note: '·'};
+                    const marks = {refused: '⛔', silence: '⚠️', force: '🔍', money: '💰',
+                                   link: '🔌', note: '·'};
                     const mark = marks[step.kind] || '🔍';
                     stepsHtml.push(`<div class="prompt-step"><span class="prompt-clock">${clock}</span>${mark} ${escapeHtml(step.text || '')}</div>`);
                 }
@@ -2606,14 +2632,17 @@ HTML_TEMPLATE = """
             }
             if (data.running && !data.waiting_for_human) {
                 statusDiv.classList.add('active');
-                let at = data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
+                let at = linkWaiting(data) ? 'Ждёт связь со шлюзом...' : data.current_action === 'searching' ? `Ищет: "${data.search_query}"` : data.current_action === 'waiting' ? 'Готовит реплику...' : 'Говорит реплику...';
                 // Сколько уже стоил спектакль — по факту со счёта шлюза
                 const bill = spentLine(data);
                 // Часы хода — рядом с ценой: по ним видно, ждать минуту или
                 // десять, и успеешь ли сходить за пивом (см. turnClockText)
                 const clock = turnClockText(data);
                 const clockLine = clock ? `<div style="font-size:12px;margin-top:6px;">${clock}</div>` : '';
-                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>${clockLine}${bill}`;
+                // Сорвавшаяся связь — отдельной строкой: её видно и тогда, когда
+                // час хода ещё идёт, а модели при этом никто не ждёт
+                const link = linkLine(data);
+                statusDiv.innerHTML = `<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">Акт ${data.current_round}</div><div>${escapeHtml(data.current_participant || '')}</div><div style="font-style:italic;font-size:12px;margin-top:8px;">${at}</div>${clockLine}${link}${bill}`;
             } else if (data.finished) {
                 statusDiv.classList.remove('active');
                 const curtain = spentLine(data);

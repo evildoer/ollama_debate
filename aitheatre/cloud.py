@@ -339,6 +339,17 @@ def retry_delays() -> tuple:
                  for seconds in (settings.CLOUD_RETRY_DELAYS or ()))
 
 
+def reconnect_delays() -> tuple:
+    """Паузы между попытками вернуть связь — те, что стоят в settings.py.
+
+    Повторы после 429 и повторы после обрыва связи — разные вещи, и причины
+    у них разные: там шлюз просит сбавить темп, здесь до шлюза вообще нет хода.
+    Поэтому и настройки свои: смешивать их значило бы OR-ить несвязное.
+    """
+    return tuple(max(0.0, float(seconds))
+                 for seconds in (getattr(settings, "CLOUD_RECONNECT_DELAYS", ()) or ()))
+
+
 # Роли, которые понимает схема OpenAI. Всё остальное — слова человека: лучше
 # отдать такое сообщение как «user», чем получить 400 на весь запрос
 _OPENAI_ROLES = ("system", "user", "assistant", "tool")
@@ -900,6 +911,56 @@ def gateway_opener():
     )
 
 
+# СВЯЗЬ СО ШЛЮЗОМ. Пока её нет, сайдбар обязан говорить не «думает», а «ждём
+# связь»: это разные вещи и ждать в них надо разное. Одно место правды — потому
+# что об этом говорят двое: ход (что печатать в ДАМП) и состояние для страницы
+# (см. link_state). Ключ "down" — единственный надёжный признак: остальные поля
+# осмысленны только пока он поднят
+_LINK = {"down": False, "attempt": 0, "attempts": 0, "retry_at": 0.0, "note": ""}
+
+
+def link_state() -> dict:
+    """Состояние связи — для сайдбара: ждём шлюз или ждём модель.
+
+    waiting=False — связи ничего не грозит: обычный ход. Числа появляются
+    только тогда, когда связи правда нет: какая это попытка, сколько их всего
+    и через сколько секунд будет следующая. Секундой, а не моментом времени:
+    часы браузера и сервера разные (см. show.start_turn_clock).
+    """
+    if not _LINK["down"]:
+        return {"waiting": False}
+    left = max(0.0, float(_LINK["retry_at"]) - time.monotonic())
+    return {"waiting": True, "attempt": int(_LINK["attempt"]),
+            "attempts": int(_LINK["attempts"]), "retry_in": round(left, 1),
+            "note": str(_LINK["note"])}
+
+
+def _link_down(attempt: int, attempts: int, wait: float) -> str:
+    """Связи нет: запомнить это (сайдбар прочитает) и сказать словами."""
+    note = (f"нет связи со шлюзом — попытка {attempt} из {attempts}, "
+            f"следующая через {wait:g} с")
+    _LINK.update({"down": True, "attempt": attempt, "attempts": attempts,
+                  "retry_at": time.monotonic() + wait, "note": note})
+    return note
+
+
+def _link_forget() -> None:
+    """Связь больше не в беде (или уже не важна): сайдбару нечего показывать."""
+    _LINK.update({"down": False, "attempt": 0, "attempts": 0,
+                  "retry_at": 0.0, "note": ""})
+
+
+def _link_up(report: dict = None) -> None:
+    """Связь есть. Сказать об этом стоит только тогда, когда её не было."""
+    if _LINK["down"]:
+        told = f"связь со шлюзом вернулась (попыток: {int(_LINK['attempt']) + 1})"
+        print(f"  🔌 {told}")
+        if report is not None:
+            journal_push(report, {"kind": "link", "t": time.time(),
+                                  "text": "✅ " + told})
+    _link_forget()
+
+
 def _unreachable_note(waited: float, lever: str) -> str:
     """Слова про «не дозвонились»: в них есть срок, рычаг и адрес — и нет модели.
 
@@ -912,8 +973,32 @@ def _unreachable_note(waited: float, lever: str) -> str:
             f"сам адрес {base_url()}")
 
 
+def _link_tries_note(tried: int, total: int) -> str:
+    """Сколько раз пробовали вернуть связь и чем это лечится.
+
+    Без этих слов «соединение не открылось» выглядит как приговор, хотя
+    приложение только что пробовало снова — просто попытки кончились.
+    """
+    if total <= 1:
+        return ""
+    return (f". Попыток вернуть связь: {tried + 1} из {total} — паузы между "
+            f"ними задаёт CLOUD_RECONNECT_DELAYS в settings.py")
+
+
+def _link_worth_retry(wait: float, deadline: float = None) -> bool:
+    """Есть ли смысл ждать паузу и пробовать связь снова.
+
+    Срок хода — всему предел: проспать паузу дольше него значит отобрать время
+    у самой модели, ради которой ход и затевался (см. cloud.turn_deadline).
+    """
+    if deadline is None:
+        return True
+    return time.monotonic() + max(0.0, float(wait)) < deadline
+
+
 def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
-             retries: int = None, read=None):
+             retries: int = None, read=None, report: dict = None,
+             deadline: float = None):
     """Один запрос к шлюзу. Возвращает (данные, текст ошибки) — без исключений.
 
     Ключа в тексте ошибки не бывает: сюда его подставляет только этот метод,
@@ -921,6 +1006,11 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
 
     Повторяется только 429 и только с задержкой: остальные 4xx — про сам запрос,
     и повторять их бессмысленно (и вредно: серия ошибок уводит ключ в паузу).
+    А ещё повторяется оборвавшаяся связь — но это другой счёт и другие паузы
+    (см. reconnect_delays): шлюз тут ни при чём, до него просто нет хода.
+
+    report и deadline — для повтора связи: в журнал хода надо записать, что
+    связи не было, а срок хода — не проспать (см. _link_worth_retry).
 
     read — как разобрать ответ. Обычный ответ и поток разбираются по-разному,
     а всё остальное (ключ, повторы, срок ожидания, ошибки) у них общее,
@@ -941,26 +1031,43 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
     opener = gateway_opener()
     seconds = timeout or timeout_seconds()
     delays = tuple(retry_delays() or ())
-    attempts = (len(delays) if retries is None else max(0, retries)) + 1
+    reconnects = tuple(reconnect_delays() or ())
+    if retries is not None:
+        # «Повторять некогда» — так спрашивают список моделей: ни паузы после
+        # 429, ни возврата связи, ответ нужен сейчас (см. fetch_models)
+        delays, reconnects = delays[:max(0, int(retries))], ()
+    # Два счётчика, а не один: причины разные, и настройки у них разные
+    attempts = len(delays) + 1      # запросов, включая повторы после 429
+    link_tries = len(reconnects) + 1    # сколько раз пробуем вернуть связь
+    attempt = 0
+    link = 0
 
-    for attempt in range(attempts):
+    while True:
         try:
             with opener.open(request, timeout=seconds) as response:
                 if read is not None:
-                    return read(response), None
+                    answer = read(response)
+                    _link_up(report)     # связью тут никто не обижен
+                    return answer, None
                 body = response.read().decode("utf-8")
+            _link_up(report)
             try:
                 return json.loads(body), None
             except ValueError:
                 return None, hide_key(f"шлюз ответил не данными, а текстом: {body[:200]}")
         except TimeoutError:
-            # Своё сообщение вместо «The read operation timed out»: по сырому
-            # тексту нельзя понять ни сколько ждали, ни что с этим делать
+            # Дозвонились, а ответа нет: это про медленную модель, а не про
+            # связь, поэтому свой текст, а не «The read operation timed out».
+            # И без повтора: повтор запроса стоит ещё одних входных токенов,
+            # а модель от повторения быстрее не станет
+            _link_forget()
             return None, GatewayError(
                 f"модель не ответила за {seconds} с: шлюз не прислал данные. "
                 f"«Думающим» и большим моделям нужно больше времени — "
                 f"увеличьте CLOUD_TIMEOUT в .env")
         except urllib.error.HTTPError as e:
+            # Шлюз ответил — значит связь есть: обрывом тут и не пахло
+            _link_forget()
             detail = ""
             try:
                 detail = e.read().decode("utf-8")[:500]
@@ -973,27 +1080,47 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
                 print(f"  ⏳ Шлюз просит подождать (429), повторяю через {wait:.0f} с "
                       f"— попытка {attempt + 2} из {attempts}")
                 time.sleep(wait)
+                attempt += 1
                 continue
             return None, GatewayError(hide_key(_error_text(e.code, e.reason, detail)), e.code)
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, ConnectionError) as e:
             # Связи нет вовсе: соединение со шлюзом не открылось. Сюда urllib
             # заворачивает и здешний таймаут (TimeoutError, он же socket.timeout),
             # поэтому в ветку выше он не доходит, и без этой ветки обычное
             # «не дозвонились» выглядело нашей поломкой: трассировка на весь
             # экран и «шлюз недоступен» без единой подсказки. Трассировку
-            # оставляем для наших собственных ошибок — см. ветку ниже
+            # оставляем для наших собственных ошибок — см. ветку ниже. А обрыв
+            # связи — это то, что бывает и проходит: интернет есть не всегда,
+            # поэтому пробуем снова, пока ходу есть на это время.
+            #
+            # ConnectionError тут потому, что оборваться связь умеет двумя
+            # способами: не дозвониться (это urllib заворачивает в URLError)
+            # и оборвать уже начатый разговор — тут исключение приходит от
+            # сокета как есть и мимо URLError пролетает (в жизни это был
+            # шлюз, который закрыл соединение, не сказав ни слова: повторов
+            # не было, а в консоль уезжала трассировка)
             reason = getattr(e, "reason", None) or e
+            if link + 1 < link_tries and _link_worth_retry(reconnects[link], deadline):
+                note = _link_down(link + 1, link_tries, reconnects[link])
+                print(f"  🔌 {note}")
+                journal_push(report, {"kind": "link", "t": time.time(), "text": note})
+                time.sleep(reconnects[link])
+                link += 1
+                continue
+            _link_forget()
+            tries = _link_tries_note(link, link_tries)
             if isinstance(reason, ConnectTimedOut):
                 # Именно не дозвонились и именно за свой, короткий срок:
                 # так это и надо назвать — вместе с рычагом в настройках
                 return None, GatewayError(_unreachable_note(
                     getattr(reason, "waited", None) or seconds,
-                    "CLOUD_CONNECT_TIMEOUT"))
+                    "CLOUD_CONNECT_TIMEOUT") + tries)
             if isinstance(reason, TimeoutError):
-                return None, GatewayError(_unreachable_note(seconds, "CLOUD_TIMEOUT"))
+                return None, GatewayError(_unreachable_note(seconds, "CLOUD_TIMEOUT") + tries)
             return None, GatewayError(hide_key(
-                f"шлюз недоступен по адресу {base_url()}: {reason}"))
+                f"шлюз недоступен по адресу {base_url()}: {reason}") + tries)
         except Exception as e:
+            _link_forget()
             # Своя собственная ошибка не должна выглядеть как поломка шлюза: покажем
             # её в консоли со следом, а в ленте останется короткое слово (так была
             # найдена свалка «'NoneType' object is not callable» в ответе модели)
@@ -1567,7 +1694,8 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         journal_ask_start(report, tokens_in_est=messages_tokens(messages),
                           tools=tools_sent,
                           messages=len(body.get("messages") or []))
-        answer, error = _request("chat/completions", payload=body, method="POST", read=read)
+        answer, error = _request("chat/completions", payload=body, method="POST", read=read,
+                                 report=report, deadline=deadline)
         notes = {"error": str(error)} if error else _turn_notes(answer)
         if not error:
             if answer.get("error"):

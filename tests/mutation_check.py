@@ -411,8 +411,11 @@ BUGS = {
     "молчащий шлюз снова отвечает сырым текстом ошибки": [
         ("aitheatre/cloud.py",
          "        except TimeoutError:\n"
-         "            # Своё сообщение вместо «The read operation timed out»: по сырому\n"
-         "            # тексту нельзя понять ни сколько ждали, ни что с этим делать\n"
+         "            # Дозвонились, а ответа нет: это про медленную модель, а не про\n"
+         "            # связь, поэтому свой текст, а не «The read operation timed out».\n"
+         "            # И без повтора: повтор запроса стоит ещё одних входных токенов,\n"
+         "            # а модель от повторения быстрее не станет\n"
+         "            _link_forget()\n"
          "            return None, GatewayError(\n"
          '                f"модель не ответила за {seconds} с: шлюз не прислал данные. "\n'
          '                f"«Думающим» и большим моделям нужно больше времени — "\n'
@@ -423,6 +426,45 @@ BUGS = {
         ("aitheatre/cloud.py",
          "            if isinstance(reason, TimeoutError):",
          "            if False:"),
+    ],
+    "связь снова не возвращают повтором": [
+        ("aitheatre/cloud.py",
+         "    reconnects = tuple(reconnect_delays() or ())",
+         "    reconnects = ()"),
+    ],
+    "оборванный разговор снова не считают обрывом связи": [
+        ("aitheatre/cloud.py",
+         "        except (urllib.error.URLError, ConnectionError) as e:",
+         "        except urllib.error.URLError as e:"),
+    ],
+    "срок хода снова не мешает повторам": [
+        ("aitheatre/cloud.py",
+         "    if deadline is None:\n        return True",
+         "    if True:\n        return True"),
+    ],
+    "обрыв связи снова не попадает в хронологию": [
+        ("aitheatre/cloud.py",
+         '                journal_push(report, {"kind": "link", "t": time.time(), "text": note})',
+         "                pass"),
+    ],
+    "о вернувшейся связи снова молчат в хронологии": [
+        ("aitheatre/cloud.py",
+         "        if report is not None:\n"
+         '            journal_push(report, {"kind": "link", "t": time.time(),\n'
+         '                                  "text": "✅ " + told})',
+         "        if report is not None:\n            pass"),
+    ],
+    "о сорвавшейся связи снова молчат в сайдбаре": [
+        ("aitheatre/cloud.py",
+         '    _LINK.update({"down": True, "attempt": attempt, "attempts": attempts,',
+         '    _LINK.update({"down": False, "attempt": attempt, "attempts": attempts,'),
+    ],
+    "сайдбар снова пишет «думает», когда связи нет": [
+        ("aitheatre/page.py",
+         "            let text = linkWaiting(data)\n"
+         "                ? `⏱ ждём связь ${durationText(data.turn_elapsed)}`\n"
+         "                : `⏱ думает ${durationText(data.turn_elapsed)}`;",
+         "            let text = `⏱ думает ${durationText(data.turn_elapsed)}`;"),
     ],
     "срок на соединение снова один на всё": [
         ("aitheatre/cloud.py",

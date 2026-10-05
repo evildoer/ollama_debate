@@ -5201,6 +5201,9 @@ class TestCloudGateway(unittest.TestCase):
             raise urllib.error.URLError(TimeoutError("timed out"))
 
         cloud_setting(self, "CLOUD_TIMEOUT", 3)
+        # Без повторов: здесь проверяется не возврат связи, а то, что о ней
+        # сказано словами (повторы у себя — см. test_a_broken_link_is_retried)
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", ())
         opener = mock.Mock(open=mock.Mock(side_effect=deaf))
         printer = mock.Mock()
         with mock.patch.object(cloud.urllib.request, "build_opener",
@@ -5219,6 +5222,7 @@ class TestCloudGateway(unittest.TestCase):
         def refused(*_args, **_kwargs):
             raise urllib.error.URLError(ConnectionRefusedError(10061, "соединение отвергнуто"))
 
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", ())
         opener = mock.Mock(open=mock.Mock(side_effect=refused))
         with mock.patch.object(cloud.urllib.request, "build_opener",
                                mock.Mock(return_value=opener)):
@@ -5277,6 +5281,7 @@ class TestCloudGateway(unittest.TestCase):
         """
         cloud_setting(self, "CLOUD_TIMEOUT", 9)
         cloud_setting(self, "CLOUD_CONNECT_TIMEOUT", 3)
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", ())   # про срок, а не про повторы
         started = time.time()
         with mock.patch("socket.create_connection",
                         mock.Mock(side_effect=TimeoutError("timed out"))):
@@ -5287,6 +5292,140 @@ class TestCloudGateway(unittest.TestCase):
         self.assertNotIn("(CLOUD_TIMEOUT)", content,
                          "ждать срок ответа на соединение незачем")
         self.assertLess(time.time() - started, 5)
+
+    def _link_that_fails(self, times):
+        """Соединение, падающее первые times раз: интернет как он есть.
+
+        Падает ровно на соединении и по-настоящему: дальше идут настоящие
+        запросы к шлюзу-заглушке, поэтому проверка про повторы не расходится
+        с тем, что произойдёт на живой сети.
+        """
+        real = socket.create_connection
+        seen = {"n": 0}
+
+        def connect(address, timeout=None, *args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] <= times:
+                raise TimeoutError("нет связи")
+            return real(address, timeout, *args, **kwargs)
+
+        return connect, seen
+
+    def test_a_broken_link_is_retried_until_it_answers(self):
+        """Связь оборвалась — приложение возвращает её само, а не сдаётся.
+
+        В жизни это выглядит именно так: маршрут пропал на секунды. Ход не
+        должен кончаться ошибкой, если проходит вторая попытка, — и след обрыва
+        обязан остаться в хронологии хода (он же в ДАМПе).
+        """
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", (0, 0))
+        journal = {"steps": []}
+        connect, seen = self._link_that_fails(2)
+        with mock.patch("socket.create_connection", connect):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                         report=journal)
+
+        self.assertEqual(content, "Канберра.", "третья попытка должна была пройти")
+        self.assertEqual(seen["n"], 3, f"соединение пробовали {seen['n']} раз")
+        told = [step for step in journal["steps"] if step.get("kind") == "link"]
+        self.assertTrue(told, "в хронологии хода обязан быть след обрыва связи")
+        self.assertIn("нет связи со шлюзом", told[0]["text"])
+        self.assertIn("вернулась", told[-1]["text"])
+        self.assertFalse(cloud.link_state()["waiting"],
+                         "связь есть — сайдбару нечего ждать")
+
+    def test_a_gateway_that_hangs_up_is_retried_too(self):
+        """Шлюз оборвал разговор, не сказав ни слова, — это тоже обрыв связи.
+
+        Так это и было на живом шлюзе: соединение закрыто, ответа нет. Сокет
+        отдаёт такое как есть (RemoteDisconnected — это ConnectionResetError),
+        мимо URLError, поэтому повторов не было, а в консоль уезжала трассировка.
+        Заглушка здесь самая честная: живой сокет, который принимает и сразу
+        вешает трубку.
+        """
+        os.environ.pop("CLOUD_BASE_URL", None)
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", (0, 0))
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        self.addCleanup(listener.close)
+        heard = []
+
+        def hang_up():
+            while True:
+                try:
+                    conn, _address = listener.accept()
+                except OSError:
+                    return
+                heard.append(1)
+                conn.close()
+
+        threading.Thread(target=hang_up, daemon=True).start()
+        cloud_setting(self, "CLOUD_BASE_URL",
+                      f"http://127.0.0.1:{listener.getsockname()[1]}/v1")
+        journal = {"steps": []}
+        printer = mock.Mock()
+        with mock.patch.object(cloud.traceback, "print_exc", printer):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                         report=journal)
+
+        self.assertEqual(len(heard), 3, "первая попытка плюс две паузы из настроек")
+        self.assertIn("шлюз недоступен по адресу", content)
+        self.assertIn("CLOUD_RECONNECT_DELAYS", content)
+        self.assertEqual(printer.call_count, 0,
+                         "оборванный разговор — не наша поломка: следа в консоли не надо")
+        self.assertTrue([step for step in journal["steps"] if step.get("kind") == "link"])
+
+    def test_the_sidebar_learns_that_the_link_is_down(self):
+        """Пока связи нет, состояние для сайдбара говорит «ждём связь», а не «думает».
+
+        Спрашиваем ровно там, откуда это читает страница (см. cloud.link_state),
+        и в тот момент, когда приложение и правда ждёт паузу перед попыткой.
+        """
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", (0,))
+        states = []
+        announce = cloud._link_down
+
+        def spy(attempt, attempts, wait):
+            note = announce(attempt, attempts, wait)
+            states.append(cloud.link_state())
+            return note
+
+        connect, _seen = self._link_that_fails(999)
+        with mock.patch("socket.create_connection", connect), \
+                mock.patch.object(cloud, "_link_down", spy):
+            cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+
+        self.assertEqual(len(states), 1, "одна пауза — одна попытка вернуть связь")
+        self.assertTrue(states[0]["waiting"])
+        self.assertEqual((states[0]["attempt"], states[0]["attempts"]), (1, 2))
+        self.assertIn("нет связи со шлюзом", states[0]["note"])
+        self.assertFalse(cloud.link_state()["waiting"],
+                         "сдались — сайдбару больше нечего ждать")
+
+    def test_a_link_that_never_comes_back_names_the_attempts(self):
+        """Связь не вернулась: об этом сказано словами, и попыток — сколько обещано."""
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", (0, 0))
+        connect, seen = self._link_that_fails(999)
+        with mock.patch("socket.create_connection", connect):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+
+        self.assertEqual(seen["n"], 3, "первая попытка плюс две паузы из настроек")
+        self.assertIn("соединение со шлюзом не открылось", content)
+        self.assertIn("CLOUD_RECONNECT_DELAYS", content,
+                      "в ошибке обязан быть назван рычаг, которым это лечат")
+        self.assertFalse(cloud.link_state()["waiting"])
+
+    def test_the_turn_deadline_stops_the_retries(self):
+        """Срок хода важнее упорства: спать паузу дольше него приложение не станет."""
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", (1, 1))
+        connect, seen = self._link_that_fails(999)
+        with mock.patch("socket.create_connection", connect):
+            cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                       deadline=time.monotonic() + 1)
+
+        self.assertEqual(seen["n"], 1,
+                         "секундная пауза в секунду срока не влезает — и повтора нет")
 
     def test_the_opener_uses_our_connection_on_https_too(self):
         """На https обязано стоять наше соединение: иначе короткий срок — только у http.
@@ -6133,6 +6272,23 @@ class TestRoutes(unittest.TestCase):
         post = next(p for p in data["posts"] if p["display_name"] == name)
         self.assertEqual(post["avatar_emoji"], "👩‍🔬",
                          "в ленте должно стоять лицо из состава, а не из реплики")
+
+    def test_the_state_carries_a_broken_link(self):
+        """Сорвавшаяся связь едет в состоянии — иначе сайдбару нечего назвать.
+
+        Читает её страница из того же состояния, что и часы: два канала
+        (опрос и сокет) собирает одна функция (см. web.status_payload).
+        """
+        self.addCleanup(cloud._link_forget)
+        self.assertFalse(self.client.get("/api/status").get_json()["link"]["waiting"])
+
+        cloud._link_down(2, 4, 5)
+        data = self.client.get("/api/status").get_json()["link"]
+
+        self.assertTrue(data["waiting"])
+        self.assertEqual((data["attempt"], data["attempts"]), (2, 4))
+        self.assertIn("нет связи со шлюзом", data["note"])
+        self.assertLessEqual(data["retry_in"], 5)
 
     def test_start_reports_that_the_play_is_being_continued(self):
         """Доиграть прежний спектакль можно и из пульта, а не только по вопросу в консоли.
@@ -7105,9 +7261,9 @@ class TestPageScript(unittest.TestCase):
         больше всего: «осталось» считает браузер, и ошибка в нём видна только
         зрителю (см. turnClockText).
         """
-        return self._run_page(("tokensText", "moneyText", "durationText",
+        return self._run_page(("escapeHtml", "tokensText", "moneyText", "durationText",
                                "turnClockText", "turnSummaryParts", "spentLine",
-                               "textNeedsClamp"), *calls)
+                               "linkWaiting", "linkLine", "textNeedsClamp"), *calls)
 
     def _run_page(self, functions, *calls, constants=()):
         """Страница в node: сколько угодно её функций и чисел — в том виде,
@@ -7271,6 +7427,30 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("12,50 ₽", out[0])
         self.assertEqual(out[1], "", "нечего было тратить — нечего и показывать")
         self.assertEqual(out[2], "")
+
+    def test_a_broken_link_is_named_instead_of_the_model_thinking(self):
+        """Связи нет — и в сайдбаре сказано про связь, а не «думает».
+
+        Решает это сервер (см. cloud.link_state), а страница только называет
+        словами: ждать модель и ждать связь — разные ожидания, и путать их
+        значит врать режиссёру ровно в тот момент, когда он смотрит на часы.
+        """
+        out = self._run_in_node(
+            "turnClockText({turn_elapsed: 12, turn_left: 108, link: {waiting: true}})",
+            "turnClockText({turn_elapsed: 12, turn_left: 108, link: {waiting: false}})",
+            "linkLine({link: {waiting: true, attempt: 2, attempts: 4, retry_in: 13}})",
+            "linkLine({link: {waiting: false}})",
+            "linkLine({})")
+
+        self.assertIn("ждём связь 12 с", out[0])
+        self.assertIn("осталось 1 мин 48 с", out[0],
+                      "срок хода идёт и во время обрыва связи")
+        self.assertIn("думает 12 с", out[1])
+        self.assertIn("нет связи со шлюзом", out[2])
+        self.assertIn("попытка 2 из 4", out[2])
+        self.assertIn("следующая через 13 с", out[2])
+        self.assertEqual(out[3], "", "связь в порядке — и строки про неё нет")
+        self.assertEqual(out[4], "", "состояния нет — и придумывать нечего")
 
     def test_the_clock_counts_up_and_shows_the_bonus(self):
         """Сколько думает и сколько осталось — и с надбавкой за поиски."""
