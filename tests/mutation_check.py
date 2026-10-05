@@ -424,6 +424,21 @@ BUGS = {
          "            if isinstance(reason, TimeoutError):",
          "            if False:"),
     ],
+    "срок на соединение снова один на всё": [
+        ("aitheatre/cloud.py",
+         "            if not short or not waiting:\n                return super().connect()",
+         "            if True:\n                return super().connect()"),
+    ],
+    "короткий срок снова режет и чтение ответа": [
+        ("aitheatre/cloud.py",
+         "                if self.sock is not None:\n                    self.sock.settimeout(waiting)",
+         "                if self.sock is not None:\n                    pass"),
+    ],
+    "ноль снова считается коротким сроком": [
+        ("aitheatre/cloud.py",
+         "            if not short or not waiting:",
+         "            if not waiting:"),
+    ],
     "числа характеров снова уезжают на шлюз": [
         ("aitheatre/cloud.py",
          "    if send_params():",
@@ -466,15 +481,9 @@ BUGS = {
     ],
     "запрос к шлюзу снова ведётся через локальный прокси": [
         ("aitheatre/cloud.py",
-         "    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))",
-         "    opener = urllib.request.build_opener()"),
-    ],
-    "реплика снова уезжает в шлюз через локальный прокси": [
-        ("aitheatre/cloud.py",
-         "    # запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси.\n"
-         "    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))",
-         "    # запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси.\n"
-         "    opener = urllib.request.build_opener()"),
+         "    return urllib.request.build_opener(\n"
+         "        urllib.request.ProxyHandler({}),",
+         "    return urllib.request.build_opener("),
     ],
     "значения из .env стали пустыми": [
         ("aitheatre/cloud.py",
@@ -755,10 +764,7 @@ BUGS = {
     ],
     "правка инструкций в редакторе снова не сохраняется": [
         ("aitheatre/web.py",
-         "    # Редактор — часть режиссёрского пульта, поэтому его правки тоже переживают\n"
-         "    # перезапуск: раньше сохранялись только правила судьи, а правила общения\n"
-         "    # и руководства после перезапуска тихо возвращались к дефолтным\n"
-         "    show.save_theatre_settings()\n",
+         '    show.save_theatre_settings("правила и инструкции")\n',
          ""),
     ],
     "тема снова не сохраняется вместе с пультом": [
@@ -1231,7 +1237,9 @@ BUGS = {
     ],
     "смена эмодзи снова остаётся только на странице": [
         ("aitheatre/show.py",
-         "            session.sync_cast_media()\n            save_theatre_settings()\n            return \"\"",
+         "            session.sync_cast_media()\n"
+         '            save_theatre_settings("эмодзи-аватар участника")\n'
+         "            return \"\"",
          "            return \"\""),
     ],
     "портрет, за которым нет файла, снова берётся на слово": [

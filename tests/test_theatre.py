@@ -37,6 +37,7 @@
 import builtins
 import collections
 import copy
+import http.client
 import http.server
 import importlib
 import io
@@ -5228,6 +5229,85 @@ class TestCloudGateway(unittest.TestCase):
                       "причину, названную сетью, надо оставить")
         self.assertNotIn("urlopen error", content)
 
+    def _deadlines_seen(self, answer_deadline, connect_deadline):
+        """Какой срок достался соединению, а какой остался открытому сокету.
+
+        Считается на настоящем сокете: ход идёт к шлюзу-заглушке, а срок
+        подменяется там, откуда http.client его берёт, — видно и то, что
+        запросу дали на соединение, и то, что осталось на чтение ответа.
+        """
+        cloud_setting(self, "CLOUD_TIMEOUT", answer_deadline)
+        cloud_setting(self, "CLOUD_CONNECT_TIMEOUT", connect_deadline)
+        real = socket.create_connection
+        seen = {}
+
+        def connect(address, timeout=None, *args, **kwargs):
+            sock = real(address, timeout, *args, **kwargs)
+            seen["connect"], seen["socket"] = timeout, sock
+            return sock
+
+        with mock.patch("socket.create_connection", connect):
+            cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+        return seen["connect"], seen["socket"].gettimeout()
+
+    def test_the_short_deadline_applies_to_the_connection_only(self):
+        """Соединению — короткий срок, ответу модели — прежний, длинный.
+
+        Срок у запроса один на всё, и большой он ради «думающих» моделей:
+        ждать его на «не дозвонились» — три минуты немого простоя. Но и чтению
+        ответа отдавать короткий срок нельзя: живая модель резалась бы на нём.
+        """
+        connect_waited, reading_waited = self._deadlines_seen(40, 2)
+        self.assertEqual(connect_waited, 2, "на соединение обязан быть короткий срок")
+        self.assertEqual(reading_waited, 40,
+                         "чтение ответа ждёт прежний срок: коротким его резать нельзя")
+
+    def test_zero_leaves_the_whole_deadline_to_the_connection(self):
+        """Ноль не значит «нисколько»: 0 — не отделять срок, соединение ждёт как ответ."""
+        connect_waited, reading_waited = self._deadlines_seen(40, 0)
+        self.assertEqual(connect_waited, 40)
+        self.assertEqual(reading_waited, 40)
+
+    def test_a_connection_that_never_opens_gives_up_quickly(self):
+        """«Не дозвонились» видно за свой срок, и в ленте об этом сказано словами.
+
+        Соединение изображается на уровне сокета, поэтому проверка идёт
+        настоящим urllib: до этого срок был один на всё, и обрыв связи ждали
+        те же 180 секунд, что и ответ самой медленной модели.
+        """
+        cloud_setting(self, "CLOUD_TIMEOUT", 9)
+        cloud_setting(self, "CLOUD_CONNECT_TIMEOUT", 3)
+        started = time.time()
+        with mock.patch("socket.create_connection",
+                        mock.Mock(side_effect=TimeoutError("timed out"))):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+
+        self.assertIn("не открылось за 3 с", content)
+        self.assertIn("CLOUD_CONNECT_TIMEOUT", content, "рычаг обязан быть назван")
+        self.assertNotIn("(CLOUD_TIMEOUT)", content,
+                         "ждать срок ответа на соединение незачем")
+        self.assertLess(time.time() - started, 5)
+
+    def test_the_opener_uses_our_connection_on_https_too(self):
+        """На https обязано стоять наше соединение: иначе короткий срок — только у http.
+
+        А все настоящие шлюзы — https. Обращение к классу видно до сети, поэтому
+        проверка идёт без интернета, но по тому самому классу, который доехал бы
+        до соединения: подмена класса ломала бы аргументы TLS, а не молчала.
+        """
+        handler = [one for one in cloud.gateway_opener().handlers
+                   if isinstance(one, urllib.request.HTTPSHandler)][0]
+        seen = {}
+        with mock.patch.object(urllib.request.AbstractHTTPHandler, "do_open",
+                               lambda _self, http_class, req, **kwargs:
+                                   seen.update(http_class=http_class, kwargs=kwargs)):
+            handler.https_open(urllib.request.Request("https://gateway.invalid/v1/models"))
+
+        self.assertTrue(issubclass(seen["http_class"], http.client.HTTPSConnection))
+        self.assertNotEqual(seen["http_class"], http.client.HTTPSConnection,
+                            "короткий срок обязан стоять и на https")
+        self.assertIn("context", seen["kwargs"], "контекст TLS обязан доехать до соединения")
+
     def test_a_key_with_odd_symbols_is_explained_in_words(self):
         """Заголовки HTTP бывают только латинскими: кириллица в ключе падала бы кодеком."""
         settings.CLOUD_API_KEY = "ключ-скопированный-из-письма"
@@ -5312,8 +5392,8 @@ class TestCloudGateway(unittest.TestCase):
         os.environ["HTTP_PROXY"] = "http://127.0.0.1:1"    # мёртвый порт: достучаться нельзя
         os.environ["HTTPS_PROXY"] = "http://127.0.0.1:1"
         dead = {"http": "http://127.0.0.1:1", "https": "http://127.0.0.1:1"}
-        # Оба запроса к шлюзу — и реплика, и остаток на ключе: открывателей
-        # в cloud.py два, и оба обязаны прокси не слушаться
+        # Оба запроса к шлюзу — и реплика, и остаток на ключе: открыватель
+        # у них теперь один (см. gateway_opener), и прокси он не слушается
         cloud_setting(self, "CLOUD_BALANCE_PATH", "/proxyapi/balance")
         self.gateway.balances = [100.0]
         with mock.patch.object(urllib.request, "getproxies", lambda: dict(dead)), \

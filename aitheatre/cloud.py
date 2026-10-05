@@ -49,6 +49,7 @@ tool_calls с id, в ответе инструмента — tool_call_id. Бе�
 не применённая настройка — это потом часы поиска причины в шлюзе.
 """
 
+import http.client
 import json
 import os
 import re
@@ -319,6 +320,17 @@ def timeout_seconds() -> int:
     быть можно, не трогая код этого модуля.
     """
     return max(1, int(settings.CLOUD_TIMEOUT))
+
+
+def connect_seconds() -> int:
+    """Сколько секунд даём именно на установку соединения со шлюзом.
+
+    Срок на ответ модели длинный нарочно («думающие» модели отвечают небыстро),
+    и ждать его на «не дозвонились» незачем: это три минуты немого простоя
+    вместо десяти секунд и внятного слова в ленте. Ноль — не отделять срок
+    вовсе: соединение ждёт столько же, сколько ответ.
+    """
+    return max(0, int(settings.CLOUD_CONNECT_TIMEOUT))
 
 
 def retry_delays() -> tuple:
@@ -626,7 +638,7 @@ def balance(force: bool = False) -> tuple:
     # прокси до вендоров, и вести его через локальный прокси значило бы сломать
     request = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {api_key()}"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = gateway_opener()
     try:
         with opener.open(request, timeout=timeout_seconds()) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -830,6 +842,76 @@ def _wait_before_retry(attempt: int, headers) -> float:
     return wait
 
 
+class ConnectTimedOut(OSError):
+    """Соединение со шлюзом не открылось за срок, отведённый именно на это.
+
+    Отдельный вид нужен затем, чтобы «не дозвонились» не путалось с «дозвонились,
+    а ответа нет»: сроки у этих бед разные, и слова в ленте — тоже.
+    """
+
+    def __init__(self, waited: float):
+        super().__init__(f"соединение со шлюзом не открылось за {waited:g} с")
+        self.waited = waited
+
+
+def _connect_limited(base_handler, base_connection):
+    """Обработчик шлюза, у которого на «дозвониться» свой, короткий срок.
+
+    Срок у запроса один на всё — и на соединение, и на каждое чтение. Разделить
+    их можно только своим соединением: подменяем срок на время connect, а перед
+    чтением ответа возвращаем прежний — на уже открытом сокете.
+    """
+
+    class Connection(base_connection):
+        def connect(self):
+            waiting = self.timeout
+            short = connect_seconds()
+            if not short or not waiting:
+                return super().connect()
+            self.timeout = min(short, waiting)
+            try:
+                super().connect()
+            except TimeoutError:
+                raise ConnectTimedOut(self.timeout) from None
+            finally:
+                self.timeout = waiting
+                if self.sock is not None:
+                    self.sock.settimeout(waiting)
+
+    class Handler(base_handler):
+        def do_open(self, _http_class, req, **http_conn_args):
+            return super().do_open(Connection, req, **http_conn_args)
+
+    return Handler
+
+
+def gateway_opener():
+    """Открыватель для запросов к шлюзу: без прокси и с коротким «дозвониться».
+
+    Шлюз — сам прокси до OpenAI и других API, в этом его смысл. Вести его ещё
+    и через свой локальный прокси (как поиск в интернете) значило бы замедлить
+    запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси —
+    и со своим соединением: срок на ответ модели здесь ни при чём.
+    """
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _connect_limited(urllib.request.HTTPHandler, http.client.HTTPConnection),
+        _connect_limited(urllib.request.HTTPSHandler, http.client.HTTPSConnection),
+    )
+
+
+def _unreachable_note(waited: float, lever: str) -> str:
+    """Слова про «не дозвонились»: в них есть срок, рычаг и адрес — и нет модели.
+
+    Ни модель, ни ключ тут ни при чём: запрос до шлюза даже не дошёл. Сказать
+    об этом прямо важнее, чем красиво: иначе причину ищут в модели, которая
+    в этот раз вообще не вызывалась.
+    """
+    return (f"соединение со шлюзом не открылось за {waited:g} с ({lever}): запрос "
+            f"до него не дошёл. Дело не в модели и не в ключе — молчит сеть или "
+            f"сам адрес {base_url()}")
+
+
 def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
              retries: int = None, read=None):
     """Один запрос к шлюзу. Возвращает (данные, текст ошибки) — без исключений.
@@ -856,10 +938,7 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
         headers["Content-Type"] = "application/json"
 
     request = urllib.request.Request(_url(path), data=data, headers=headers, method=method)
-    # Шлюз — сам прокси до OpenAI и других API, в этом его смысл. Вести его ещё
-    # и через свой локальный прокси (как поиск в интернете) значило бы замедлить
-    # запрос, а часто и сломать. Поэтому свой открыватель вообще без прокси.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = gateway_opener()
     seconds = timeout or timeout_seconds()
     delays = tuple(retry_delays() or ())
     attempts = (len(delays) if retries is None else max(0, retries)) + 1
@@ -904,11 +983,14 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
             # экран и «шлюз недоступен» без единой подсказки. Трассировку
             # оставляем для наших собственных ошибок — см. ветку ниже
             reason = getattr(e, "reason", None) or e
+            if isinstance(reason, ConnectTimedOut):
+                # Именно не дозвонились и именно за свой, короткий срок:
+                # так это и надо назвать — вместе с рычагом в настройках
+                return None, GatewayError(_unreachable_note(
+                    getattr(reason, "waited", None) or seconds,
+                    "CLOUD_CONNECT_TIMEOUT"))
             if isinstance(reason, TimeoutError):
-                return None, GatewayError(
-                    f"соединение со шлюзом не открылось за {seconds} с (срок "
-                    f"CLOUD_TIMEOUT): запрос до него не дошёл. Дело не в модели и не "
-                    f"в ключе — молчит сеть или сам адрес {base_url()}")
+                return None, GatewayError(_unreachable_note(seconds, "CLOUD_TIMEOUT"))
             return None, GatewayError(hide_key(
                 f"шлюз недоступен по адресу {base_url()}: {reason}"))
         except Exception as e:
