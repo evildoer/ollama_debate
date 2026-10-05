@@ -5188,6 +5188,46 @@ class TestCloudGateway(unittest.TestCase):
         self.assertIn("CLOUD_TIMEOUT", content, "подсказка обязана называть рычаг")
         self.assertNotIn("timed out", content)
 
+    def test_a_connection_that_never_opens_says_so_in_words(self):
+        """Настоящее «не дозвонились» приходит не TimeoutError, а URLError.
+
+        urllib заворачивает здешний таймаут в URLError (его же и печатал следом
+        в консоли), поэтому в ветку про таймаут он не доходит: без отдельной
+        ветки обрыв связи выглядел нашей поломкой — на весь экран трассировкой
+        и словами «шлюз недоступен», по которым нечего делать.
+        """
+        def deaf(*_args, **_kwargs):
+            raise urllib.error.URLError(TimeoutError("timed out"))
+
+        cloud_setting(self, "CLOUD_TIMEOUT", 3)
+        opener = mock.Mock(open=mock.Mock(side_effect=deaf))
+        printer = mock.Mock()
+        with mock.patch.object(cloud.urllib.request, "build_opener",
+                               mock.Mock(return_value=opener)), \
+                mock.patch.object(cloud.traceback, "print_exc", printer):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+
+        self.assertIn("не открылось за 3 с", content)
+        self.assertIn("CLOUD_TIMEOUT", content, "называем срок, которого не хватило")
+        self.assertNotIn("urlopen", content)
+        self.assertEqual(printer.call_count, 0,
+                         "сбой сети — не наша ошибка: следа в консоли быть не должно")
+
+    def test_a_gateway_that_cannot_be_reached_names_the_reason(self):
+        """Отказ соединения (адрес, порт, DNS) — тоже словами, а не «URLError»."""
+        def refused(*_args, **_kwargs):
+            raise urllib.error.URLError(ConnectionRefusedError(10061, "соединение отвергнуто"))
+
+        opener = mock.Mock(open=mock.Mock(side_effect=refused))
+        with mock.patch.object(cloud.urllib.request, "build_opener",
+                               mock.Mock(return_value=opener)):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}])
+
+        self.assertIn("шлюз недоступен по адресу", content)
+        self.assertIn("соединение отвергнуто", content,
+                      "причину, названную сетью, надо оставить")
+        self.assertNotIn("urlopen error", content)
+
     def test_a_key_with_odd_symbols_is_explained_in_words(self):
         """Заголовки HTTP бывают только латинскими: кириллица в ключе падала бы кодеком."""
         settings.CLOUD_API_KEY = "ключ-скопированный-из-письма"

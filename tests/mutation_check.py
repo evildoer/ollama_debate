@@ -419,6 +419,11 @@ BUGS = {
          '                f"увеличьте CLOUD_TIMEOUT в .env")\n',
          ""),
     ],
+    "обрыв связи со шлюзом снова показывают сырым текстом": [
+        ("aitheatre/cloud.py",
+         "            if isinstance(reason, TimeoutError):",
+         "            if False:"),
+    ],
     "числа характеров снова уезжают на шлюз": [
         ("aitheatre/cloud.py",
          "    if send_params():",

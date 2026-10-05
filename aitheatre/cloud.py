@@ -896,6 +896,21 @@ def _request(path: str, payload=None, method: str = "GET", timeout: int = None,
                 time.sleep(wait)
                 continue
             return None, GatewayError(hide_key(_error_text(e.code, e.reason, detail)), e.code)
+        except urllib.error.URLError as e:
+            # Связи нет вовсе: соединение со шлюзом не открылось. Сюда urllib
+            # заворачивает и здешний таймаут (TimeoutError, он же socket.timeout),
+            # поэтому в ветку выше он не доходит, и без этой ветки обычное
+            # «не дозвонились» выглядело нашей поломкой: трассировка на весь
+            # экран и «шлюз недоступен» без единой подсказки. Трассировку
+            # оставляем для наших собственных ошибок — см. ветку ниже
+            reason = getattr(e, "reason", None) or e
+            if isinstance(reason, TimeoutError):
+                return None, GatewayError(
+                    f"соединение со шлюзом не открылось за {seconds} с (срок "
+                    f"CLOUD_TIMEOUT): запрос до него не дошёл. Дело не в модели и не "
+                    f"в ключе — молчит сеть или сам адрес {base_url()}")
+            return None, GatewayError(hide_key(
+                f"шлюз недоступен по адресу {base_url()}: {reason}"))
         except Exception as e:
             # Своя собственная ошибка не должна выглядеть как поломка шлюза: покажем
             # её в консоли со следом, а в ленте останется короткое слово (так была
