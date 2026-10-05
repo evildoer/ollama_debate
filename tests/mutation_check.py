@@ -44,6 +44,13 @@ import time
 import unittest
 from pathlib import Path
 
+# КАК ЗАГОТОВКИ ГОВОРЯТ НАБОРУ, ЧТО КОД ИСПОРЧЕН НАРОЧНО. Набор проверяет и сами
+# заготовки: каждая обязана находить в коде своё место (иначе она давно ничего
+# не охраняет, а выглядит как охрана). В прогоне заготовок код испорчен нарочно,
+# и пропавший текст — это как раз порча, а не сломанная заготовка; поэтому
+# прогон поднимает это имя в окружении, а набор по нему молчит (см. run_suite)
+MUTATION_MODE = "THEATRE_MUTATION"
+
 # Отчёту нужны те же эмодзи (✅/❌), что и приложению, а русская консоль Windows
 # работает в cp1251 и роняет печать с UnicodeEncodeError. Приложение себя так
 # защищает при импорте; здесь импорта приложения нет, поэтому — тот же приём.
@@ -107,9 +114,16 @@ BUGS = {
          '        participant["is_judge"] = True'),
     ],
     "убранный участник всё равно выходит на сцену": [
+        # Место названо вместе со своей строкой-отметкой: такую же проверку
+        # убранного участника несёт ожидание реплики человека, и правка без
+        # отметки села бы в первое — то есть не туда, о чём заготовка
         ("aitheatre/show.py",
-         "                if not still_in_cast(participant, session.runtime_participants):",
-         "                if False:"),
+         "                if not still_in_cast(participant, session.runtime_participants):\n"
+         "                    print(f\"  ⤵️  {participant.get('display_name', '')} "
+         "убран из состава - пропускаю\")",
+         "                if False:\n"
+         "                    print(f\"  ⤵️  {participant.get('display_name', '')} "
+         "убран из состава - пропускаю\")"),
     ],
     "«Новый спектакль» забывает сцену": [
         ("aitheatre/show.py",
@@ -1335,8 +1349,13 @@ BUGS = {
          '        "boot_id": None,'),
     ],
     "перезапуск театра снова не видит открытая страница": [
+        # Место названо с обработчиком состояния, а не одной строкой: та же
+        # строка есть ещё в восстановлении сессии, и правка без приметы
+        # подставилась бы в первое место — то есть не туда, о чём заготовка
         ("aitheatre/page.py",
+         "                socket.on('status_update', data => {\n"
          "                    if (noteServerBoot(data)) return;",
+         "                socket.on('status_update', data => {\n"
          "                    if (false) return;"),
     ],
     "с занятым портом снова открывают браузер на чужой спектакль": [
@@ -1419,13 +1438,22 @@ def forget_app_modules():
         del sys.modules[name]
 
 
-def run_suite(project_dir: Path, first_failure: bool = False):
+def run_suite(project_dir: Path, first_failure: bool = False, mutated: bool = False):
     """Прогон набора против указанной копии проекта. Возвращает имена упавших.
 
     first_failure=True — останавливаться на первом же упавшем тесте: для вопроса
     «ловит ли набор этот баг» большего не нужно, а баг, которого ловит тест
     в конце набора, иначе заставил бы ждать весь набор (см. шапку и --full).
+
+    mutated=True — в копии лежит нарочно испорченный код, и об этом надо сказать
+    набору: иначе проверка «каждая заготовка находит своё место» будет краснеть
+    на порче, которую мы же и внесли, и заготовка отчитается пойманной не тем
+    тестом, который её охраняет (см. MUTATION_MODE).
     """
+    if mutated:
+        os.environ[MUTATION_MODE] = "1"
+    else:
+        os.environ.pop(MUTATION_MODE, None)
     forget_app_modules()
     sys.path.insert(0, str(project_dir))
     try:
@@ -1472,7 +1500,7 @@ def run_one_bug(title, patches):
                     return verdict("miss", files, [f"не нашёл место в {relative}"])
                 changed[relative] = text.replace(old, new, 1)
             copy_project(project_dir, changed)
-            _, caught = run_suite(project_dir, first_failure=True)
+            _, caught = run_suite(project_dir, first_failure=True, mutated=True)
     except Exception as error:
         # Копия не встала или набор упал не тестом — это тоже находка, и молчать
         # о ней нельзя: иначе баг отчитался бы как «нет вердикта»
@@ -1655,7 +1683,7 @@ def main(wanted=(), full=False, workers=None):
                     continue
 
                 copy_project(project_dir, changed)
-                _, caught = run_suite(project_dir)
+                _, caught = run_suite(project_dir, mutated=True)
                 mark = ", ".join(files)
                 if caught:
                     print(f"✅ [{mark}] {title}")

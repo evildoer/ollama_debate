@@ -5923,6 +5923,101 @@ class TestOfflinePage(unittest.TestCase):
         self.assertEqual(missing, [], f"страница ссылается на отсутствующие файлы: {missing}")
 
 
+class TestBugStubsStandWhereTheySay(unittest.TestCase):
+    """Заготовки багов: каждая обязана находить ровно своё место в коде.
+
+    Прогон заготовок (`tests/mutation_check.py`) зовётся вручную и идёт минуты,
+    а заготовка, потерявшая своё место в правке, до следующего полного прогона
+    молчит — и все эти дни вроде бы охраняет, хотя ломать ей уже нечего. Тот же
+    список читается здесь, вместе с обычным набором, поэтому сломанная заготовка
+    находится за секунду — и находятся сразу все, а не первая.
+
+    Место проверяется так же, как его берёт сам прогон заготовок: правка
+    подставляется первой же находкой (`text.replace(old, new, 1)`), значит
+    находка обязана быть одна. Заготовка, чей текст встречается дважды, ломает
+    не то место, о котором говорит, — и прогон об этом не узнает.
+    """
+
+    _stubs_module = None
+
+    def setUp(self):
+        # Идёт прогон заготовок — в копии лежит нарочно испорченный код: искать
+        # в нём места заготовок незачем, а покраснев здесь, класс отчитался бы
+        # ещё одним «поймавшим» и скрыл бы, кто поймал баг на самом деле
+        if os.environ.get(self._stubs().MUTATION_MODE):
+            self.skipTest("идёт прогон заготовок: код испорчен нарочно, и это не поломка")
+
+    @classmethod
+    def _stubs(cls):
+        """Тот же список заготовок, что подбрасывается в код, — не его копия."""
+        if cls._stubs_module is None:
+            path = Path(__file__).resolve().parent / "mutation_check.py"
+            spec = importlib.util.spec_from_file_location("mutation_stubs", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            cls._stubs_module = module
+        return cls._stubs_module
+
+    def _broken(self, stubs) -> list:
+        """Заготовки, которым нечего ломать или которым есть что сломать не то.
+
+        Прогон заготовок ставит правку первой же находкой и идёт минуты; сюда
+        вынесены ровно те случаи, из-за которых он либо скажет «не нашёл место —
+        проверка невозможна», либо сломает соседнее место и промолчит.
+        """
+        root = Path(__file__).resolve().parent.parent
+        text_of, broken = {}, []
+        for title, patches in stubs.BUGS.items():
+            for relative, old, new in patches:
+                if old == new:
+                    broken.append(f"«{title}»: правка в {relative} ничего не меняет")
+                    continue
+                if relative not in text_of:
+                    target = root / relative
+                    text_of[relative] = (target.read_text(encoding="utf-8")
+                                         if target.is_file() else None)
+                text = text_of[relative]
+                if text is None:
+                    broken.append(f"«{title}»: файла {relative} в проекте нет")
+                    continue
+                places = text.count(old)
+                if places != 1:
+                    where = ("не ищется вовсе" if not places
+                             else f"ищется в {places} местах")
+                    broken.append(f"«{title}»: место в {relative} {where} — "
+                                  f"«{old.strip().splitlines()[0][:60]}»")
+        return broken
+
+    def test_every_stub_still_finds_its_place(self):
+        broken = self._broken(self._stubs())
+        self.assertEqual(
+            broken, [],
+            "эти заготовки давно ничего не ломают (прогон заготовок о них промолчит "
+            "или сломает не то):\n  " + "\n  ".join(broken))
+
+    def test_the_check_notices_a_stub_that_lost_its_place(self):
+        """Сама проверка обязана уметь краснеть: иначе она молчит и не охраняет ничего."""
+        class Stubs:
+            MUTATION_MODE = "THEATRE_MUTATION"
+            BUGS = {
+                "придуманный баг": [("aitheatre/cloud.py",
+                                     "такого текста в коде точно нет",
+                                     "и не появится")],
+                # Место в коде есть, но не одно: прогон заготовок подставит
+                # правку в первое и сломает не то, о чём заготовка говорит
+                "баг, который сядет не туда": [("aitheatre/cloud.py",
+                                                "settings",
+                                                "settingz")],
+            }
+
+        broken = self._broken(Stubs)
+        self.assertEqual(len(broken), 2)
+        self.assertIn("придуманный баг", broken[0])
+        self.assertIn("не ищется вовсе", broken[0])
+        self.assertIn("баг, который сядет не туда", broken[1])
+        self.assertIn("ищется в", broken[1])
+
+
 # ---------------------------------------------------------------- маршруты
 
 class TestRoutes(unittest.TestCase):
