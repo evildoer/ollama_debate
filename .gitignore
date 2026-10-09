@@ -109,3 +109,6 @@ pip.freeze.txt
 # Аватары
 /avatars/*
 !/avatars/.gitkeep
+
+## MY
+AGENTS.md
