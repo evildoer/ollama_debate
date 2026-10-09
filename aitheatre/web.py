@@ -361,20 +361,10 @@ def check_vision():
     (см. cloud.probe_images) — это запрос, и он стоит денег. Поэтому и кнопкой:
     спрашивают один раз и по своему решению, а не тихо на каждом ходу.
     """
-    checked = []
-    for participant in show.session.runtime_participants or settings.PARTICIPANTS:
-        model = str((participant or {}).get("model") or "")
-        if not model or model == "human":
-            # Живому участнику читать картинки нечем: он их и прикладывает
-            continue
-        reads = ollama_api.takes_images(model)
-        checked.append({"name": participant.get("display_name") or model,
-                        "model": model,
-                        "reads_images": reads,
-                        # Ответ на «не читает» бывает и догадкой по имени, когда
-                        # шлюз не ответил: сказать про такую модель «слепая»
-                        # значило бы соврать (см. vision_answer_known)
-                        "known": ollama_api.vision_answer_known(model)})
+    # Спрашивает то же, что и старт спектакля (см. ollama_api.cast_vision):
+    # два разных опроса одного и того же разошлись бы в ответе
+    checked = ollama_api.cast_vision(
+        show.session.runtime_participants or settings.PARTICIPANTS)
     return jsonify({"success": True, "checked": checked,
                     "reads": sum(1 for one in checked if one["reads_images"])})
 

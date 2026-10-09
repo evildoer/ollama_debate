@@ -687,6 +687,9 @@ HTML_TEMPLATE = """
                 renderModelSuggestions();
                 thinkingModels = data.thinking_models || [];
                 visionModels = data.vision_models || [];
+                // Лента могла нарисоваться раньше этого списка: у её постов
+                // знак про картинки обновляется вместе с ним (см. refreshVisionMarks)
+                refreshVisionMarks();
                 if (data.error) console.warn('Список моделей недоступен: ' + data.error);
                 // Облако без ключа — не ошибка, а «ещё не настроено»: скажем об этом
                 // в разделе готовности, а не молчанием в списке моделей
@@ -907,6 +910,19 @@ HTML_TEMPLATE = """
                 ? p.reads_images : modelReadsImages(name);
             return reads ? ' <span class="vision-mark" title="Читает картинки: '
                 + 'приложенное к реплике уедет этой модели">+</span>' : '';
+        }
+
+        // Про картинки бывает известно не сразу: спрашивают у шлюза, и ответ
+        // приходит через секунды после того, как реплика уже в ленте. Пост
+        // рисуется один раз, поэтому знак у прежних постов надо обновить —
+        // иначе у одной модели в одном посте «+» есть, а в другом его нет
+        function refreshVisionMarks() {
+            document.querySelectorAll('#posts .post-model[data-model]').forEach(el => {
+                const model = el.getAttribute('data-model') || '';
+                const mark = visionMark(null, model);
+                if (!!mark === !!el.querySelector('.vision-mark')) return;
+                el.innerHTML = 'модель: ' + escapeHtml(model) + mark;
+            });
         }
 
         // Характер просто заполняет поля — дальше числа можно править руками
@@ -2014,6 +2030,10 @@ HTML_TEMPLATE = """
                     visionModels = visionModels.filter(m => !asked.has(m))
                         .concat(checked.filter(one => one.reads_images)
                             .map(one => one.model));
+                    // Ответ пришёл — и по нему видны и прежние реплики: модель
+                    // могла говорить до проверки, и «+» у них не было
+                    // (см. refreshVisionMarks)
+                    refreshVisionMarks();
                     loadCast();   // «+» у мест в составе — уже с ответом шлюза
                     sayVisionAnswer(data);
                 })
@@ -2057,11 +2077,16 @@ HTML_TEMPLATE = """
             // Спросить не вышло — это не «слепая»: так сказать было бы враньём
             const unknown = list.filter(one => !one.reads_images && one.known === false);
             const parts = [];
+            // Про кого-то спросить не вышло — и «не читает никто» было бы тогда
+            // не фактом, а догадкой: про них скажет своя строка ниже
             parts.push(readers.length
                 ? `Картинки читают (${readers.length} из ${list.length}): `
                     + readers.map(who).join(', ') + ' — им приложенное уедет.'
-                : 'Картинок не читает ни одна модель состава: приложенное уехало бы '
-                    + 'им текстом, поэтому не отправляется вовсе.');
+                : (unknown.length
+                    ? 'Пока картинок не читает никто из тех, про кого спросили: '
+                        + 'приложенное уехало бы им текстом, поэтому не отправляется вовсе.'
+                    : 'Картинок не читает ни одна модель состава: приложенное уехало '
+                        + 'бы им текстом, поэтому не отправляется вовсе.'));
             if (readers.length && blind.length) parts.push('Не читают: ' + blind.map(who).join(', ') + '.');
             if (unknown.length) parts.push('Про этих спросить не удалось (шлюз не ответил): '
                 + unknown.map(who).join(', ') + ' — картинки им, скорее всего, не уедут.');
@@ -2296,8 +2321,12 @@ HTML_TEMPLATE = """
             const roleName = post.role_name || 'Участник';
             const genderSymbol = post.gender === 'male' ? '♂' : '♀';
             // У модели с картинками стоит «+»: по ленте видно, кто мог прочитать
-            // приложенное к реплике, а кто сказал это по одному тексту
-            return `<div class="post-header"><div><div class="post-author"><span class="role-badge role-${role}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${escapeHtml(post.model_used || '')}${visionMark(null, post.model_used)}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div>`;
+            // приложенное к реплике, а кто сказал это по одному тексту.
+            // Сама модель лежит в data-model: знание о ней приходит и позже самой
+            // реплики, и тогда «+» у прежних постов перерисовывается — иначе
+            // одна и та же модель была бы со знаком в одной реплике и без него
+            // в другой (см. refreshVisionMarks)
+            return `<div class="post-header"><div><div class="post-author"><span class="role-badge role-${role}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model" data-model="${escapeHtml(post.model_used || '')}">модель: ${escapeHtml(post.model_used || '')}${visionMark(null, post.model_used)}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div>`;
         }
 
         // Один блок о ходе: как эта реплика получилась — по порядку и с числами.

@@ -213,6 +213,73 @@ def takes_images(model: str, report: dict = None) -> bool:
     return told
 
 
+def cast_vision(participants: list) -> list:
+    """Кто из состава читает картинки — по строке на место.
+
+    Общее место для всех, кому это нужно: и кнопка в пульте, и старт спектакля
+    спрашивают одним и тем же кодом (см. web.check_vision, show.report_cast_vision) —
+    иначе «+» в пульте и слова в консоли разошлись бы, а вопрос один и тот же.
+    Спрашиваем только про тех, про кого ответа ещё нет (см. takes_images):
+    у местной модели это capabilities Ollama, у облачной — проба картинкой,
+    и она стоит денег, поэтому второй раз за неё не платят.
+    """
+    checked = []
+    for participant in participants or []:
+        model = str((participant or {}).get("model") or "")
+        if not model or model == "human":
+            # Живому участнику читать картинки нечем: он их и прикладывает
+            continue
+        checked.append({
+            "name": (participant or {}).get("display_name") or model,
+            "model": model,
+            "reads_images": bool(takes_images(model)),
+            # Ответ на «не читает» бывает и догадкой по имени, когда шлюз
+            # не ответил: сказать про такую модель «слепая» значило бы соврать
+            # (см. vision_answer_known)
+            "known": vision_answer_known(model),
+        })
+    return checked
+
+
+def vision_words(checked: list) -> str:
+    """Тот же ответ, но словами и с именами — для консоли и для пульта.
+
+    Считать «4 из 5» недостаточно: по числу не видно, кого именно не хватает,
+    и состав приходится сличать глазами. Поэтому и слепые зовутся по именам.
+    Разговор этот повторяет то, что говорит страница (см. page.visionWords):
+    ответ один, а мест, где его произносят, два.
+    """
+    if not checked:
+        return "В составе нет моделей: приложенное некому показывать"
+
+    def who(one: dict) -> str:
+        """Модель называется и именем места, и своим именем: места меняются,
+        а модель — то, про что спрашивали."""
+        return f"{one['name']} ({one['model']})"
+
+    readers = [one for one in checked if one["reads_images"]]
+    blind = [one for one in checked if not one["reads_images"] and one["known"]]
+    unknown = [one for one in checked if not one["reads_images"] and not one["known"]]
+    if readers:
+        words = (f"картинки читают ({len(readers)} из {len(checked)}): "
+                 + ", ".join(who(one) for one in readers)
+                 + " — им приложенное уедет")
+    elif unknown:
+        # Про кого-то спросить не вышло — и «не читает никто» было бы тогда
+        # не фактом, а догадкой: про этих говорит отдельная строка ниже
+        words = ("пока картинок не читает никто из тех, про кого спросили: "
+                 "приложенное уехало бы им текстом, поэтому не отправляется вовсе")
+    else:
+        words = ("картинок не читает ни одна модель состава: приложенное уехало бы "
+                 "им текстом, поэтому не отправляется вовсе")
+    if readers and blind:
+        words += "; не читают: " + ", ".join(who(one) for one in blind)
+    if unknown:
+        words += ("; про этих спросить не удалось: "
+                  + ", ".join(who(one) for one in unknown))
+    return words
+
+
 def carries_pictures(messages: list) -> bool:
     """Есть ли в этих сообщениях приложенное — у Ollama оно лежит полем images."""
     return any(isinstance(one, dict) and one.get("images") for one in messages or [])

@@ -2511,7 +2511,7 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
                 search_count: int = 0, search_queries: list = None,
                 role: str = "participant", gender: str = "male",
                 thinking: str = "", sketch: str = "", turn: dict = None,
-                attachments: list = None) -> dict:
+                attachments: list = None, public_judge: bool = None) -> dict:
     """Единая функция создания поста для любого участника (human или AI)"""
     if search_queries is None:
         search_queries = []
@@ -2547,6 +2547,10 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "role": role,
         "role_icon": ROLE_ICONS.get(role, "🎭"),
         "role_name": role_names.get(role, "Участник"),
+        # Слышали ли этот вердикт остальные — свойство самой реплики, а не места:
+        # судью могут убрать из состава, и тогда об этом больше узнать неоткуда
+        # (см. judge_is_public)
+        "public_judge": public_judge,
         "gender": gender,
         "gender_symbol": gender_symbol(gender),
         # Приложенные к реплике картинки (см. save_upload): в ленте это то, что
@@ -2694,6 +2698,17 @@ def images_already_shown_note(attachments: list) -> str:
     return ("📎 К реплике приложена картинка "
             + ", ".join(f"«{name}»" for name in names)
             + " — она уже показана тебе в этом обсуждении, повторно не прикладывается")
+
+def judge_is_public(participant: dict) -> bool:
+    """Слышат ли этого судью остальные — или его слово только для режиссёра.
+
+    Это опция роли (см. ROLE_OPTIONS). Запись о ней нужна потому, что ушедшего
+    из состава судьи в текущем составе уже нет: без неё его прежние вердикты
+    стали бы вдруг неслышными — а прошлое на ходу не переписывается
+    (см. DebateSession._judge_was_heard)
+    """
+    return role_options(participant).get("publicity") == "public"
+
 
 def role_of(is_moderator: bool, is_judge: bool) -> str:
     """Роль места в ленте: модератор старше судьи — как и при разборе состава."""
@@ -3061,6 +3076,7 @@ class DebateSession:
                  "content": post.get("content", ""),
                  "is_moderator": post.get("role") == "moderator",
                  "is_judge": post.get("role") == "judge",
+                 "public_judge": post.get("public_judge"),
                  "round": int(post.get("round") or 0),
                  # Приложенное едет вместе с репликой и в продолжение: в ДАМПе
                  # лежат адреса картинок (см. attachment_lines), а без них
@@ -3190,7 +3206,8 @@ class DebateSession:
     def add_post(self, display_name, model_used, content, round_num,
                  search_count=0, search_queries=None,
                  is_moderator=False, is_judge=False, gender="male", thinking="",
-                 sketch="", turn=None, dump=True, attachments=None):
+                 sketch="", turn=None, dump=True, attachments=None,
+                 public_judge=None):
         """Создать пост.
 
         dump=False — ход уже писался в ДАМП по ходу дела (см. open_dump_turn):
@@ -3201,9 +3218,16 @@ class DebateSession:
 
         role = role_of(is_moderator, is_judge)
 
+        if is_judge and public_judge is None:
+            # Опция роли берётся у того, кто говорит сейчас: само место с этого
+            # мгновения уже может уйти из состава (см. judge_is_public)
+            speaker = next((p for p in self.runtime_participants
+                            if p.get("display_name") == display_name), None)
+            public_judge = judge_is_public(speaker) if speaker else None
+
         post = create_post(display_name, model_used, content, round_num,
                           avatar_url, avatar_emoji, search_count, search_queries, role,
-                          gender, thinking, sketch, turn, attachments)
+                          gender, thinking, sketch, turn, attachments, public_judge)
         self.posts.append(post)
 
         if content.strip() or attachments:
@@ -3214,6 +3238,9 @@ class DebateSession:
                 "content": content,
                 "is_moderator": is_moderator,
                 "is_judge": is_judge,
+                # Слышали ли эти слова остальные — запоминается вместе с ними:
+                # ушедшего судью спрашивать будет уже не у кого (см. _judge_was_heard)
+                "public_judge": public_judge,
                 "round": round_num,
                 "attachments": list(attachments or []),
             })
@@ -3348,6 +3375,21 @@ class DebateSession:
             if p.get("is_moderator")
         ]
 
+    def _judge_was_heard(self, post: dict, public_judges: set,
+                         judge_names: set) -> bool:
+        """Слышат ли этот вердикт посторонние — по реплике, а не по составу.
+
+        Судья ещё в составе — решает его нынешняя опция: анонимного не слышит
+        никто (см. _get_history_for). А ушедшего из состава в нынешних опциях
+        нет, и записанное в реплике говорит, слышали ли её тогда: иначе его
+        прежние вердикты задним числом стали бы неслышными, и разговор у соседей
+        поменялся бы на ходу (см. TestTheOneWhoLeftTheCast).
+        """
+        name = post.get("display_name", "")
+        if name in judge_names:
+            return name in public_judges
+        return bool(post.get("public_judge"))
+
     # ------------------------------------------------------------
     # Единый фильтр истории
     # ------------------------------------------------------------
@@ -3364,11 +3406,15 @@ class DebateSession:
         """
         viewer_name = viewer.get("display_name", "")
         viewer_options = role_options(viewer)
-        # Публичные судьи — те, чьё слово слышат остальные. Считаем по текущему
-        # составу: сделав судью анонимным, его прошлые вердикты тоже закрываются
+        # Публичные судьи — те, чьё слово слышат остальные. Пока место в составе,
+        # считаем по текущему составу: сделав судью анонимным, его прошлые
+        # вердикты тоже закрываются. А ушедшего из состава там уже нет, и о нём
+        # говорит сама реплика (см. _judge_was_heard)
+        judge_names = {p.get("display_name") for p in self.runtime_participants
+                       if p.get("is_judge")}
         public_judges = {
             p.get("display_name") for p in self.runtime_participants
-            if p.get("is_judge") and role_options(p).get("publicity") == "public"
+            if p.get("is_judge") and judge_is_public(p)
         }
         result = []
         for post in self.conversation_history:
@@ -3383,7 +3429,7 @@ class DebateSession:
                     continue
             elif mode == "dialog":
                 if is_judge and post.get("display_name") != viewer_name \
-                        and post.get("display_name") not in public_judges:
+                        and not self._judge_was_heard(post, public_judges, judge_names):
                     continue
             result.append(post)
         return result
@@ -4715,6 +4761,22 @@ session = DebateSession()
 session.load_new_cast()
 
 
+def report_cast_vision(participants: list) -> list:
+    """Спросить про картинки у всех моделей состава — до первого хода.
+
+    Режиссёр должен знать заранее, кому приложенное уедет, а не узнавать это
+    на сцене: слепая модель получила бы отказом посреди хода. Спрашивают
+    и в пульте, при загрузке состава (см. page.autoVision), — но спектакль
+    может играть и с закрытой страницей, поэтому тот же вопрос задаётся
+    ещё раз здесь, в самом начале потока. Ответ помнится, так что платят
+    за него один раз на модель (см. cloud.probe_images).
+    """
+    checked = ollama_api.cast_vision(participants)
+    if checked:
+        print(f"  👁  {ollama_api.vision_words(checked)}")
+    return checked
+
+
 def run_debate_thread(topic: str, on_post=None, on_draft=None):
     """
     Играет спектакль акт за актом, пока режиссёр не опустит занавес.
@@ -4749,6 +4811,10 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     def show_model_names() -> set:
         return {p.get("model", "") for p in session.runtime_participants
                 if p.get("model") and p.get("model") != "human"}
+
+    # Кому уедет приложенное — выясняется до первого хода: об этом говорят
+    # и пульт, и эта строка, а моделей без зрения больше не застают врасплох
+    report_cast_vision(runtime_participants)
 
     print("\n🎭 Используем подготовленный грим и костюмы...")
     for participant in runtime_participants:

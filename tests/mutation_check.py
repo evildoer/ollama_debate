@@ -154,8 +154,20 @@ BUGS = {
     "слово судьи снова слышит только он сам": [
         ("aitheatre/show.py",
          '                if is_judge and post.get("display_name") != viewer_name \\\n'
-         '                        and post.get("display_name") not in public_judges:',
+         '                        and not self._judge_was_heard(post, public_judges, judge_names):',
          '                if is_judge and post.get("display_name") != viewer_name:'),
+    ],
+    "вердикт ушедшего судьи снова глохнет вместе с ним": [
+        ("aitheatre/show.py",
+         '        if name in judge_names:\n'
+         '            return name in public_judges\n'
+         '        return bool(post.get("public_judge"))',
+         '        return name in public_judges'),
+    ],
+    "в реплику судьи снова не записывается, слышали ли её": [
+        ("aitheatre/show.py",
+         '            public_judge = judge_is_public(speaker) if speaker else None',
+         '            public_judge = None'),
     ],
     "чужое значение опции роли проходит как своё": [
         ("aitheatre/show.py",
@@ -1346,15 +1358,23 @@ BUGS = {
          "        if carries_pictures(messages) and cloud.picture_refused(error_body):",
          "        if False:"),
     ],
-    "кнопка зрения снова называет слепыми всех": [
-        ("aitheatre/web.py",
-         "        reads = ollama_api.takes_images(model)",
-         "        reads = True"),
+    "кнопка зрения снова называет читающими всех": [
+        ("aitheatre/ollama_api.py",
+         '            "reads_images": bool(takes_images(model)),',
+         '            "reads_images": True,'),
     ],
     "живого участника снова спрашивают про зрение": [
-        ("aitheatre/web.py",
-         "        if not model or model == \"human\":",
-         "        if not model:"),
+        ("aitheatre/ollama_api.py",
+         '        if not model or model == "human":\n'
+         '            # Живому участнику читать картинки нечем: он их и прикладывает\n'
+         '            continue',
+         '        if not model:\n'
+         '            continue'),
+    ],
+    "о зрении состава снова молчат при старте спектакля": [
+        ("aitheatre/show.py",
+         '    checked = ollama_api.cast_vision(participants)',
+         '    checked = []'),
     ],
     "остаток на ключе снова просят у шлюза без надобности": [
         ("aitheatre/web.py",

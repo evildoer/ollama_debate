@@ -7156,6 +7156,107 @@ class TestAvatarBelongsToTheCast(unittest.TestCase):
         self.assertEqual(self.session.avatar_emojis["Мария"], "🦊")
 
 
+class TestTheOneWhoLeftTheCast(unittest.TestCase):
+    """Ушедший из состава остаётся в истории — его реплики не пропадают.
+
+    Состав правят и на ходу: место может занять другая модель. Но сказанное
+    этим местом уже сказано, и прошлое разговора на ходу не переписывается —
+    ушедший говорит в истории тем же именем и той же ролью, что и говорил
+    (см. show._format_history: там читается сама реплика, а не состав).
+    Остальные продолжают слышать его слова, а не дыру на их месте.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.leaving = plain_participant(self.session)
+        self.staying = non_judge_ai(self.session)
+        self.session.conversation_history = []
+
+    def says(self, name: str, content: str, model: str = "fake-model", **roles) -> None:
+        self.session.add_post(name, model, content, 1, dump=False, **roles)
+
+    def leave(self) -> None:
+        """Место ушло из состава: его больше нет ни в труппе, ни в списках."""
+        self.session.runtime_participants = [
+            p for p in self.session.runtime_participants
+            if p["display_name"] != self.leaving["display_name"]]
+
+    def heard_by(self, who: dict) -> str:
+        messages = self.session.build_messages_for_ai(who, 2)
+        return "\n".join(str(m.get("content") or "") for m in messages)
+
+    def test_his_words_stay_in_what_the_others_hear(self):
+        """Ушедший не исчезает из истории: сказанное им слышно и после его ухода."""
+        self.says(self.leaving["display_name"], "Я уже сказал всё, что думал.")
+        self.leave()
+
+        heard = self.heard_by(self.staying)
+
+        self.assertIn(self.leaving["display_name"], heard, "ушедший пропал из истории")
+        self.assertIn("Я уже сказал всё, что думал.", heard,
+                      "его реплика пропала вместе с ним")
+
+    def test_the_verdict_of_a_judge_who_left_is_still_a_verdict(self):
+        """Публичного судью, ушедшего из состава, остальные слышат и дальше.
+
+        Публичность — опция роли, и у ушедшего её уже не спросить: она записана
+        в самой реплике (см. show.judge_is_public). Без этого соседи потеряли бы
+        на ходу тот вердикт, который уже слышали, — то есть прошлое разговора
+        переписалось бы.
+        """
+        judge = judge_of(self.session)
+        judge["role_options"] = {"publicity": "public", "scope": "all"}
+        self.assertTrue(show.judge_is_public(judge), "опция не встала — проверять нечего")
+        self.says(judge["display_name"], "Ставлю по баллу каждому.", is_judge=True)
+        self.session.runtime_participants = [
+            p for p in self.session.runtime_participants
+            if p["display_name"] != judge["display_name"]]
+
+        heard = self.heard_by(self.staying)
+
+        self.assertIn("СУДЬЯ " + judge["display_name"], heard,
+                      "вердикт ушедшего судьи перестал быть вердиктом")
+
+    def test_a_verdict_nobody_heard_stays_unheard(self):
+        """Анонимный судья остаётся анонимным и после ухода из состава.
+
+        Обратная сторона того же: запись о реплике — это то, как её слышали,
+        и уход из состава ничего задним числом не открывает (см. show.judge_is_public).
+        """
+        judge = judge_of(self.session)
+        self.assertEqual(show.role_options(judge).get("publicity"), "anonymous",
+                         "у судьи по умолчанию другая опция — проверять нечего")
+        self.says(judge["display_name"], "Ставлю по баллу каждому.", is_judge=True)
+        self.session.runtime_participants = [
+            p for p in self.session.runtime_participants
+            if p["display_name"] != judge["display_name"]]
+
+        heard = self.heard_by(self.staying)
+
+        self.assertNotIn("СУДЬЯ " + judge["display_name"], heard,
+                         "анонимный вердикт открылся задним числом")
+
+    def test_the_rest_of_the_play_goes_on_without_a_plan_to_replay(self):
+        """Оборванный ход ушедшего не переспрашивается — о этом говорят словами.
+
+        Переспрашивать некого: его места больше нет. Реплика остаётся в ленте
+        помеченной оборванной — это честнее, чем выдумывать за него слова
+        (см. show.plan_replay).
+        """
+        self.session.add_post(self.leaving["display_name"], self.leaving["model"],
+                              "", 1, dump=False)
+        self.session.posts[-1]["interrupted"] = True
+        self.leave()
+
+        with mock.patch("builtins.print") as told:
+            plan = self.session.plan_replay()
+
+        self.assertIsNone(plan, "ушедшего собирались переспрашивать")
+        self.assertIn("не в составе", str(told.call_args),
+                      "про отменённый переспрос не сказано")
+
+
 # ---------------------------------------------------------------- сообщения
 
 # ---------------------------------------- приложенное к реплике
@@ -7814,6 +7915,46 @@ class TestVisionCheckedAtTheStart(CloudVisionTest):
         self.assertEqual([one["name"] for one in checked], ["Алексей"])
         self.assertFalse(checked[0]["known"], "неудавшийся спрос выдан за ответ")
         self.assertFalse(checked[0]["reads_images"])
+
+    def test_a_live_participant_is_not_asked_about_vision(self):
+        """Живого участника про картинки не спрашивают: читать ему нечем.
+
+        Он их и прикладывает сам. Спросить про него — значит сходить за деньги
+        туда, где ответа нет вовсе, и назвать в ответе место, которого вопрос
+        не касается (см. ollama_api.cast_vision).
+        """
+        self.session.runtime_participants = [
+            {"display_name": "Живой", "model": "human"},
+            {"display_name": "Алексей", "model": self.MODEL},
+        ]
+        asked = []
+        with mock.patch.object(ollama_api, "takes_images",
+                              side_effect=lambda model: asked.append(model) or True):
+            checked = self.client.post("/api/vision/check").get_json()["checked"]
+
+        self.assertEqual(asked, [self.MODEL], "живого участника спросили про зрение")
+        self.assertEqual([one["name"] for one in checked], ["Алексей"])
+
+    def test_the_play_names_who_gets_the_pictures_at_its_start(self):
+        """О зрении говорят и на старте спектакля, а не только в пульте.
+
+        Пульт может быть и закрыт, а знать, кому уедет приложенное, надо
+        заранее: слепая модель иначе получила бы отказ посреди хода
+        (см. show.report_cast_vision).
+        """
+        cast = [{"display_name": "Алексей", "model": "cloud:qwen/qwen3.8-flash"},
+                {"display_name": "Нелли", "model": "cloud:google/gemma-4-31b-it"}]
+        reads = {"cloud:qwen/qwen3.8-flash": True,
+                 "cloud:google/gemma-4-31b-it": False}
+        with mock.patch.object(ollama_api, "takes_images",
+                              side_effect=lambda model: reads[model]), \
+             mock.patch.object(ollama_api, "vision_answer_known", return_value=True), \
+             mock.patch("builtins.print") as told:
+            show.report_cast_vision(cast)
+
+        words = " ".join(str(call) for call in told.call_args_list)
+        self.assertIn("Алексей", words, "читающая модель не названа")
+        self.assertIn("Нелли", words, "слепая модель не названа по имени")
 
     def test_the_check_remembers_the_answer_it_got(self):
         """Ответ шлюза запоминается: со следующего раза спрашивать некого."""
@@ -9137,6 +9278,49 @@ class TestPageScript(unittest.TestCase):
         self.assertIn('/uploads/abc.png', post, "приложенное не рисуется в ленте")
         self.assertIn('схема.png', post)
         self.assertEqual(nothing, "", "у обычной реплики ничего лишнего")
+
+    def test_the_sign_at_a_reply_is_redrawn_when_the_answer_about_pictures_arrives(self):
+        """«+» у прежних реплик обновляется, когда правда о картинках пришла позже.
+
+        Ответ приходит через секунды после самой реплики (у облачной модели —
+        после запроса к шлюзу), а пост рисуется один раз. Без этой перерисовки
+        одна и та же модель стояла бы со знаком в одной реплике и без него
+        в другой — а в постах «+» и нужен, чтобы знать, кому приложенное уедет
+        (см. page.refreshVisionMarks).
+        """
+        # У слепой знак будто бы уже стоит (реплика нарисована до проверки),
+        # а у зоркой его нет: итог должен быть обратным — у кого был,
+        # у того уйти, а у кого не было — появиться
+        out = self._run_page(
+            ("escapeHtml", "modelReadsImages", "visionMark", "refreshVisionMarks"),
+            "(() => {"
+            " visionModels = ['llava'];"
+            " const made = model => {"
+            "   const el = {attrs: {'data-model': model}, mark: null, html: ''};"
+            "   el.getAttribute = key => el.attrs[key];"
+            "   el.querySelector = () => el.mark;"
+            "   Object.defineProperty(el, 'innerHTML', {"
+            "     get: () => el.html,"
+            "     set: value => { el.html = value;"
+            "       el.mark = value.indexOf('vision-mark') >= 0 ? {} : null; }});"
+            "   return el;"
+            " };"
+            " const blind = made('qwen3'), zorkaya = made('llava');"
+            " blind.mark = {}; blind.html = 'модель: qwen3 +';"
+            " document = {querySelectorAll: () => [blind, zorkaya]};"
+            " refreshVisionMarks();"
+            " return [zorkaya.innerHTML, blind.innerHTML];"
+            " })()")
+
+        zorkaya_html, blind_html = out[0]
+        self.assertIn("vision-mark", zorkaya_html, "у зоркой модели знак не появился")
+        self.assertNotIn("vision-mark", blind_html, "у слепой модели знак остался на месте")
+        # Разметка реплики несёт саму модель: по ней и перерисовывается знак
+        self.assertIn('data-model="${escapeHtml(post.model_used || \'\')}"',
+                      page.HTML_TEMPLATE,
+                      "пост не помнит, чья модель в нём: знак нечем перерисовать")
+        self.assertIn("refreshVisionMarks();", page.HTML_TEMPLATE,
+                      "знание приходит, а знак у прежних реплик не обновляется")
 
     def test_the_emoji_avatar_is_clickable_and_the_name_is_not_in_the_handler(self):
         """По эмодзи в ленте можно кликнуть — и имя уезжает в данные, а не в код.
