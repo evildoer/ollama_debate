@@ -1348,8 +1348,8 @@ BUGS = {
     ],
     "кнопка зрения снова называет слепыми всех": [
         ("aitheatre/web.py",
-         "                        \"reads_images\": ollama_api.takes_images(model)})",
-         "                        \"reads_images\": True})"),
+         "        reads = ollama_api.takes_images(model)",
+         "        reads = True"),
     ],
     "живого участника снова спрашивают про зрение": [
         ("aitheatre/web.py",
@@ -1447,6 +1447,75 @@ BUGS = {
         ("aitheatre/show.py",
          "        self.images_shown = {}\n        self.images_pending = {}",
          "        pass"),
+    ],
+    "вернувшийся спектакль снова показывает картинку, которую уже видели": [
+        ("aitheatre/show.py",
+         "        self.images_shown = shown",
+         "        self.images_shown = {}"),
+    ],
+    "картинка считается показанной всем, если после неё говорил кто угодно": [
+        ("aitheatre/show.py",
+         "            for model, said in last_of_model.items():\n"
+         "                if said > index:",
+         "            for model in {str(p.get(\"model\") or \"\") for p in self.runtime_participants}:\n"
+         "                if any(said > index for said in list(last_of_model.values())):"),
+    ],
+    "картинка снова считается показанной тому, кто говорил до неё": [
+        ("aitheatre/show.py",
+         "            for model, said in last_of_model.items():\n"
+         "                if said > index:",
+         "            for model, said in last_of_model.items():\n"
+         "                if index > said:"),
+    ],
+    "сохранение снова запрещено и на ходу человека": [
+        ("aitheatre/show.py",
+         "    if phase == \"live\":",
+         "    if session.running:"),
+    ],
+    "состояние спектакля снова не попадает в сохранение": [
+        ("aitheatre/show.py",
+         "            \"phase\": phase,",
+         "            \"phase\": \"finished\","),
+    ],
+    "вернувшийся спектакль снова забывает, чем он был сохранён": [
+        ("aitheatre/show.py",
+         "    session.restored_phase = str(meta.get(\"phase\") or \"\")",
+         "    session.restored_phase = \"\""),
+    ],
+    "догадка по имени снова выдана за проверенный ответ": [
+        ("aitheatre/ollama_api.py",
+         "        return cloud.images_known(model)",
+         "        return True"),
+    ],
+    "зрение снова проверяют только по нажатию кнопки": [
+        ("aitheatre/page.py",
+         "                    autoVision();",
+         "                    ;"),
+    ],
+    "о том, кто читает картинки, снова молчат до нажатия кнопки": [
+        ("aitheatre/page.py",
+         "                    sayCastVision();",
+         "                    ;"),
+    ],
+    "слепые снова названы числом, а не по имени": [
+        ("aitheatre/page.py",
+         "            const blind = list.filter(one => !one.reads_images && one.known !== false);",
+         "            const blind = [];"),
+    ],
+    "неудавшийся спрос снова выдан за слепоту модели": [
+        ("aitheatre/page.py",
+         "            const unknown = list.filter(one => !one.reads_images && one.known === false);",
+         "            const unknown = [];"),
+    ],
+    "«+» у модели в списке выбора снова пропал": [
+        ("aitheatre/page.py",
+         "                        + (reads ? ' + читает картинки' : '');",
+         "                        + '';"),
+    ],
+    "страница снова сохраняет под идущей моделью": [
+        ("aitheatre/page.py",
+         "            const speaking = debateRunning && !showFinished && !humanTurn;",
+         "            const speaking = false;"),
     ],
     "выключенное правило снова уезжает модели": [
         ("aitheatre/show.py",

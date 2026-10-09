@@ -169,6 +169,21 @@ def model_supports_vision(model: str) -> bool:
     return supported
 
 
+def vision_answer_known(model: str) -> bool:
+    """Знаем ли про эту модель правду о картинках — а не догадку по имени.
+
+    Местная модель отвечает сама (capabilities в /api/show) — там и догадок
+    нет. А у облачной правду знает только проверка (см. cloud.probe_images),
+    и до неё остаётся подсказка по имени: странице этого хватает, чтобы
+    показывать «+» серым и понять, что проверять есть что (см. cast_payload)
+    """
+    if not model or model == "human":
+        return True
+    if cloud.is_cloud_model(model):
+        return cloud.images_known(model)
+    return True
+
+
 def takes_images(model: str, report: dict = None) -> bool:
     """Брать ли картинки этой модели — то же, что model_supports_vision, но
     у облачной оно узнаётся у шлюза.

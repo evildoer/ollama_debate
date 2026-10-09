@@ -519,10 +519,11 @@ HTML_TEMPLATE = """
                              Поэтому сейвы лежат вне папки экземпляра и открываются
                              в любом театре этой машины (см. settings.SAVES_DIR) -->
                         <div style="margin-top:20px;padding-top:16px;border-top:1px solid #cccccc;">
-                            <div class="panel-note">💾 <strong>Архив спектаклей</strong>: сохранение — это весь спектакль целиком (состав, правила и инструкции, вся история и приложенные картинки), и живёт оно вне порта, в одной папке на всю машину. Один и тот же сейв можно вернуть и здесь, и в театре на другом порту, а сохранений у спектакля бывает сколько угодно — хоть ветка на каждый вечер. Идущий спектакль придётся сначала завершить.</div>
+                            <div class="panel-note">💾 <strong>Архив спектаклей</strong>: сохранение — это весь спектакль целиком (состав, правила и инструкции, вся история и приложенные картинки), и живёт оно вне порта, в одной папке на всю машину. Один и тот же сейв можно вернуть и здесь, и в театре на другом порту, а сохранений у спектакля бывает сколько угодно — хоть ветка на каждый вечер. Сохранение ничего не завершает: это копия, и берётся она в безопасный момент — на вашем ходу или под занавесом. Состояние спектакля тоже запоминается: сохранённый под занавесом вернётся под занавесом, а сохранённый на вашем ходу — тем же ходом, которому не хватает одной реплики («Доиграть прежний»).</div>
                             <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
                                 <input type="text" id="saveName" placeholder="Имя сохранения — например «до правки состава»" style="flex:1;min-width:240px;padding:8px 10px;border:2px solid #000000;font-size:14px;font-family:Georgia,serif;">
                                 <button class="btn btn-secondary" id="saveBtn" onclick="saveThisShow()" style="margin:0;">💾 Сохранить этот спектакль</button>
+                                <span id="saveHint" style="font-size:12px;color:#666;"></span>
                             </div>
                             <div id="savesList" style="font-size:14px;">Сохранений пока нет.</div>
                         </div>
@@ -604,6 +605,12 @@ HTML_TEMPLATE = """
         // Занавес был не сейчас: лента вернулась из ДАМПа прошлого запуска
         // (см. show.session.restored). По этому признаку пульт предлагает доиграть
         let playRestored = false;
+        // Чем сохранённый спектакль был сохранён (см. show.load_save): «занавес
+        // опущен» так и скажется занавесом, а ход человека — ходом
+        let restoredPhase = '';
+        // Ваш ход: спектакль стоит и ждёт реплики, и файлы его в это время
+        // никто не пишет — как и под занавесом (см. updateSaveMoment)
+        let humanTurn = false;
         let instructionsTick = 0;
         let defaultJudgePrompt = '';  // им заполняется пустое поле промпта судьи
         let mySessionId = null;        // id текущей сессии; следим за сменой на сервере
@@ -703,6 +710,13 @@ HTML_TEMPLATE = """
                     renderModelsWarning(data.models_status);
                     renderVramWarning(data.vram_status);
                     syncReadinessSection();
+                    // Про картинки говорится сразу: по «+» видно кого, а списком
+                    // с именами это читается без сличания состава
+                    sayCastVision();
+                    // И про те модели, про которые ответа ещё нет, спрашиваем
+                    // сами (см. autoVision): режиссёр узнаёт про картинки,
+                    // не нажимая ничего
+                    autoVision();
                     const hint = document.getElementById('randomizeHint');
                     if (hint) {
                         hint.textContent = data.randomize_characters
@@ -1338,9 +1352,17 @@ HTML_TEMPLATE = """
             if (!box) return;
             // «Живой участник» — такая же модель места, как любая другая: без этой
             // строки посадить за стол человека можно было только из файла настроек
-            const option = name => '<option value="' + escapeHtml(name) + '">'
-                + (name === 'human' ? '🧑 Живой участник — говорит сам'
-                    : escapeHtml(cloudModels.includes(name) ? '☁️ ' + name : name)) + '</option>';
+            // «+» у имени — тот же знак, что в составе и в ленте (см. visionMark):
+            // при выборе модели видно, уедет ли ей приложенное к реплике. Слова
+            // тут не лишние: модель выбирают для места, и решить это надо сразу
+            const option = name => {
+                const reads = modelReadsImages(name);
+                const label = name === 'human'
+                    ? '🧑 Живой участник — говорит сам'
+                    : (cloudModels.includes(name) ? '☁️ ' : '') + name
+                        + (reads ? ' + читает картинки' : '');
+                return '<option value="' + escapeHtml(name) + '">' + escapeHtml(label) + '</option>';
+            };
             const names = ['human'].concat(models, cloudModels);
             // Модель из PARTICIPANTS может быть с тегом: показываем и её, даже
             // если такого имени в списках нет
@@ -1756,6 +1778,30 @@ HTML_TEMPLATE = """
                 title.textContent = 'Режиссёрский пульт — настройка';
             }
             syncSectionsToPhase();
+            updateSaveMoment();
+        }
+
+        // Когда спектакль можно сохранить: копия берётся там, где в файлы
+        // никто не пишет — на ходу человека или под занавесом. Пока говорит
+        // модель, кнопка молчит и объясняет словами почему: ДАМП в это время
+        // дописывается её ходом, а копия половины записи — не спектакль
+        // (см. show.play_phase — сервер стережёт то же самое)
+        function updateSaveMoment() {
+            const btn = document.getElementById('saveBtn');
+            const hint = document.getElementById('saveHint');
+            if (!btn || !hint) return;
+            const speaking = debateRunning && !showFinished && !humanTurn;
+            btn.disabled = speaking;
+            if (speaking) {
+                hint.textContent = '⏳ Говорит модель: сохранение станет доступно на вашем ходу или под занавесом.';
+            } else if (humanTurn) {
+                hint.textContent = 'Ваш ход: файлы спектакля никто не пишет — можно сохранять.';
+            } else if (debateRunning) {
+                hint.textContent = 'Занавес опущен: можно сохранять — спектакль вернётся под занавесом.';
+            } else {
+                hint.textContent = 'Спектакль ещё не начат: сохранение будет без истории — '
+                    + 'состав, правила и инструкции.';
+            }
         }
 
         // ── Сворачивание разделов пульта ─────────────────────────────────
@@ -1949,8 +1995,10 @@ HTML_TEMPLATE = """
         // запрос к шлюзу с крошечной картинкой (см. cloud.probe_images). Это
         // единственный способ узнать правду: по имени модель читать картинки
         // может и не всегда (на живом шлюзе gemma-4, glm-5.3 и qwen3.8 их
-        // читали, а по приметам выходили слепыми). Спрашивают потому кнопкой,
-        // а не каждым ходом: у облачной проверка — это запрос за деньги
+        // читали, а по приметам выходили слепыми). Ответ запоминается навсегда
+        // (см. cloud._IMAGE_READERS), поэтому спрашивают один раз на модель —
+        // при запуске автоматически (см. autoVision), а кнопкой — когда хочется
+        // переспросить про весь состав сразу
         function checkVision() {
             const btn = document.getElementById('visionBtn');
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Спрашиваю...'; }
@@ -1977,23 +2025,67 @@ HTML_TEMPLATE = """
                 });
         }
 
+        // Проверка зрения при запуске: про кого в этом составе ещё не известно,
+        // про того спрашиваем сами — иначе режиссёр узнавал бы, кому уедет
+        // приложенное, только нажав кнопку. Денег это стоит один раз на модель
+        // (ответ лежит в файле, см. cloud.probe_images), а про кого спрашивали
+        // в этой вкладке, помним — иначе отказ шлюза гонял бы проверку по кругу
+        // с каждой перерисовкой состава
+        let visionAsked = new Set();
+        function autoVision() {
+            const unknown = cast.filter(p => p.model && p.model !== 'human'
+                                            && p.vision_checked === false
+                                            && !visionAsked.has(p.model));
+            if (!unknown.length) return;
+            // Спрошено — помним об этом до перезагрузки страницы: иначе отказ
+            // шлюза (нет ключа, нет связи) крутился бы запросом на каждой
+            // перерисовке состава
+            unknown.forEach(p => visionAsked.add(p.model));
+            checkVision();
+        }
+
         // Что ответили — словами, а не только значком «+» у имени: режиссёру
-        // важно знать и то, что картинки никому из состава не уедут вовсе
+        // важно знать и то, что картинки никому из состава не уедут вовсе.
+        // Про слепых говорится именами, а не счётом: список из пяти моделей
+        // не сличается глазами, и вычислить по числу, кто именно не читает,
+        // неоткуда (показывается и в сайдбаре, и в постах — см. visionMark)
+        function visionWords(list) {
+            if (!list.length) return '';
+            const who = one => one.name + ' (' + one.model + ')';
+            const readers = list.filter(one => one.reads_images);
+            const blind = list.filter(one => !one.reads_images && one.known !== false);
+            // Спросить не вышло — это не «слепая»: так сказать было бы враньём
+            const unknown = list.filter(one => !one.reads_images && one.known === false);
+            const parts = [];
+            parts.push(readers.length
+                ? `Картинки читают (${readers.length} из ${list.length}): `
+                    + readers.map(who).join(', ') + ' — им приложенное уедет.'
+                : 'Картинок не читает ни одна модель состава: приложенное уехало бы '
+                    + 'им текстом, поэтому не отправляется вовсе.');
+            if (readers.length && blind.length) parts.push('Не читают: ' + blind.map(who).join(', ') + '.');
+            if (unknown.length) parts.push('Про этих спросить не удалось (шлюз не ответил): '
+                + unknown.map(who).join(', ') + ' — картинки им, скорее всего, не уедут.');
+            return parts.join(' ');
+        }
+
         function sayVisionAnswer(data) {
             const note = document.getElementById('visionNote');
             if (!note) return;
             const checked = data.checked || [];
-            if (!checked.length) {
-                note.textContent = 'В составе нет моделей — проверять нечего.';
-                return;
-            }
-            const whoReads = checked.filter(one => one.reads_images)
-                .map(one => one.name + ' (' + one.model + ')');
-            note.textContent = whoReads.length
-                ? `Картинки читают: ${whoReads.join(', ')} — им приложенное уедет. `
-                    + `Остальным — только текст (${data.reads} из ${checked.length}).`
-                : 'Картинок не читает ни одна модель состава: приложенное уехало бы '
-                    + 'им текстом, поэтому не отправляется вовсе.';
+            note.textContent = visionWords(checked) || 'В составе нет моделей — проверять нечего.';
+        }
+
+        // То же словами, но из одного состава — без запроса к шлюзу: про местные
+        // модели всё и так известно (capabilities Ollama), а про облачные —
+        // настолько, насколько их уже спросили (см. vision_answer_known)
+        function sayCastVision() {
+            const note = document.getElementById('visionNote');
+            if (!note) return;
+            const words = visionWords(cast.filter(p => p.model && p.model !== 'human')
+                .map(p => ({name: p.display_name, model: p.model,
+                            reads_images: !!p.reads_images,
+                            known: p.vision_checked !== false})));
+            if (words) note.textContent = words;
         }
 
         // ── АРХИВ СПЕКТАКЛЕЙ ────────────────────────────────────────────────
@@ -2023,6 +2115,10 @@ HTML_TEMPLATE = """
                 if (one.round) parts.push(`актов ${Number(one.round)}`);
                 if (one.pictures) parts.push(`картинок ${Number(one.pictures)}`);
                 if (one.spent) parts.push(`цена ${moneyText(one.spent)}`);
+                // Состояние на момент сохранения (см. show.play_phase): спектакль
+                // мог быть сохранён и на ходу человека — тогда вернётся тем же
+                // ходом, которому не хватает одной реплики
+                if (one.phase_text) parts.push(escapeHtml(String(one.phase_text)));
                 if (one.saved_at) parts.push(escapeHtml(String(one.saved_at)));
                 if (one.port) parts.push(`порт ${Number(one.port)}`);
                 const id = escapeHtml(String(one.id || ''));
@@ -2055,7 +2151,8 @@ HTML_TEMPLATE = """
                     renderSaves(data.saves || [], '');
                     const saved = data.saved || {};
                     showSaveAlert({head: '💾 Спектакль сохранён в архив',
-                                   note: `«${saved.name || name}» — реплик ${saved.posts || 0}`,
+                                   note: `«${saved.name || name}» — реплик ${saved.posts || 0}`
+                                       + (saved.phase_text ? `, ${saved.phase_text}` : ''),
                                    file: 'saves/' + (saved.id || ''), at: saved.saved_at || ''});
                 })
                 .catch(err => alert('⚠️ ' + err.message))
@@ -2914,6 +3011,12 @@ HTML_TEMPLATE = """
             // кнопка «Доиграть» (см. updatePanel), и она не должна ждать
             // следующего опроса — иначе под занавесом её просто не видно
             playRestored = !!data.restored;
+            // И состояние сохранённого: оно решает, чем вернувшийся спектакль
+            // себя называет и что о нём сказать у занавеса (см. show.load_save)
+            restoredPhase = data.restored_phase || '';
+            // Ваш ход: пока он идёт, файлы спектакля никто не пишет — сохранение
+            // этой минуты и ждёт (см. updateSaveMoment)
+            humanTurn = !!data.waiting_for_human;
             // Запись пульта могла быть и не отсюда: о ней рассказывает состояние
             noteSettingsWrite(data.settings_write);
             if (data.topic) setTopicDisplay(data.topic);
@@ -2953,8 +3056,15 @@ HTML_TEMPLATE = """
                 // Спектакль мог вернуться из ДАМПа прошлого запуска: без этих
                 // слов лента с чужими репликами выглядит как «театр помнит то,
                 // чего я не играл» (см. show.load_play_from_dump)
+                // Спектакль вернулся не просто из ДАМПа: он мог быть сохранён
+                // в архив на ходу человека — тогда ему не хватает одной реплики,
+                // и это видно тут же (см. show.load_save)
+                const phaseLine = restoredPhase === 'human'
+                    ? ': остановлен на вашем ходу — «Доиграть прежний» продолжит с того же места'
+                    : '';
                 const restored = data.restored
-                    ? '<div style="font-size:12px;margin-top:6px;font-style:italic;">🗒 прежний спектакль, возвращённый из ДАМПа</div>'
+                    ? '<div style="font-size:12px;margin-top:6px;font-style:italic;">🗒 прежний спектакль, возвращённый из ДАМПа'
+                        + phaseLine + '</div>'
                     : '';
                 statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>' + restored + curtain;
                 setTurnState('finished');

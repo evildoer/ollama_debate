@@ -132,6 +132,10 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         # занавес был не сейчас, и об этом надо сказать — иначе лента с чужими
         # репликами выглядит как «театр помнит то, чего я не играл»
         "restored": show.session.restored,
+        # Чем сохранённый спектакль был сохранён (см. show.load_save): занавес
+        # так и остаётся занавесом, а ход человека — ходом, которому не хватает
+        # одной реплики, и сказать об этом надо словами
+        "restored_phase": show.session.restored_phase,
         "current_participant_is_moderator": show.session.current_participant_is_moderator(),
         # Роль нужна интерфейсу, чтобы писать «Ход: Ирина · судья», а не просто имя
         "current_participant_role": show.session.current_participant_role(),
@@ -319,8 +323,11 @@ def cast_payload() -> list:
         # Роль одним словом: странице так проще, чем два флага
         item["role"] = show.cast_role(p)
         # И одно слово про картинки: «+» у модели значит, что приложенное к
-        # реплике она правда увидит (для облачной это догадка по имени, см. cloud)
+        # реплике она правда увидит (у облачной до проверки это догадка по имени,
+        # см. cloud). А vision_checked говорит, проверена ли она вообще: страница
+        # по этому признаку сама идёт спрашивать, не дожидаясь нажатия кнопки
         item["reads_images"] = ollama_api.model_supports_vision(p.get("model", ""))
+        item["vision_checked"] = ollama_api.vision_answer_known(p.get("model", ""))
         if p.get("model") != "human":
             merged = ollama_api._merge_options(p)
             item["effective_options"] = {
@@ -360,9 +367,14 @@ def check_vision():
         if not model or model == "human":
             # Живому участнику читать картинки нечем: он их и прикладывает
             continue
+        reads = ollama_api.takes_images(model)
         checked.append({"name": participant.get("display_name") or model,
                         "model": model,
-                        "reads_images": ollama_api.takes_images(model)})
+                        "reads_images": reads,
+                        # Ответ на «не читает» бывает и догадкой по имени, когда
+                        # шлюз не ответил: сказать про такую модель «слепая»
+                        # значило бы соврать (см. vision_answer_known)
+                        "known": ollama_api.vision_answer_known(model)})
     return jsonify({"success": True, "checked": checked,
                     "reads": sum(1 for one in checked if one["reads_images"])})
 

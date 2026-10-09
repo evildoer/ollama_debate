@@ -1955,6 +1955,29 @@ def _save_folder_path(save_id: str) -> Path:
     return folder
 
 
+# В каком состоянии спектакль: под занавесом — или он паркуется на ходу.
+# Сохранение разрешено как раз в них (см. save_play), а слова эти показываются
+# в архиве: вернувшийся спектакль должен быть тем же, чем был сохранён
+PHASE_WORDS = {
+    "live": "говорит модель",
+    "human": "на ходу человека",
+    "finished": "занавес опущен",
+    "setup": "спектакль ещё не начат",
+}
+
+
+def play_phase() -> str:
+    """Где остановился спектакль: «live», «human», «finished» или «setup».
+
+    Это про то, можно ли брать копию файлов (см. save_play): на ходу человека
+    и под занавесом в них никто не пишет — а пока говорит модель, ДАМП
+    дописывается её ходом, и копия была бы половиной записи.
+    """
+    if session.running:
+        return "human" if session.waiting_for_human else "live"
+    return "finished" if session.posts else "setup"
+
+
 def save_play(name: str, port: int = None) -> tuple:
     """Сохранить нынешний спектакль в архив — целиком, под именем режиссёра.
 
@@ -1962,10 +1985,19 @@ def save_play(name: str, port: int = None) -> tuple:
     Картинки — потому что посты ссылаются на них адресами (см. post_images),
     и в другом порту те же адреса вели бы в пустое место: своё сохранение
     приносит и своё приложенное.
+
+    Завершать спектакль для этого не надо: сохранение — копия, а не занавес,
+    и оно берётся в любой безопасный момент — на ходу человека или под занавесом
+    (см. play_phase). Пока говорит модель, отказ: ДАМП в это время дописывается
+    её ходом, и половина записи — это не спектакль.
     """
     name = str(name or "").strip()
     if not name:
         return None, "сохранению нужно имя — по нему его потом и найдут"
+    phase = play_phase()
+    if phase == "live":
+        return None, ("сейчас говорит модель: сохранить можно на вашем ходу "
+                      "или под занавесом")
     folder = settings.SAVES_DIR / save_folder(name)
     try:
         folder.mkdir(parents=True, exist_ok=True)
@@ -1993,6 +2025,10 @@ def save_play(name: str, port: int = None) -> tuple:
             "spent": round(float(session.spent or 0.0), 2),
             "cast": [str(p.get("display_name") or "") for p in session.runtime_participants],
             "pictures": pictures,
+            # Состояние спектакля на момент сохранения: по нему видно, вернётся
+            # ли он под занавес или на ходу человека (см. load_save)
+            "phase": phase,
+            "phase_text": PHASE_WORDS.get(phase, ""),
         }
         (folder / "save.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -2000,7 +2036,8 @@ def save_play(name: str, port: int = None) -> tuple:
         print(f"  ⚠️  Спектакль не сохранился: {e}")
         return None, f"спектакль не сохранился: {e}"
     print(f"💾 Сохранён спектакль «{name}»: реплик {meta['posts']}, "
-          f"актов {meta['round']}, приложенного {pictures} — {folder}")
+          f"актов {meta['round']}, приложенного {pictures}, "
+          f"{meta['phase_text']} — {folder}")
     return meta, ""
 
 
@@ -2066,11 +2103,17 @@ def load_save(save_id: str) -> tuple:
         return None, f"сохранение не вернулось: {e}"
     _dump_reset()          # прежний файл больше не наш: его перезаписали
     load_theatre_settings()
-    # Другое обсуждение — и приложенное в нём другое: эта модель картинок
-    # вернувшегося спектакля не видела (см. forget_shown_pictures)
+    # Приложенное вернувшегося спектакля пока не показано никому: кому оно
+    # достанется, решит его же история — при «Доиграть прежний» (см.
+    # restore_shown_pictures)
     session.forget_shown_pictures()
     posts = load_play_from_dump("read")
-    print(f"📂 Вернулся сохранённый спектакль «{meta.get('name')}»: реплик {posts}")
+    # Чем спектакль был сохранён, тем он и вернётся: «занавес опущен» так
+    # и останется занавесом, а «на ходу человека» — тем же ходом, которому
+    # не хватает одной кнопки (см. status_payload, play_phase)
+    session.restored_phase = str(meta.get("phase") or "")
+    print(f"📂 Вернулся сохранённый спектакль «{meta.get('name')}»: "
+          f"реплик {posts}, {meta.get('phase_text') or 'состояние не записано'}")
     meta["posts"] = posts
     return meta, ""
 
@@ -2106,6 +2149,7 @@ def forget_play() -> None:
     session.spent = 0.0
     session.money_told = False
     session.restored = False
+    session.restored_phase = ""
     # Прощён и он, и показанное в нём: прежние адреса никуда не ведут, а новый
     # спектакль начинается с чистой памяти (см. forget_shown_pictures)
     session.forget_shown_pictures()
@@ -2873,6 +2917,9 @@ class DebateSession:
         # Вернулся ли этот спектакль из ДАМПа прошлого запуска: по этому
         # признаку в ленте видно, что занавес был не сейчас (см. status_payload)
         self.restored = False
+        # Чем вернувшийся спектакль был сохранён: «занавес опущен» или «на ходу
+        # человека» — словами говорит страница (см. load_save)
+        self.restored_phase = ""
         # Прежний спектакль вернулся с разрешением доиграть: по этому признаку
         # старт не начинает с чистого листа, а продолжает прежний — со своими
         # репликами в ленте, своей историей для моделей и с той же ценой
@@ -2982,15 +3029,16 @@ class DebateSession:
         self.waiting_for_human = False
         self.moderator_message = None
         self.pending_attachments = []
-        # Занавес поднимается — и про показанное спрашивать не у кого: модели
-        # пришли на этот спектакль с пустой головой (даже если он сам вернулся
-        # из ДАМПа после перезапуска — модель картинку не помнит)
+        # Занавес поднимается — и про показанное спрашивать не у кого: новую
+        # сцену модели начинают с пустой головой. А у продолжения память есть,
+        # и возвращает её сама история (см. restore_shown_pictures)
         self.forget_shown_pictures()
         self.moderator_finished = False
         # Спектакль играется сейчас: слова «прежний, возвращённый из ДАМПа»
         # после этого уже неверны, а доигранный когда-то спектакль не должен
         # выдавать себя за прежний после перезапуска (см. status_payload)
         self.restored = False
+        self.restored_phase = ""
         if not resume:
             self.posts = []
             self.current_round = 0
@@ -3013,14 +3061,24 @@ class DebateSession:
                  "content": post.get("content", ""),
                  "is_moderator": post.get("role") == "moderator",
                  "is_judge": post.get("role") == "judge",
-                 "round": int(post.get("round") or 0)}
-                for post in self.posts if str(post.get("content") or "").strip()]
+                 "round": int(post.get("round") or 0),
+                 # Приложенное едет вместе с репликой и в продолжение: в ДАМПе
+                 # лежат адреса картинок (см. attachment_lines), а без них
+                 # прежнее приложенное пропало бы из истории целиком — и модель,
+                 # которой картинка не досталась, не увидела бы её вовсе
+                 "attachments": list(post.get("attachments") or [])}
+                for post in self.posts
+                if str(post.get("content") or "").strip() or post.get("attachments")
+            ]
             # Цена продолжения — вся цена спектакля: он всё ещё тот же
             self.money_told = bool(self.spent)
             # А ход, оборванный смертью процесса, переспрашивается: реплики
             # в нём нет вовсе (см. _parse_record), и считать его сказанным
             # нельзя — оставленная дыра слышна всем, кто говорит после
             self.replay_plan = self.plan_replay()
+            # Показанное прежнего спектакля помнится его же историей: картинку,
+            # после которой модель уже говорила, она видела (см. restore_shown_pictures)
+            self.restore_shown_pictures()
         self.sync_cast_media()
 
     def plan_replay(self) -> dict:
@@ -3448,11 +3506,61 @@ class DebateSession:
     def forget_shown_pictures(self) -> None:
         """Всё приложенное — снова невиданное: и в памяти, и в показанном.
 
-        Нужно там, где перед моделью другой разговор: ход нового спектакля,
-        возврат из архива, продолжение после перезапуска (см. start_show).
+        Нужно там, где перед моделью совсем другой разговор: ход нового
+        спектакля и все, что к нему притрагивается (см. start_show, forget_play).
+        А продолжение прежнего — не новый разговор, и память ему возвращает
+        история (см. restore_shown_pictures).
         """
         self.images_shown = {}
         self.images_pending = {}
+
+    def restore_shown_pictures(self, history: list = None) -> None:
+        """Вспомнить по истории, кто из моделей уже видел приложенное.
+
+        Ход модели — это и её ответ на картинку: если после реплики с картинкой
+        эта модель ещё говорила, значит картинка до неё дошла и она её видела
+        (см. _format_history) — повторно показывать её нечего, и в контексте
+        останется только строка о ней. А тому, чей ход картинку не застал
+        (или оборвался на ней смертью процесса), она уедет заново: не увидеть
+        картинку он мог только так.
+
+        Нужно продолжению прежнего спектакля — и из ДАМПа, и из архива:
+        сама история говорит, кому что показано, и отдельного хранилища
+        для этого не нужно (см. start_show).
+        """
+        history = list(self.conversation_history if history is None else history)
+        # Где в истории говорил каждый: по последнему слову видно, застал ли
+        # ход модели картинку (модератор и живой участник картинок не читают,
+        # и в показанном им делать нечего)
+        last_spoken = {}
+        for index, post in enumerate(history):
+            last_spoken[str(post.get("display_name") or "")] = index
+        last_of_model = {}
+        for participant in self.runtime_participants:
+            model = str((participant or {}).get("model") or "")
+            if not model or model == "human":
+                continue
+            said = last_spoken.get(str((participant or {}).get("display_name") or ""))
+            if said is not None:
+                # Мест с одной моделью бывает и два: «уже говорил кто-то из них»
+                # и значит «эта модель картинку видела» — так же, как на ходу
+                # (см. commit_shown_pictures: показанное помнится моделью)
+                last_of_model[model] = max(said, last_of_model.get(model, -1))
+        shown = {}
+        for index, post in enumerate(history):
+            urls = [str((one or {}).get("url") or "") for one in post.get("attachments") or []]
+            urls = [url for url in urls if url]
+            if not urls:
+                continue
+            for model, said in last_of_model.items():
+                if said > index:
+                    shown.setdefault(model, set()).update(urls)
+        self.images_shown = shown
+        self.images_pending = {}
+        count = sum(len(urls) for urls in shown.values())
+        if count:
+            print(f"  🖼  Прежние картинки в памяти: {count} показанных — "
+                  f"повторно не поедут, останутся строками о них")
 
     # ------------------------------------------------------------
     # Блоки системного промпта

@@ -7334,6 +7334,9 @@ class TestThePictureIsShownOnce(PicturesTest):
     а в реплике вместо картинки остаётся строка о ней: бесследно пропасть она
     не должна — иначе следующая реплика была бы про картинку, которой
     в разговоре как будто не было.
+
+    Возвращённый спектакль (из архива или из ДАМПа) помнит то же самое: кто
+    картинку видел, говорит его же история (см. show.restore_shown_pictures).
     """
 
     def setUp(self):
@@ -7441,6 +7444,56 @@ class TestThePictureIsShownOnce(PicturesTest):
 
         self.assertTrue([m for m in self.spoken() if m.get("images")],
                         "в новом спектакле картинка не уехала, будто её уже показывали")
+
+    def test_a_picture_answered_before_the_restart_is_not_shown_again(self):
+        """Картинку, после которой эта модель уже говорила, повторно не показывают.
+
+        Спектакль вернулся из ДАМПа или из архива — и память о том, кто что
+        видел, возвращает его же история: после реплики с картинкой участник
+        говорил, значит видел (см. restore_shown_pictures). Иначе картинка
+        уехала бы ему второй раз и была бы оплачена дважды.
+        """
+        self.with_picture()
+        self.session.add_post(self.person["display_name"], self.person["model"],
+                              "Схему вижу, отвечаю по существу.", 1, dump=False)
+        self.session.restore_shown_pictures()
+
+        messages = self.spoken()
+        self.assertEqual([m for m in messages if m.get("images")], [],
+                         "картинку показали заново, хотя модель её уже видела")
+        self.assertIn("уже показана", self.joined(messages),
+                      "картинка пропала из истории совсем: вместо неё нужна строка о ней")
+
+    def test_a_picture_nobody_has_answered_yet_comes_back_with_the_play(self):
+        """Картинка, на которую ответить не успели, уезжает заново.
+
+        Ответ и есть доказательство, что модель её видела: раз ответа нет —
+        показывать придётся снова (см. restore_shown_pictures).
+        """
+        self.with_picture()
+        self.session.restore_shown_pictures()
+
+        self.assertTrue([m for m in self.spoken() if m.get("images")],
+                        "картинка не вернулась, хотя ответить на неё никто не успел")
+
+    def test_a_model_whose_turn_was_cut_gets_the_picture_again(self):
+        """Кому картинка не досталась — тому она уедет заново, хоть её и видели другие.
+
+        Ход этого участника оборвался до картинки (или его хода просто не было):
+        его глазами картинку никто не видел, и «уже показана» была бы про него
+        неправдой (см. restore_shown_pictures).
+        """
+        other = [one for one in ai_participants(self.session)
+                 if one["display_name"] != self.person["display_name"]][0]
+        self.with_picture()
+        self.session.add_post(self.person["display_name"], self.person["model"],
+                              "Схему вижу, отвечаю.", 1, dump=False)
+        self.session.restore_shown_pictures()
+
+        seen = self.session.build_messages_for_ai(other, 2)
+        self.assertTrue([m for m in seen if m.get("images")],
+                        "модель, которая картинку не видела, осталась без неё")
+        self.assertNotIn("уже показана", self.joined(seen))
 
 
 class CloudVisionTest(unittest.TestCase):
@@ -7682,12 +7735,104 @@ class TestWhoReadsPictures(CloudVisionTest):
         self.assertEqual(called.call_count, 1,
                          "второй раз спрашивать некого: ответ не меняется")
 
+    def test_a_guess_is_not_called_a_known_answer(self):
+        """Догадка по имени — не ответ: пока не спросили, правды о модели нет.
+
+        Это и говорит странице, что проверять есть что (см. cast_payload):
+        «+» у облачной модели до проверки — первое слово, и выдать его
+        за проверенное значило бы врать режиссёру (см. vision_answer_known).
+        """
+        self.assertFalse(ollama_api.vision_answer_known("cloud:qwen/qwen3.8-flash"))
+        cloud._IMAGE_READERS["qwen/qwen3.8-flash"] = True
+        self.assertTrue(ollama_api.vision_answer_known("cloud:qwen/qwen3.8-flash"))
+        self.assertTrue(ollama_api.vision_answer_known("llava"),
+                        "у местной модели догадок нет: её способность знает Ollama")
+        self.assertTrue(ollama_api.vision_answer_known("human"))
+
     def test_a_model_that_cannot_be_asked_is_not_remembered(self):
         """Ошибку сети не запоминаем: иначе мигающая Ollama учила бы модель слепоте."""
         with mock.patch.object(ollama_api.urllib.request, "urlopen",
                               mock.Mock(side_effect=OSError("Ollama спит"))):
             self.assertFalse(ollama_api.model_supports_vision("fake-awake-model"))
         self.assertNotIn("fake-awake-model", ollama_api.MODELS_VISION_SUPPORT)
+
+
+class TestVisionCheckedAtTheStart(CloudVisionTest):
+    """Проверка зрения идёт сама, а её ответ помнится.
+
+    Про облачную модель правду иначе не узнать, чем пробной картинкой — это
+    запрос за деньги (см. cloud.probe_images). Поэтому спрашивают один раз
+    на модель и ложат ответ в файл экземпляра: со следующего запуска он известен
+    без запроса. А что ещё не проверено — страница узнаёт из состава, и про
+    такие модели идёт спрашивать сама, не дожидаясь нажатия
+    (см. cast_payload, page.autoVision).
+    """
+
+    MODEL = "cloud:qwen/qwen3.8-flash"
+
+    def setUp(self):
+        super().setUp()
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.client = web_app.app.test_client()
+
+    def _one_cloud_model(self):
+        """В составе ровно один — облачный: спрашивать будут только про него."""
+        self.session.runtime_participants = self.session.runtime_participants[:1]
+        self.session.runtime_participants[0]["model"] = self.MODEL
+        self.session.runtime_participants[0]["display_name"] = "Алексей"
+
+    def test_the_cast_says_what_is_still_unchecked(self):
+        """Состав говорит странице, про кого проверки ещё не было.
+
+        Без этого «+» у облачной модели — догадка по имени, и отличить её
+        от проверенного ответа нечем: страница либо спрашивала бы заново
+        каждый раз, либо не спрашивала бы вовсе (см. page.autoVision).
+        """
+        self._one_cloud_model()
+        before = self.client.get("/api/participants").get_json()["participants"][0]
+        self.assertFalse(before["vision_checked"], "догадка выдана за проверку")
+
+        cloud._IMAGE_READERS["qwen/qwen3.8-flash"] = True
+        after = self.client.get("/api/participants").get_json()["participants"][0]
+
+        self.assertTrue(after["vision_checked"], "проверенный ответ остался незаметным")
+        self.assertTrue(after["reads_images"], "проверенный ответ не доехал до состава")
+
+    def test_the_check_says_what_it_could_not_ask_about(self):
+        """«Не читает» без ответа шлюза — догадка, и в ответе это видно.
+
+        Иначе про такую модель было бы сказано «слепая», а это неправда:
+        спросить не вышло, а не модель отказалась (см. page.visionWords).
+        """
+        self._one_cloud_model()
+        blind = cloud.GatewayError("шлюз недоступен по адресу ...")
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", return_value=(None, blind)):
+            checked = self.client.post("/api/vision/check").get_json()["checked"]
+
+        self.assertEqual([one["name"] for one in checked], ["Алексей"])
+        self.assertFalse(checked[0]["known"], "неудавшийся спрос выдан за ответ")
+        self.assertFalse(checked[0]["reads_images"])
+
+    def test_the_check_remembers_the_answer_it_got(self):
+        """Ответ шлюза запоминается: со следующего раза спрашивать некого."""
+        self._one_cloud_model()
+        asked = []
+
+        def answer(path, **kwargs):
+            asked.append(path)
+            return {"choices": [{"message": {"content": "синий"}}]}, None
+
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", side_effect=answer):
+            first = self.client.post("/api/vision/check").get_json()["checked"]
+            second = self.client.post("/api/vision/check").get_json()["checked"]
+
+        self.assertTrue(first[0]["reads_images"], "шлюз ответил, а картинка не уехала бы")
+        self.assertTrue(first[0]["known"])
+        self.assertTrue(second[0]["reads_images"])
+        self.assertEqual(len(asked), 1, "второй раз спрашивать некого: ответ запомнен")
 
 
 class TestAPictureNobodyCanOpen(CloudVisionTest):
@@ -7882,6 +8027,75 @@ class TestArchiveOfPlays(unittest.TestCase):
         self.assertIsNone(meta, "спектакль подменили на ходу — ДАМП и пульт перепутаны")
         self.assertIn("идёт", error)
         self.assertTrue(settings.DUMP_FILE.exists(), "архив всё равно что-то переписал")
+
+    def test_a_play_parked_on_the_human_turn_is_saved_as_it_is(self):
+        """Сохранение берётся и на ходу человека: спектакль ждёт реплики, файлы никто не пишет.
+
+        Завершать спектакль для этого не надо — сохранение это копия, а не занавес
+        (см. play_phase). А идущий ход модели — не момент для копии: ДАМП
+        в это время дописывается (см. save_play).
+        """
+        self._play_with_a_picture()
+        show.load_play_from_dump("read")
+        self.session.running = True
+        self.session.waiting_for_human = True
+
+        saved, error = show.save_play("на ходу человека")
+
+        self.assertEqual(error, "", "спектакль на ходу человека не сохранился")
+        self.assertEqual(saved["phase"], "human")
+        self.assertEqual(saved["phase_text"], show.PHASE_WORDS["human"])
+        self.assertEqual([one["phase"] for one in show.list_saves()], ["human"],
+                         "в архиве не видно, чем спектакль был сохранён")
+
+    def test_saving_while_the_model_speaks_is_refused_in_words(self):
+        """Пока говорит модель, копии не берут: половина записи — не спектакль."""
+        self._play_with_a_picture()
+        show.load_play_from_dump("read")
+        self.session.running = True
+        self.session.waiting_for_human = False
+
+        saved, error = show.save_play("на ходу модели")
+
+        self.assertIsNone(saved, "копия взята под идущим ходом")
+        self.assertIn("вашем ходу", error, "отказ ничего не объясняет режиссёру")
+        self.assertEqual(show.list_saves(), [], "отказ всё равно что-то сохранил")
+
+    def test_a_saved_play_returns_with_the_state_it_was_saved_in(self):
+        """Вернувшийся спектакль — тот же, чем был: ход человека остаётся ходом.
+
+        Спектакль можно закрывать и открывать когда угодно, и незавершённый
+        возвращается незавершённым: ему не хватает одной реплики, и об этом
+        сказано и в архиве, и у занавеса (см. status_payload).
+        """
+        self._play_with_a_picture()
+        show.load_play_from_dump("read")
+        self.session.running = True
+        self.session.waiting_for_human = True
+        saved, error = show.save_play("парковка")
+        self.assertEqual(error, "")
+
+        self.session.running = False
+        self.session.waiting_for_human = False
+        meta, error = show.load_save(saved["id"])
+
+        self.assertEqual(error, "")
+        self.assertEqual(self.session.restored_phase, "human",
+                         "вернувшийся спектакль выдал себя за доигранный")
+
+    def test_a_play_under_the_curtain_comes_back_under_the_curtain(self):
+        """Сохранённый под занавесом так и возвращается: занавес — не ход человека."""
+        self._play_with_a_picture()
+        show.load_play_from_dump("read")
+
+        saved, error = show.save_play("после занавеса")
+        self.assertEqual(error, "")
+        self.assertEqual(saved["phase"], "finished")
+
+        meta, error = show.load_save(saved["id"])
+
+        self.assertEqual(error, "")
+        self.assertEqual(self.session.restored_phase, "finished")
 
     def test_a_foreign_name_cannot_walk_the_archive(self):
         """Имя сохранения из формы не открывает чужие папки — ни на чтение, ни на удаление."""
@@ -8236,6 +8450,74 @@ class TestPageScript(unittest.TestCase):
             "saveWriteDecision(null, true, 7).stamp",
             "saveWriteDecision({}, true, 7).show")
         self.assertEqual(out, [True, False, True, False, False, 7, False])
+
+    def test_the_vision_answer_names_the_blind_ones(self):
+        """Кто не читает картинки — назван по имени, а не числом.
+
+        «Остальным — только текст (1 из 2)» говорило «кто-то», и по числу было
+        не понять, кто именно: список состава сличался вручную. А про кого
+        спросить не вышло — это не «слепая»: так сказать было бы враньём
+        (см. page.visionWords).
+        """
+        out = self._run_page(
+            ("visionWords",),
+            "visionWords([{name: 'Алексей', model: 'cloud:a', reads_images: true, known: true},"
+            " {name: 'Борис', model: 'cloud:b', reads_images: false, known: true},"
+            " {name: 'Вера', model: 'cloud:c', reads_images: false, known: false}])",
+            "visionWords([{name: 'Женя', model: 'cloud:d', reads_images: false, known: true}])",
+            "visionWords([])")
+
+        self.assertIn("Картинки читают (1 из 3)", out[0])
+        self.assertIn("Алексей (cloud:a)", out[0])
+        self.assertIn("Не читают: Борис (cloud:b)", out[0])
+        self.assertIn("не удалось (шлюз не ответил): Вера (cloud:c)", out[0])
+        self.assertIn("ни одна модель состава", out[1])
+        self.assertEqual(out[2], "", "про пустой состав говорит не эта строка")
+
+    def test_the_vision_check_runs_without_pressing_a_button(self):
+        """Зрение проверяется само при загрузке состава — и только раз на модель.
+
+        Нажимать кнопку перед каждым спектаклем — это и была та ручная работа,
+        от которой режиссёр просил избавиться: про облачную модель иначе
+        не узнать (см. cloud.probe_images), а ответ помнится, поэтому
+        повторных запросов нет.
+        """
+        source = page.HTML_TEMPLATE
+        self.assertIn("autoVision();", source, "проверка зрения ждёт нажатия кнопки")
+        self.assertIn("sayCastVision();", source,
+                      "о том, кто читает картинки, молчат до нажатия кнопки")
+        self.assertIn("p.vision_checked === false", source,
+                      "страница не знает, про кого проверки ещё не было")
+        self.assertIn("unknown.forEach(p => visionAsked.add(p.model));", source,
+                      "о спрошенных не помнят: отказ шлюза гонял бы запрос по кругу")
+
+    def test_the_save_button_waits_for_a_safe_moment(self):
+        """Сохранение берётся тогда, когда файлы спектакля никто не пишет.
+
+        Идущий ход модели дописывает ДАМП, и копия в этот момент — половина
+        записи. Поэтому кнопка молчит на ходу модели и говорит словами, чего
+        ждёт: ваш ход или занавес (см. page.updateSaveMoment, show.save_play).
+        """
+        source = page.HTML_TEMPLATE
+        self.assertIn('id="saveHint"', source)
+        self.assertIn("const speaking = debateRunning && !showFinished && !humanTurn;",
+                      source)
+        self.assertIn("btn.disabled = speaking;", source,
+                      "кнопка сохраняет и под идущим ходом модели")
+        self.assertIn("Говорит модель: сохранение станет доступно на вашем ходу",
+                      source, "кнопка молчит и не говорит почему")
+        self.assertIn("phase_text", source,
+                      "в архиве не видно, чем спектакль был сохранён")
+        self.assertIn("data.restored_phase", source,
+                      "о состоянии вернувшегося спектакля не сказано")
+
+    def test_the_model_list_says_who_reads_pictures(self):
+        """«+» у модели — и в списке выбора: место под неё выбирают по этому знаку.
+
+        До запуска режиссёр решает, кому уедет приложенное, и узнать это
+        из одного списка имён было негде (см. page.renderModelSuggestions).
+        """
+        self.assertIn("reads ? ' + читает картинки' : ''", page.HTML_TEMPLATE)
 
     def test_the_page_script_parses(self):
         """Скрипт страницы разбирается настоящим интерпретатором JavaScript."""
