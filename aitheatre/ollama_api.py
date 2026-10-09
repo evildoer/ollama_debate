@@ -68,6 +68,17 @@ def takes_tools_now(model: str) -> bool:
 # у llama-моделей там только completion, у gemma4/qwen35 есть "thinking".
 MODELS_THINKING_SUPPORT = {}
 
+# Кэш «модель читает картинки»: {"model_name": True/False}. Ollama называет это
+# способностью vision в том же /api/show: у llava, qwen-vl и gemma3 там стоит
+# "vision", а у обычной текстовой модели её нет вовсе. Спрашивать надо заранее:
+# модель без зрения на приложенную картинку либо отвечает ошибкой, либо (хуже)
+# считает сообщение пустым (см. messages_for)
+MODELS_VISION_SUPPORT = {}
+
+# О ком уже сказали, что картинки ему не уезжают: иначе одно и то же
+# предупреждение печаталось бы на каждом ходу
+_IMAGES_REFUSED_WARNED = set()
+
 # Кэш списка скачанных моделей Ollama: {"at": monotonic, "models": {имя: размер}, "error": str}
 _OLLAMA_MODELS_CACHE = {"at": 0.0, "models": {}, "error": None}
 
@@ -123,6 +134,128 @@ def model_supports_thinking(model: str) -> bool:
     
     MODELS_THINKING_SUPPORT[model] = supported
     return supported
+
+
+def model_supports_vision(model: str) -> bool:
+    """Читает ли модель картинки.
+
+    У местной это спрашивают у Ollama (/api/show → capabilities, там есть
+    способность vision), у облачной — по имени (см. cloud.model_reads_images):
+    у шлюза в списке моделей одни имена, и способностей там нет.
+    """
+    if not model or model == "human":
+        return False
+    if cloud.is_cloud_model(model):
+        return cloud.model_reads_images(model)
+    if model in MODELS_VISION_SUPPORT:
+        return MODELS_VISION_SUPPORT[model]
+
+    try:
+        request = urllib.request.Request(
+            settings.OLLAMA_SHOW_URL,
+            data=json.dumps({"model": model}).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            capabilities = json.loads(response.read().decode('utf-8')).get("capabilities") or []
+        supported = "vision" in capabilities
+    except Exception as e:
+        # Ошибку сети не запоминаем: иначе мигающая Ollama «научила» бы модель
+        # не видеть картинки (та же причина, что у model_supports_thinking)
+        print(f"  ⚠️  Не удалось узнать, читает ли {model} картинки: {e}")
+        return False
+
+    MODELS_VISION_SUPPORT[model] = supported
+    return supported
+
+
+def takes_images(model: str, report: dict = None) -> bool:
+    """Брать ли картинки этой модели — то же, что model_supports_vision, но
+    у облачной оно узнаётся у шлюза.
+
+    У своей Ollama спрашивают её саму (capabilities в /api/show, см.
+    model_supports_vision), и это правда — там и спрашивать больше нечего.
+    А у облачной в имени одни догадки (у одного вендора «flash» картинки читает,
+    у другого нет: проверил имена — прочитал картинку с одинаковым успехом
+    у gemma-4, glm-5.3, qwen3.8 и gpt-4o, а по приметам четыре из пяти выходили
+    слепыми), поэтому там дорога одна: спросить у шлюза крошечной картинкой
+    (см. cloud.probe_images) и запомнить ответ навсегда.
+
+    Спрашиваем только когда картинка и вправду есть и про эту модель ещё неизвестно:
+    спрашивать на всяком ходу — это запрос за деньги, а спрашивать у моделей,
+    которым ничего не приложено, — тем более.
+    """
+    if not model or model == "human":
+        return False
+    if not cloud.is_cloud_model(model):
+        return model_supports_vision(model)
+    if cloud.images_known(model):
+        return cloud.model_reads_images(model)
+    told = cloud.probe_images(model)
+    if told is None:
+        # Спросить не вышло (нет ключа или связи): остаёмся при догадке по имени
+        return cloud.model_reads_images(model)
+    return told
+
+
+def carries_pictures(messages: list) -> bool:
+    """Есть ли в этих сообщениях приложенное — у Ollama оно лежит полем images."""
+    return any(isinstance(one, dict) and one.get("images") for one in messages or [])
+
+
+def bare_images(images: list) -> list:
+    """Голый base64 без «data:…;base64,» — так картинки ждёт Ollama.
+
+    Приложенный файл едет по истории самодостаточной строкой-адресом
+    («data:image/png;base64,…»): иначе облачный шлюз не поймёт, что это за
+    картинка, — а своя Ollama такого префикса не знает и требует base64
+    (см. messages_for).
+    """
+    result = []
+    for one in images or []:
+        one = str(one or "")
+        marker = ";base64,"
+        result.append(one.split(marker, 1)[1]
+                      if one.startswith("data:") and marker in one else one)
+    return result
+
+
+def messages_for(model: str, messages: list, report: dict = None) -> list:
+    """Сообщения для этой модели: с картинками, без них и в её виде.
+
+    Приложенная к реплике картинка — не текст: у модели без зрения она либо
+    вызывает ошибку запроса, либо (это хуже) молча теряется вместе со всей
+    репликой. Поэтому перед отправкой картинки убираются, а о самой причине
+    говорит и консоль, и хронология хода — иначе «приложил, а она не увидела»
+    осталось бы незамеченным.
+
+    Кому картинки читать можно, вид у них разный: облако ждёт адрес целиком
+    (data-URL), Ollama — голый base64. Приводим по дороге, а не в истории:
+    там строка одна на всех, и третий получатель не потребует четвёртого вида.
+    """
+    messages = messages or []
+    with_images = [m for m in messages
+                   if isinstance(m, dict) and m.get("images")]
+    if not with_images:
+        return messages
+
+    if takes_images(model, report):
+        if cloud.is_cloud_model(model):
+            return messages           # шлюзу картинка едет адресом, как есть
+        prepared = []
+        for message in messages:
+            if isinstance(message, dict) and message.get("images"):
+                message = {**message, "images": bare_images(message["images"])}
+            prepared.append(message)
+        return prepared
+
+    note = f"{model} не читает картинки — приложенные файлы ей не отправлены"
+    if model not in _IMAGES_REFUSED_WARNED:
+        _IMAGES_REFUSED_WARNED.add(model)
+        print(f"  🖼  {note}")
+    journal_note(report, note, kind="images")
+    return [{key: value for key, value in message.items() if key != "images"}
+            if isinstance(message, dict) else message for message in messages]
 
 
 def resolve_think(participant: dict):
@@ -801,6 +934,12 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         report: пустой словарь, который облачный путь наполнит рассказом о ходе
                (чем ответ кончился, сколько ушло в размышления)
     """
+    # Приложенные режиссёром картинки уезжают только тем, кто их читает:
+    # здесь, а не в сборке истории, потому что именно тут известна модель,
+    # которой эти сообщения отправляются (см. messages_for). Обе дороги —
+    # и своя Ollama, и облачный шлюз — идут через эту функцию
+    messages = messages_for(model, messages, report)
+
     # Облачная модель играет не в Ollama: ход уходит на шлюз, в формате OpenAI.
     # Возвращаемая форма та же (текст, вызовы инструментов), поэтому весь цикл
     # поиска в интернете и разбор ошибок в ask_model остаются нетронутыми
@@ -902,6 +1041,24 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         error_body = e.read().decode('utf-8') if e.fp else "Нет деталей ошибки"
         print(f"  ⚠️  HTTP ошибка {e.code}: {e.reason}")
         print(f"  📋 Детали: {error_body}")
+        # Приложенная картинка: само письмо от Ollama это называет («Failed to
+        # load image or audio file»), а ход из-за приложения пропадать не должен
+        # — режиссёр ждёт реплики, а не разбора чужого файла. Повторяем ту же
+        # реплику без картинок и запоминаем модель слепой: в следующий раз они
+        # ей не поедут вовсе (см. messages_for)
+        if carries_pictures(messages) and cloud.picture_refused(error_body):
+            MODELS_VISION_SUPPORT[model] = False
+            note = (f"{model} не открыла приложенную картинку — "
+                    "реплика продолжена без неё")
+            print(f"  🖼  {note}")
+            journal_note(report, note, kind="images")
+            return ask_model_with_tools(
+                model,
+                [{key: value for key, value in one.items() if key != "images"}
+                 for one in messages],
+                supports_tools=supports_tools, tool_choice=tool_choice, options=options,
+                think=think, on_delta=on_delta, on_thought=on_thought, tools=tools,
+                report=report, deadline=deadline)
         cloud.journal_ask(report, {"error": f"HTTP {e.code}: {e.reason}"})
         return f"[ОШИБКА: HTTP {e.code}]", []
     except Exception as e:

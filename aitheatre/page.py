@@ -91,6 +91,15 @@ HTML_TEMPLATE = """
         .post-avatar { flex-shrink: 0; }
         .post-avatar img { width: 150px; height: 150px; object-fit: cover; border: 1px solid #000000; filter: grayscale(100%); }
         .post-avatar .emoji { width: 150px; height: 150px; background: #ffffff; border: 1px solid #000000; display: flex; align-items: center; justify-content: center; font-size: 75px; }
+        .post-attachments { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+        .post-attachments img { max-height: 220px; max-width: 100%; border: 1px solid #000000; filter: grayscale(100%); cursor: pointer; }
+        body.dark .post-attachments img { border-color: #3a3a3a; filter: grayscale(100%) brightness(0.82); }
+        /* «+» у модели — читает картинки: серым и мелко, чтобы не мешало имени */
+        .vision-mark { color: #1976d2; font-weight: bold; }
+        /* Убрать приложенную картинку: квадратик поверх её угла. Фон — из класса,
+           а не инлайн: тёмная сцена перекрашивает его вместе со всем остальным */
+        .chip-drop { position: absolute; top: -9px; right: -9px; border: 1px solid #000000; background: #ffffff; cursor: pointer; padding: 0 4px; }
+        body.dark .chip-drop { background: #141414; border-color: #3a3a3a; color: #e8e8e8; }
         .post-content { flex: 1; min-width: 0; }
         .post-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #000000; }
         .post-author { font-family: Georgia, serif; font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
@@ -317,6 +326,11 @@ HTML_TEMPLATE = """
         body.dark .param-input:not(.filled) { color: #a0a0a0; }
         body.dark .param-input.filled { border-color: #cfcfcf; color: #e8e8e8; }
         body.dark .turn-note { color: #a0a0a0; }
+        /* Правило на паузе: текст приглушён, сам текст при этом на месте.
+           Красим прозрачностью, а не цветом — иначе правило, выключенное
+           на светлой сцене, выглядело бы рабочим на тёмной */
+        .rule-row.rule-off textarea { opacity: .5; font-style: italic; }
+        .rule-row.rule-off .rule-toggle { opacity: .6; }
         body.dark .index-card { background: #141414; }
         body.dark .instr-card { background: #141414; }
         body.dark .instr-card.judge { background: #1c1c1c; }
@@ -388,8 +402,10 @@ HTML_TEMPLATE = """
                         <div class="panel-heading"><span class="num">00</span><span class="name">Готовность</span><span class="ready-badge" id="readyBadge"></span></div>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
                             <button class="btn btn-secondary" onclick="checkReadiness()" style="padding:6px 15px;font-size:13px;margin:0;">🔄 Проверить сейчас</button>
+                            <button class="btn btn-secondary" id="visionBtn" onclick="checkVision()" style="padding:6px 15px;font-size:13px;margin:0;" title="Спросить у всех моделей состава, читают ли они картинки. У облачных это настоящий запрос с крошечной картинкой — потому и по кнопке">👁 Проверить зрение</button>
                             <span style="font-size:12px;color:#666;">Проверка идёт при загрузке страницы и при правках состава</span>
                         </div>
+                        <div id="visionNote" style="font-size:13px;color:#666;font-style:italic;margin-bottom:10px;"></div>
                         <div id="readyOk" style="font-size:13px;color:#666;font-style:italic;">Проверка ещё не проходила.</div>
                         <div id="modelsWarning" style="display:none;margin:0 0 14px 0;padding:14px 16px;border:2px solid #b00020;color:#b00020;font-size:15px;line-height:1.5;"></div>
                         <div id="vramWarning" style="display:none;margin:0;padding:14px 16px;border:2px solid #b8860b;color:#8a6d00;font-size:15px;line-height:1.5;"></div>
@@ -471,10 +487,16 @@ HTML_TEMPLATE = """
                         <div id="turnNote" class="turn-note">Спектакль ещё не начат — поле появится, когда очередь дойдёт до вас.</div>
                         <div id="turnComposer" style="display:none;">
                             <div class="panel-note">Пустое сообщение = пропуск действия. Ctrl+Enter — отправить.</div>
-                            <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику или оставьте пустым чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
+                            <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику, приложите картинку — или оставьте пустым, чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
+                            <div id="attachRow" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
+                                <button class="btn btn-secondary" onclick="pickFiles()" title="Приложить картинку к этой реплике. Она уедет только тем моделям, которые читают картинки: у таких рядом с именем стоит «+»">🖼 Приложить картинку</button>
+                                <input type="file" id="fileInput" accept="image/*" multiple style="display:none;" onchange="attachFiles(this.files)">
+                                <span id="attachHint" style="font-size:12px;color:#666;font-style:italic;"></span>
+                            </div>
+                            <div id="attachChips" style="margin-bottom:12px;"></div>
                             <div style="display:flex; gap:15px; align-items:center;">
                                 <button class="btn btn-primary" onclick="sendModeratorMessage()">Отправить</button>
-                                <span style="font-size:12px;color:#666;font-style:italic;">Реплика станет постом от вашего имени</span>
+                                <span style="font-size:12px;color:#666;font-style:italic;">Реплика станет постом от вашего имени. Модели с «+» прочитают приложенное, остальные — только текст</span>
                             </div>
                         </div>
                     </div>
@@ -490,6 +512,19 @@ HTML_TEMPLATE = """
                                  и только если лента — из ДАМПа прошлого запуска (см. playRestored) -->
                             <button class="btn btn-secondary" id="continueBtn" onclick="continueShow()" style="display:none;"
                                     title="Прежние реплики останутся в ленте и станут историей для моделей: акт и цена продолжатся, а ДАМП допишется">↩ Доиграть прежний</button>
+                        </div>
+
+                        <!-- Архив спектаклей: сохранение — это сам спектакль (пульт,
+                             история и приложенные картинки), а не примета порта.
+                             Поэтому сейвы лежат вне папки экземпляра и открываются
+                             в любом театре этой машины (см. settings.SAVES_DIR) -->
+                        <div style="margin-top:20px;padding-top:16px;border-top:1px solid #cccccc;">
+                            <div class="panel-note">💾 <strong>Архив спектаклей</strong>: сохранение — это весь спектакль целиком (состав, правила и инструкции, вся история и приложенные картинки), и живёт оно вне порта, в одной папке на всю машину. Один и тот же сейв можно вернуть и здесь, и в театре на другом порту, а сохранений у спектакля бывает сколько угодно — хоть ветка на каждый вечер. Идущий спектакль придётся сначала завершить.</div>
+                            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+                                <input type="text" id="saveName" placeholder="Имя сохранения — например «до правки состава»" style="flex:1;min-width:240px;padding:8px 10px;border:2px solid #000000;font-size:14px;font-family:Georgia,serif;">
+                                <button class="btn btn-secondary" id="saveBtn" onclick="saveThisShow()" style="margin:0;">💾 Сохранить этот спектакль</button>
+                            </div>
+                            <div id="savesList" style="font-size:14px;">Сохранений пока нет.</div>
                         </div>
                     </div>
                 </div>
@@ -559,6 +594,8 @@ HTML_TEMPLATE = """
         let cloudModels = [];          // модели облачного шлюза, с префиксом «cloud:»
         let cloudHint = '';            // почему облачных моделей нет: нет ключа или шлюз молчит
         let thinkingModels = [];       // из них те, что умеют размышлять (capabilities Ollama)
+        let visionModels = [];         // и те, что читают картинки: у них в пульте стоит «+»
+        let pendingUploads = [];       // приложенное к реплике, но ещё не отправленное
         let debateRunning = false;
         let pollInterval = null;
         let sectionsPhase = null;      // фаза пульта: настройка / спектакль идёт / занавес
@@ -614,7 +651,7 @@ HTML_TEMPLATE = """
             const at = (info && info.at) || '';
             const size = (info && info.size) ? (info.size + ' байт') : 'записан';
             box.innerHTML =
-                `<div class="save-alert-head">💾 Пульт записан на диск</div>` +
+                `<div class="save-alert-head">${escapeHtml((info && info.head) || '💾 Пульт записан на диск')}</div>` +
                 `<div class="save-alert-note">${escapeHtml((info && info.note) || 'пульт')}</div>` +
                 `<div class="save-alert-file">${escapeHtml(file)} · ${escapeHtml(at)} · ${escapeHtml(size)}</div>` +
                 `<div class="save-alert-hint">клик — скрыть; само уйдёт через ${SAVE_ALERT_MS / 1000} с</div>`;
@@ -634,6 +671,7 @@ HTML_TEMPLATE = """
 
         // Состав и список моделей
         loadCast().then(() => { updatePanel(); updateSidebarParticipants(); tryRestoreSession(); });
+        loadSaves();   // архив спектаклей виден сразу: вернуться к прежнему можно в любой момент
         fetch('/api/models')
             .then(r => r.json())
             .then(data => {
@@ -641,6 +679,7 @@ HTML_TEMPLATE = """
                 cloudModels = data.cloud_models || [];
                 renderModelSuggestions();
                 thinkingModels = data.thinking_models || [];
+                visionModels = data.vision_models || [];
                 if (data.error) console.warn('Список моделей недоступен: ' + data.error);
                 // Облако без ключа — не ошибка, а «ещё не настроено»: скажем об этом
                 // в разделе готовности, а не молчанием в списке моделей
@@ -833,6 +872,27 @@ HTML_TEMPLATE = """
             if (!name || !thinkingModels.length) return false;
             const base = n => String(n).split(':')[0];
             return thinkingModels.some(m => base(m) === base(name));
+        }
+
+        // Читает ли модель картинки: «+» рядом с её именем — это она, и по этому
+        // же признаку видно, уедет ли ей приложенное к реплике (решает сервер,
+        // см. ollama_api.messages_for)
+        function modelReadsImages(name) {
+            if (!name || name === 'human') return false;
+            // «q1» и «q1:latest» — одна и та же модель, а облачное имя целиком
+            // остаётся собой: без префикса «cloud:» оно потеряло бы вендора
+            const bare = n => String(n).startsWith('cloud:')
+                ? String(n) : String(n).split(':')[0];
+            return visionModels.some(m => bare(m) === bare(name));
+        }
+
+        // Знак при модели: «+» — читает картинки. Пишется рядом с именем, а не
+        // само по себе: иначе непонятно, к чему он
+        function visionMark(p, name) {
+            const reads = (p && typeof p.reads_images === 'boolean')
+                ? p.reads_images : modelReadsImages(name);
+            return reads ? ' <span class="vision-mark" title="Читает картинки: '
+                + 'приложенное к реплике уедет этой модели">+</span>' : '';
         }
 
         // Характер просто заполняет поля — дальше числа можно править руками
@@ -1347,6 +1407,9 @@ HTML_TEMPLATE = """
                 cast = data.participants || cast;
                 renderCastEditor();
                 updateSidebarParticipants();
+                // Применённый состав меняет лицо и у уже сказанных реплик:
+                // аватар — свойство места, а не реплики (см. show.post_view)
+                refreshAvatars();
                 loadCast();   // заодно обновляем проверки моделей и видеопамяти
                 noteSettingsWrite(data.saved, true);
             })
@@ -1393,6 +1456,9 @@ HTML_TEMPLATE = """
                 if (data.avatar_url) {
                     cast[idx].avatar_url = data.avatar_url;
                     preview.innerHTML = `<img src="${escapeHtml(data.avatar_url)}">`;
+                    // Найденный портрет — тоже лицо этого места: у уже сказанных
+                    // реплик он виден сразу, а не только у следующих
+                    refreshAvatars(cast[idx].display_name);
                 } else {
                     preview.innerHTML = '❌';
                     setTimeout(() => preview.innerHTML = fallbackEmoji, 2000);
@@ -1473,7 +1539,9 @@ HTML_TEMPLATE = """
                 if (!data.success) { alert('⚠️ ' + (data.error || 'не удалось сменить аватар')); return; }
                 if (data.participants) cast = data.participants;
                 if (typeof spot.index === 'number') renderCastEditor();
-                else refreshAvatars(spot.name, emoji);
+                // Лента перерисовывается в обоих случаях: лицо — свойство места,
+                // и у прежних реплик оно меняется вместе с составом
+                refreshAvatars(spot.name);
                 updateSidebarParticipants();
                 noteSettingsWrite(data.saved, true);
             })
@@ -1485,11 +1553,26 @@ HTML_TEMPLATE = """
             return debateRunning && !showFinished;
         }
 
-        // Смена лица у всех реплик участника: реплики в ленте перерисовывать
-        // незачем — они уже нарисованы, а лицо у них одно и то же
-        function refreshAvatars(name, emoji) {
-            document.querySelectorAll('[data-emoji-for]').forEach(spot => {
-                if (spot.dataset.emojiFor === name) spot.textContent = emoji;
+        // Смена лица у всех реплик участника: лицо — свойство места, а не реплики
+        // (см. show.post_view), поэтому у уже сказанных реплик оно меняется вместе
+        // с составом — и картинка, и эмодзи, в обе стороны.
+        //
+        // Раньше здесь правился один только значок, да и то лишь там, где нарисован
+        // эмодзи: у реплик с портретом лицо оставалось прежним. Так и выглядела
+        // жалоба «выбрал эмодзи, а он не меняется»: у новых реплик лицо новое,
+        // у прежних — старое, будто аватар принадлежит реплике.
+        //
+        // Без имени — перерисовать всем: так это делает применение состава.
+        // У того, кого в труппе больше нет, лицо не трогаем: оно своё, и в нём
+        // единственная память о портрете ушедшего (см. show.post_view)
+        function refreshAvatars(name) {
+            document.querySelectorAll('[data-avatar-for]').forEach(spot => {
+                const who = spot.dataset.avatarFor;
+                if (name && who !== name) return;
+                const person = cast.find(p => p.display_name === who);
+                if (!person) return;
+                spot.outerHTML = avatarHtml(person.avatar_url || '',
+                                            person.avatar_emoji || '📣', who);
             });
         }
         
@@ -1829,13 +1912,18 @@ HTML_TEMPLATE = """
             if (shown(vram)) problems.push('видеопамять');
             if (okBox) okBox.style.display = problems.length ? 'none' : 'block';
             if (badge) badge.textContent = problems.length ? '⚠️ ' + problems.length : '';
-            const signature = problems.join(',');
+            // Ответ про зрение — не беда, но и не то, что стоит прятать: раздел
+            // остаётся раскрытым, пока ответ на экране (см. checkVision). В счёт
+            // предупреждений он при этом не идёт: «⚠️ 1» значило бы поломку
+            const note = document.getElementById('visionNote');
+            const spoken = note ? String(note.textContent || '').trim() : '';
+            const signature = problems.join(',') + (spoken ? '|зрение' : '');
             // Раскрываем, когда появилось о чём предупредить, и сворачиваем, когда
             // всё в порядке. Пока набор предупреждений тот же — раздел не трогаем:
             // иначе он не давал бы свернуть себя руками
             if (signature === readySignature) return;
             readySignature = signature;
-            setSectionCollapsed('sec-ready', problems.length === 0);
+            setSectionCollapsed('sec-ready', problems.length === 0 && !spoken);
         }
 
         // Ручная проверка готовности — не трогая то, что уже введено в форме
@@ -1854,6 +1942,183 @@ HTML_TEMPLATE = """
                 .finally(() => {
                     if (btn) { btn.disabled = false; btn.textContent = '🔄 Проверить сейчас'; }
                 });
+        }
+
+        // «Проверить зрение»: спрашиваем про картинки у всех моделей состава сразу.
+        // У местных это способность vision из /api/show, а у облачных — пробный
+        // запрос к шлюзу с крошечной картинкой (см. cloud.probe_images). Это
+        // единственный способ узнать правду: по имени модель читать картинки
+        // может и не всегда (на живом шлюзе gemma-4, glm-5.3 и qwen3.8 их
+        // читали, а по приметам выходили слепыми). Спрашивают потому кнопкой,
+        // а не каждым ходом: у облачной проверка — это запрос за деньги
+        function checkVision() {
+            const btn = document.getElementById('visionBtn');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Спрашиваю...'; }
+            const note = document.getElementById('visionNote');
+            if (note) note.textContent = 'Спрашиваю у моделей состава...';
+            fetch('/api/vision/check', {method: 'POST'})
+                .then(r => r.json())
+                .then(data => {
+                    const checked = data.checked || [];
+                    // Знание добавляется к прежнему, а не подменяет его: в списке
+                    // моделей есть и те, которых в этом составе нет
+                    const asked = new Set(checked.map(one => one.model));
+                    visionModels = visionModels.filter(m => !asked.has(m))
+                        .concat(checked.filter(one => one.reads_images)
+                            .map(one => one.model));
+                    loadCast();   // «+» у мест в составе — уже с ответом шлюза
+                    sayVisionAnswer(data);
+                })
+                .catch(err => {
+                    if (note) note.textContent = '⚠️ Проверить зрение не удалось: ' + err.message;
+                })
+                .finally(() => {
+                    if (btn) { btn.disabled = false; btn.textContent = '👁 Проверить зрение'; }
+                });
+        }
+
+        // Что ответили — словами, а не только значком «+» у имени: режиссёру
+        // важно знать и то, что картинки никому из состава не уедут вовсе
+        function sayVisionAnswer(data) {
+            const note = document.getElementById('visionNote');
+            if (!note) return;
+            const checked = data.checked || [];
+            if (!checked.length) {
+                note.textContent = 'В составе нет моделей — проверять нечего.';
+                return;
+            }
+            const whoReads = checked.filter(one => one.reads_images)
+                .map(one => one.name + ' (' + one.model + ')');
+            note.textContent = whoReads.length
+                ? `Картинки читают: ${whoReads.join(', ')} — им приложенное уедет. `
+                    + `Остальным — только текст (${data.reads} из ${checked.length}).`
+                : 'Картинок не читает ни одна модель состава: приложенное уехало бы '
+                    + 'им текстом, поэтому не отправляется вовсе.';
+        }
+
+        // ── АРХИВ СПЕКТАКЛЕЙ ────────────────────────────────────────────────
+        // Сохранение — это сам спектакль: пульт, история и приложенные картинки
+        // (см. show.save_play). Лежит оно вне порта, поэтому тот же сейв
+        // открывается и в театре на другом порту. Возврат подменяет сцену
+        // целиком — и пульт, и ленту, — поэтому страница после него собирается
+        // заново: пересобирать изменившееся по кускам значило бы держать
+        // в голове, что успело обновиться, а что нет
+        function loadSaves() {
+            return fetch('/api/saves', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(data => { renderSaves(data.saves || [], data.dir || ''); return data; })
+                .catch(err => console.warn('Архив спектаклей не прочитался:', err));
+        }
+
+        function renderSaves(list, dir) {
+            const box = document.getElementById('savesList');
+            if (!box) return;
+            if (!list.length) {
+                box.innerHTML = 'Сохранений пока нет.'
+                    + (dir ? `<br><span style="font-size:12px;color:#666;">Папка архива: <code>${escapeHtml(dir)}</code></span>` : '');
+                return;
+            }
+            box.innerHTML = list.map(one => {
+                const parts = [`реплик ${Number(one.posts || 0)}`];
+                if (one.round) parts.push(`актов ${Number(one.round)}`);
+                if (one.pictures) parts.push(`картинок ${Number(one.pictures)}`);
+                if (one.spent) parts.push(`цена ${moneyText(one.spent)}`);
+                if (one.saved_at) parts.push(escapeHtml(String(one.saved_at)));
+                if (one.port) parts.push(`порт ${Number(one.port)}`);
+                const id = escapeHtml(String(one.id || ''));
+                return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px;padding:8px 10px;border:1px solid #cccccc;">`
+                    + `<strong>${escapeHtml(String(one.name || one.id || ''))}</strong>`
+                    + `<span style="font-size:12px;color:#666;">${parts.join(' · ')}</span>`
+                    + `<button class="btn btn-secondary" style="margin:0;padding:4px 10px;font-size:12px;" onclick="loadSavedShow('${id}')">↩ Вернуть</button>`
+                    + `<button class="btn btn-secondary" style="margin:0;padding:4px 10px;font-size:12px;" onclick="deleteSavedShow('${id}')">🗑 Удалить</button>`
+                    + `</div>`;
+            }).join('');
+        }
+
+        function saveThisShow() {
+            const field = document.getElementById('saveName');
+            const typed = (field && field.value || '').trim();
+            // Имя можно и не писать: сохранение всё равно надо назвать, а время
+            // сохранения — самое понятное имя по умолчанию
+            const name = typed || ('спектакль ' + new Date().toLocaleString('ru-RU',
+                {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}));
+            const btn = document.getElementById('saveBtn');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳ Сохраняю...'; }
+            fetch('/api/saves/save', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                     body: JSON.stringify({name: name})})
+                .then(r => r.json().then(data => {
+                    if (!r.ok) throw new Error(data.error || 'не сохранилось');
+                    return data;
+                }))
+                .then(data => {
+                    if (field) field.value = '';
+                    renderSaves(data.saves || [], '');
+                    const saved = data.saved || {};
+                    showSaveAlert({head: '💾 Спектакль сохранён в архив',
+                                   note: `«${saved.name || name}» — реплик ${saved.posts || 0}`,
+                                   file: 'saves/' + (saved.id || ''), at: saved.saved_at || ''});
+                })
+                .catch(err => alert('⚠️ ' + err.message))
+                .finally(() => {
+                    if (btn) { btn.disabled = false; btn.textContent = '💾 Сохранить этот спектакль'; }
+                });
+        }
+
+        // Опустить занавес и дождаться, пока спектакль правда остановится: сохранение
+        // подменяет те же файлы, в которые пишет ход (см. show.load_save), и делать
+        // это под идущим ходом нельзя. Ждать долго нельзя тоже — у большого хода
+        // свой срок, поэтому у ожидания есть предел, а о неудаче говорится словами
+        function finishAndWait(limitMs) {
+            const deadline = Date.now() + (limitMs || 30000);
+            return fetch('/api/moderator/finish', {method: 'POST'})
+                .then(() => new Promise(resolve => {
+                    const tick = () => {
+                        if (!runningShow()) return resolve(true);
+                        if (Date.now() > deadline) return resolve(false);
+                        setTimeout(tick, 1000);
+                    };
+                    tick();
+                }));
+        }
+
+        function loadSavedShow(id) {
+            // Спрашиваем не «есть ли что-то на сцене», а «идёт ли спектакль сейчас»:
+            // под занавесом спектакль тоже есть (лента полна, пульт занят), но
+            // останавливать нечего — занавес уже опущен (см. runningShow)
+            const playing = runningShow();
+            const ask = playing
+                ? 'Спектакль идёт. Опустить занавес и вернуть сохранённый?'
+                : 'Вернуть этот спектакль на сцену? Нынешние настройки и история на сцене будут заменены.';
+            if (!confirm(ask)) return;
+            (playing ? finishAndWait() : Promise.resolve(true)).then(stopped => {
+                if (!stopped) {
+                    showSaveAlert({head: '⚠️ Спектакль не остановился',
+                                   note: 'Нажмите «Завершить спектакль» и попробуйте снова',
+                                   file: '', at: ''});
+                    return;
+                }
+                fetch('/api/saves/load', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                         body: JSON.stringify({id: id})})
+                    .then(r => r.json().then(data => {
+                        if (!r.ok) throw new Error(data.error || 'не вернулось');
+                        return data;
+                    }))
+                    // Страница собирается заново: и состав, и лента — чужие
+                    .then(() => location.reload())
+                    .catch(err => alert('⚠️ ' + err.message));
+            });
+        }
+
+        function deleteSavedShow(id) {
+            if (!confirm('Удалить сохранение? Спектакль из архива пропадёт совсем — вернуть его будет неоткуда.')) return;
+            fetch('/api/saves/delete', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                       body: JSON.stringify({id: id})})
+                .then(r => r.json().then(data => {
+                    if (!r.ok) throw new Error(data.error || 'не удалилось');
+                    return data;
+                }))
+                .then(data => renderSaves(data.saves || [], ''))
+                .catch(err => alert('⚠️ ' + err.message));
         }
 
         // Тёмная сцена: выбор запоминается, при первом входе берётся из настроек системы
@@ -1898,18 +2163,34 @@ HTML_TEMPLATE = """
             applyTheme(saved === null ? systemDark : saved === 'dark');
         })();
         
+        // Лицо реплики — одна разметка на всех: её рисуют и готовая реплика,
+        // и черновик, и перерисовка после смены аватара (см. refreshAvatars).
+        // Копий было бы две — и разошлись бы они на первой же правке.
+        //
+        // Лицо — свойство участника, а не реплики (см. show.post_view), поэтому
+        // и менять его можно там, где оно видно: клик по эмодзи открывает набор
+        // эмодзи-аватаров. Картинка по клику, как и раньше, разворачивается целиком.
+        // Имя уезжает в data-атрибут, а не в onclick: имена — текст режиссёра,
+        // и кавычка в имени ломала бы обработчик. По этой же примете
+        // (data-avatar-for) лицо потом и перерисовывается у всех реплик места
+        function avatarHtml(url, emoji, name) {
+            const who = escapeHtml(name);
+            const marks = `data-avatar-for="${who}"`;
+            return url
+                ? `<img src="${escapeHtml(url)}" ${marks} onclick="showAvatarFull('${url}')">`
+                : `<div class="emoji" ${marks} data-emoji-for="${who}" title="Клик — сменить эмодзи-аватар">${emoji}</div>`;
+        }
+
         // Голова реплики — общая у готового поста и у черновика: иначе растущая
         // реплика выглядела бы другим человеком
         function postAvatarHtml(post) {
-            const emoji = post.avatar_emoji || '📣';
-            // Лицо — свойство участника, а не реплики (см. show.post_view), поэтому
-            // и менять его можно там, где оно видно: клик по эмодзи открывает набор
-            // эмодзи-аватаров. Картинка по клику, как и раньше, разворачивается целиком.
-            // Имя уезжает в data-атрибут, а не в onclick: имена — текст режиссёра,
-            // и кавычка в имени ломала бы обработчик
-            return post.avatar_url
-                ? `<img src="${post.avatar_url}" onclick="showAvatarFull('${post.avatar_url}')">`
-                : `<div class="emoji" data-emoji-for="${escapeHtml(post.display_name)}" title="Клик — сменить эмодзи-аватар">${emoji}</div>`;
+            // Лицо берётся у состава, если место ещё в труппе: тогда аватар,
+            // сменённый в пульте, виден и у прежних реплик. У того, кто из состава
+            // ушёл, лицо остаётся своё — то, с которым он говорил
+            const person = cast.find(p => p.display_name === post.display_name);
+            const url = (person ? person.avatar_url : post.avatar_url) || '';
+            const emoji = (person ? person.avatar_emoji : post.avatar_emoji) || '📣';
+            return avatarHtml(url, emoji, post.display_name);
         }
 
         function postHeaderHtml(post) {
@@ -1917,7 +2198,9 @@ HTML_TEMPLATE = """
             const roleIcon = post.role_icon || '🎭';
             const roleName = post.role_name || 'Участник';
             const genderSymbol = post.gender === 'male' ? '♂' : '♀';
-            return `<div class="post-header"><div><div class="post-author"><span class="role-badge role-${role}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${post.model_used}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div>`;
+            // У модели с картинками стоит «+»: по ленте видно, кто мог прочитать
+            // приложенное к реплике, а кто сказал это по одному тексту
+            return `<div class="post-header"><div><div class="post-author"><span class="role-badge role-${role}">${roleIcon} ${roleName}</span> ${post.display_name} ${genderSymbol}</div><div class="post-model">модель: ${escapeHtml(post.model_used || '')}${visionMark(null, post.model_used)}</div></div><div class="post-time">${post.timestamp} | Акт ${post.round}</div></div>`;
         }
 
         // Один блок о ходе: как эта реплика получилась — по порядку и с числами.
@@ -2000,11 +2283,21 @@ HTML_TEMPLATE = """
         // Сколько спектакль стоит на сейчас — строка для блока «Статус».
         // Показывается ВСЕГДА: и когда говорит модель, и когда ход ваш, и после
         // занавеса. Сумма копится от начала спектакля (см. show._note_money),
-        // и раньше она пропадала ровно там, где о ней спокойнее всего знать
+        // и раньше она пропадала ровно там, где о ней спокойнее всего знать.
+        //
+        // Рядом — остаток на ключе: цена говорит, сколько ушло, а остаток —
+        // сколько есть (см. web.shown_balance). Остаток показывается и без цены:
+        // у местного спектакля цена нулевая, а знать, чем располагаешь, всё равно
+        // нужно, — и наоборот, при пустом ключе цены не будет, а остаток есть
         function spentLine(data) {
             const spent = Number((data && data.spent) || 0);
-            if (!spent) return '';
-            return `<div style="font-size:12px;margin-top:6px;">💰 за спектакль ${moneyText(spent)}</div>`;
+            const left = (data && data.balance !== null && data.balance !== undefined)
+                ? Number(data.balance) : null;
+            const parts = [];
+            if (spent) parts.push(`💰 за спектакль ${moneyText(spent)}`);
+            if (left !== null && !isNaN(left)) parts.push(`на ключе ${moneyText(left)}`);
+            if (!parts.length) return '';
+            return `<div style="font-size:12px;margin-top:6px;">${parts.join(' · ')}</div>`;
         }
 
         // Сколько длилось — словами: «2 мин 15 с». Секунды до десятых здесь
@@ -2343,6 +2636,17 @@ HTML_TEMPLATE = """
                 + `<div class="prompt-body"></div></details>`;
         }
 
+        // Приложенное к реплике — прямо над текстом: без этого непонятно, о чём
+        // реплика, к которой приложена картинка. По клику она разворачивается
+        // целиком — как и любой другой портрет (см. showAvatarFull)
+        function postAttachmentsHtml(post) {
+            const list = post.attachments || [];
+            if (!list.length) return '';
+            return '<div class="post-attachments">' + list.map(one =>
+                `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
+                + ` onclick="showAvatarFull('${one.url}')">`).join('') + '</div>';
+        }
+
         // Текст реплики в ленте. У хода, оборванного смертью процесса, текста нет
         // вовсе — и сказать об этом надо словами, а не пустым местом
         // (см. show._parse_record — признак post.interrupted)
@@ -2365,7 +2669,7 @@ HTML_TEMPLATE = """
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${searchInfo}</div>`;
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}${postAttachmentsHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${searchInfo}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
             // Отчёт о ходе спрашиваем только когда его открыли: событие toggle
@@ -2674,10 +2978,88 @@ HTML_TEMPLATE = """
             if (instructionsTick++ % 10 === 0) updateSidebarParticipants();
         }
         
+        // ── ПРИЛОЖЕННОЕ К РЕПЛИКЕ ────────────────────────────────────────
+        // Режиссёр прикладывает картинку к реплике человека: файл читает браузер
+        // и уезжает адресом-данными (base64). На сервере он проверяется по
+        // содержимому и ложится в папку экземпляра (см. show.save_upload),
+        // откуда его берёт и лента, и запрос к модели.
+        // Не всякая модель картинки читает — по имени про это говорит «+»
+        // (см. visionMark), а решает сервер (см. ollama_api.messages_for):
+        // если модель их не читает, они ей вовсе не отправляются
+        function pickFiles() {
+            const input = document.getElementById('fileInput');
+            if (input) input.click();
+        }
+
+        function noteAttach(text) {
+            const hint = document.getElementById('attachHint');
+            if (hint) hint.textContent = text || '';
+        }
+
+        function attachFiles(files) {
+            const input = document.getElementById('fileInput');
+            Array.from(files || []).forEach(file => {
+                if (!file.type.startsWith('image/')) {
+                    noteAttach('⚠️ Только картинки: ' + file.name);
+                    return;
+                }
+                const reader = new FileReader();
+                reader.onload = () => uploadAttachment(file, reader.result);
+                reader.onerror = () => noteAttach('⚠️ Не удалось прочитать ' + file.name);
+                reader.readAsDataURL(file);
+            });
+            // Поле очищается сразу: иначе тот же файл второй раз не приложить
+            if (input) input.value = '';
+        }
+
+        function uploadAttachment(file, dataUrl) {
+            noteAttach('⏳ ' + file.name + ' — прикладываю…');
+            fetch('/api/upload', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: file.name, data_url: dataUrl})
+            })
+            .then(r => r.json().then(data => { if (!r.ok) throw new Error(data.error || 'не принято'); return data; }))
+            .then(data => {
+                pendingUploads.push({name: data.name, url: data.url});
+                noteAttach('');
+                renderAttachChips();
+            })
+            .catch(err => noteAttach('⚠️ ' + file.name + ': ' + (err.message || 'не приложилось')));
+        }
+
+        function dropUpload(index) {
+            pendingUploads.splice(index, 1);
+            renderAttachChips();
+        }
+
+        // Приложенное видно до отправки: превью, а не строчка «файл приложен»
+        function renderAttachChips() {
+            const box = document.getElementById('attachChips');
+            if (!box) return;
+            box.innerHTML = pendingUploads.map((one, index) =>
+                '<span style="position:relative;display:inline-block;margin-right:14px;">'
+                + `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
+                + ' style="height:72px;border:1px solid #000000;filter:grayscale(100%);">'
+                + `<button class="chip-drop" onclick="dropUpload(${index})"`
+                + ' title="Убрать приложение">✕</button>'
+                + '</span>').join('');
+        }
+
         function sendModeratorMessage() {
             const input = document.getElementById('moderatorInput');
-            fetch('/api/moderator/message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input.value}) })
-            .then(r => r.json()).then(data => { if (data.success) { input.value = ''; setTurnState('sent'); } else alert('Ошибка: ' + (data.error || 'неизвестная')); })
+            // Приложения уезжают вместе с репликой: это часть её, а не отдельное
+            // сообщение (см. /api/moderator/message)
+            const attachments = pendingUploads.map(one => ({name: one.name, url: one.url}));
+            fetch('/api/moderator/message', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({message: input.value, attachments: attachments}) })
+            .then(r => r.json()).then(data => {
+                if (data.success) {
+                    input.value = '';
+                    pendingUploads = [];
+                    renderAttachChips();
+                    noteAttach('');
+                    setTurnState('sent');
+                } else alert('Ошибка: ' + (data.error || 'неизвестная'));
+            })
             .catch(err => { console.error('Ошибка:', err); alert('Ошибка: ' + err.message); });
         }
         
@@ -2719,31 +3101,44 @@ HTML_TEMPLATE = """
                                 : '<span style="font-size:11px;" title="Анонимный: вердикт видит только режиссёр"> 🤫</span>');
                     }
                     
-                    // Как и в ленте: пол сразу после имени
-                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${escapeHtml(p.display_name)}</strong> ${genderSymbol}${roleLabel} <small>(${escapeHtml(p.model)})</small>`;
+                    // Как и в ленте: пол сразу после имени. И «+» — если модель
+                    // читает картинки: это видно до того, как режиссёр что-то
+                    // приложит (см. visionMark)
+                    let html = `<div style="margin-bottom:12px;">${roleIcon} <strong>${escapeHtml(p.display_name)}</strong> ${genderSymbol}${roleLabel} <small>(${escapeHtml(p.model)}${visionMark(p, p.model)})</small>`;
                     if (instruction) {
                         html += `<br><em style="margin-left:10px;">${escapeHtml(instruction)}</em>`;
                     }
                     return html + '</div>';
                 }).join('');
                 
-                // Обновляем блок "Правила общения"
+                // Обновляем блок "Правила общения": здесь только то, что правда
+                // говорится моделям. Отключённое правило на паузе (см. ruleIsOff),
+                // и о нём сказано отдельной строкой — иначе оно выглядело бы
+                // пропавшим, а не выключенным
+                const rules = data.static_instructions || [];
                 const rulesDisplay = document.getElementById('rulesDisplay');
-                if (data.static_instructions && data.static_instructions.length > 0) {
-                    rulesDisplay.innerHTML = data.static_instructions
-                        .filter(rule => rule.trim())
-                        .map(rule => `<div style="margin-bottom:8px;">• ${escapeHtml(rule)}</div>`)
-                        .join('');
+                const activeRules = rules.filter(rule => rule.trim() && !ruleIsOff(rule));
+                const pausedRules = rules.filter(rule => ruleIsOff(rule)).length;
+                if (activeRules.length > 0 || pausedRules) {
+                    rulesDisplay.innerHTML = activeRules
+                        .map(rule => `<div style="margin-bottom:8px;">• ${escapeHtml(ruleText(rule))}</div>`)
+                        .join('')
+                        + (pausedRules
+                            ? `<div style="margin-top:8px;color:#999;">⏸ ${pausedRules} `
+                              + (pausedRules === 1 ? 'правило' : 'правил')
+                              + ` на паузе — вернуть можно в «03 · Правила и инструкции»</div>`
+                            : '');
                 } else {
                     rulesDisplay.innerHTML = '<div style="color:#999;">Правила не заданы</div>';
                 }
                 
-                // Обновляем блок "Инструкции от руководства"
+                // Обновляем блок "Инструкции от руководства" — по тому же правилу
+                const messages = data.moderator_messages || [];
                 const modInstructionsDisplay = document.getElementById('moderatorInstructionsDisplay');
-                if (data.moderator_messages && data.moderator_messages.length > 0) {
-                    modInstructionsDisplay.innerHTML = data.moderator_messages
-                        .filter(msg => msg.trim())
-                        .map(msg => `<div style="margin-bottom:8px;">• ${escapeHtml(msg)}</div>`)
+                const activeMessages = messages.filter(msg => msg.trim() && !ruleIsOff(msg));
+                if (activeMessages.length > 0) {
+                    modInstructionsDisplay.innerHTML = activeMessages
+                        .map(msg => `<div style="margin-bottom:8px;">• ${escapeHtml(ruleText(msg))}</div>`)
                         .join('');
                 } else {
                     modInstructionsDisplay.innerHTML = '<div style="color:#999;font-weight:normal;">Нет указаний от руководства</div>';
@@ -2753,19 +3148,11 @@ HTML_TEMPLATE = """
         }
         
         function saveInstructions() {
-            // Собираем static_instructions
-            const staticInstructions = [];
-            const staticContainer = document.getElementById('staticInstructionsEditor');
-            staticContainer.querySelectorAll('textarea').forEach(ta => {
-                if (ta.value.trim()) staticInstructions.push(ta.value.trim());
-            });
-            
-            // Собираем moderator_messages
-            const moderatorMessages = [];
-            const modContainer = document.getElementById('moderatorMessagesEditor');
-            modContainer.querySelectorAll('textarea').forEach(ta => {
-                if (ta.value.trim()) moderatorMessages.push(ta.value.trim());
-            });
+            // Собираем static_instructions и moderator_messages: отключённое
+            // уезжает с пометкой «⏸ », и по ней же возвращается в строй
+            // (см. collectRuleRows и show.RULE_OFF_MARK)
+            const staticInstructions = collectRuleRows('staticInstructionsEditor');
+            const moderatorMessages = collectRuleRows('moderatorMessagesEditor');
             
             // Собираем индивидуальные инструкции участников
             const participantInstructions = [];
@@ -2779,10 +3166,7 @@ HTML_TEMPLATE = """
             });
             
             // Собираем правила судьи
-            const judgeRules = [];
-            document.getElementById('judgeRulesEditor').querySelectorAll('textarea').forEach(ta => {
-                if (ta.value.trim()) judgeRules.push(ta.value.trim());
-            });
+            const judgeRules = collectRuleRows('judgeRulesEditor');
             
             // Отправляем на сервер
             fetch('/api/moderator/instructions', {
@@ -2877,51 +3261,154 @@ HTML_TEMPLATE = """
             .catch(err => console.error('Ошибка загрузки инструкций:', err));
         }
         
-        function renderStaticInstructionsEditor(instructions) {
-            const container = document.getElementById('staticInstructionsEditor');
-            container.innerHTML = instructions.map((instr, idx) => `
-                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
-                    <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${instr}</textarea>
-                    <button class="btn btn-secondary" onclick="removeStaticInstructionEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-                </div>
-            `).join('');
+        // Отключённое правило никуда не девается: впереди его текста стоит пометка
+        // «⏸ » (см. show.RULE_OFF_MARK), а спектаклю оно в это время не говорится.
+        // Так правило можно снять на раунд и тем же нажатием вернуть — без удаления
+        // и без копирования текста себе на память
+        const RULE_OFF_MARK = '⏸';
+
+        function ruleIsOff(text) {
+            return String(text == null ? '' : text).trim().startsWith(RULE_OFF_MARK);
         }
-        
-        function renderModeratorMessagesEditor(messages) {
-            const container = document.getElementById('moderatorMessagesEditor');
-            container.innerHTML = messages.map((msg, idx) => `
-                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
-                    <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${msg}</textarea>
-                    <button class="btn btn-secondary" onclick="removeModeratorMessageEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-                </div>
-            `).join('');
+
+        function ruleText(text) {
+            const written = String(text == null ? '' : text).trim();
+            return ruleIsOff(written)
+                ? written.slice(RULE_OFF_MARK.length).trim() : written;
         }
-        
-        function renderJudgeRulesEditor(rules) {
-            const container = document.getElementById('judgeRulesEditor');
-            container.innerHTML = rules.map((rule, idx) => `
-                <div style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">
-                    <textarea id="judge-rule-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;">${escapeHtml(rule)}</textarea>
-                    <button class="btn btn-secondary" onclick="removeJudgeRuleEditor(${idx})" style="padding:8px 12px;margin:0;">❌</button>
-                </div>
-            `).join('');
+
+        // Три редактора правил — одна и та же строка: текст, «отключить/включить»
+        // и «удалить». Отключённая строка приглушена, и по ней же видно, что
+        // правило ждёт своего часа, а не пропало
+        const RULE_FIELDS = {
+            static: 'static-instr-edit',
+            modmsg: 'mod-msg-edit',
+            judge: 'judge-rule-edit',
+        };
+        const RULE_PLACEHOLDERS = {
+            static: 'Новая инструкция...',
+            modmsg: 'Новое руководство...',
+            judge: 'Новое правило судьи...',
+        };
+
+        // Кнопка паузы говорит своё состояние словами: у правила на паузе — «▶»
+        // (нажать — включить), у рабочего — «⏸». И то же самое по нажатию:
+        // подпись одна на оба случая, иначе строка, пришедшая с паузой из файла,
+        // выглядела бы рабочей до первого нажатия
+        function ruleToggleLabel(off) {
+            return off ? '▶' : '⏸';
         }
-        
-        function addJudgeRuleEditor() {
-            const container = document.getElementById('judgeRulesEditor');
+
+        function ruleToggleTitle(off) {
+            return off
+                ? 'Включить обратно: правило снова уедет спектаклю'
+                : 'Отключить, не удаляя: правило останется здесь и включится обратно тем же нажатием';
+        }
+
+        function ruleRowHtml(kind, idx, text) {
+            const off = ruleIsOff(text);
+            // Приглушённый вид ставится сразу в разметке, а не после вставки:
+            // правило, пришедшее с паузой из файла, иначе выглядело бы рабочим
+            return `<div class="rule-row${off ? ' rule-off' : ''}" data-off="${off ? 1 : 0}" style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">`
+                + `<textarea id="${RULE_FIELDS[kind]}-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="${RULE_PLACEHOLDERS[kind]}">${escapeHtml(ruleText(text))}</textarea>`
+                + `<button class="btn btn-secondary rule-toggle" onclick="toggleRuleRow('${kind}', '${idx}')" style="padding:8px 12px;margin:0;" title="${ruleToggleTitle(off)}">${ruleToggleLabel(off)}</button>`
+                + `<button class="btn btn-secondary" onclick="removeRuleRow('${kind}', '${idx}')" style="padding:8px 12px;margin:0;" title="Удалить совсем">❌</button>`
+                + `</div>`;
+        }
+
+        // Строка собирается сразу вместе с пометкой «на паузе»: иначе отключённое
+        // правило выглядело бы рабочим до первого нажатия
+        function renderRuleEditor(containerId, kind, lines) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
+            container.innerHTML = (lines || [])
+                .map((text, idx) => ruleRowHtml(kind, idx, text)).join('');
+        }
+
+        function appendRuleRow(containerId, kind) {
+            const container = document.getElementById(containerId);
+            if (!container) return;
             const idx = 'new' + (++editorRowSeq);
-            const div = document.createElement('div');
-            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
-            div.innerHTML = `
-                <textarea id="judge-rule-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое правило судьи..."></textarea>
-                <button class="btn btn-secondary" onclick="removeJudgeRuleEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
-            `;
-            container.appendChild(div);
+            const box = document.createElement('div');
+            box.innerHTML = ruleRowHtml(kind, idx, '');
+            // Строка обёртки нужна лишь затем, чтобы innerHTML отдал готовый узел
+            container.appendChild(box.firstElementChild);
         }
-        
+
+        function ruleRowOf(kind, idx) {
+            const field = document.getElementById(`${RULE_FIELDS[kind]}-${idx}`);
+            return field ? field.closest('.rule-row') : null;
+        }
+
+        function toggleRuleRow(kind, idx) {
+            const row = ruleRowOf(kind, idx);
+            if (row) setRuleRowOff(row, row.dataset.off !== '1');
+        }
+
+        function setRuleRowOff(row, off) {
+            row.dataset.off = off ? '1' : '0';
+            row.classList.toggle('rule-off', !!off);
+            const button = row.querySelector('.rule-toggle');
+            if (button) {
+                button.textContent = ruleToggleLabel(off);
+                button.title = ruleToggleTitle(off);
+            }
+        }
+
+        function removeRuleRow(kind, idx) {
+            const row = ruleRowOf(kind, idx);
+            if (row) row.remove();
+        }
+
+        // Правила из редактора: отключённое уезжает с пометкой «⏸ », и по ней
+        // же возвращается в тот же день — текст правила при этом не трогается
+        function collectRuleRows(containerId) {
+            const container = document.getElementById(containerId);
+            if (!container) return [];
+            const rules = [];
+            container.querySelectorAll('.rule-row').forEach(row => {
+                const field = row.querySelector('textarea');
+                const text = (field && field.value || '').trim();
+                if (!text) return;
+                rules.push(row.dataset.off === '1' ? RULE_OFF_MARK + ' ' + text : text);
+            });
+            return rules;
+        }
+
+        function renderStaticInstructionsEditor(instructions) {
+            renderRuleEditor('staticInstructionsEditor', 'static', instructions);
+        }
+
+        function renderModeratorMessagesEditor(messages) {
+            renderRuleEditor('moderatorMessagesEditor', 'modmsg', messages);
+        }
+
+        function renderJudgeRulesEditor(rules) {
+            renderRuleEditor('judgeRulesEditor', 'judge', rules);
+        }
+
+        function addStaticInstructionEditor() {
+            appendRuleRow('staticInstructionsEditor', 'static');
+        }
+
+        function addModeratorMessageEditor() {
+            appendRuleRow('moderatorMessagesEditor', 'modmsg');
+        }
+
+        function addJudgeRuleEditor() {
+            appendRuleRow('judgeRulesEditor', 'judge');
+        }
+
+        function removeStaticInstructionEditor(idx) {
+            removeRuleRow('static', idx);
+        }
+
+        function removeModeratorMessageEditor(idx) {
+            removeRuleRow('modmsg', idx);
+        }
+
         function removeJudgeRuleEditor(idx) {
-            const el = document.getElementById(`judge-rule-edit-${idx}`);
-            if (el) el.parentElement.remove();
+            removeRuleRow('judge', idx);
         }
         
         function renderParticipantInstructionsEditor(participantInstructions) {
@@ -2956,40 +3443,6 @@ HTML_TEMPLATE = """
                     <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${escapeHtml(p.name)}...">${escapeHtml(value)}</textarea>
                 </div>
             `}).join('');
-        }
-        
-        function addStaticInstructionEditor() {
-            const container = document.getElementById('staticInstructionsEditor');
-            const idx = 'new' + (++editorRowSeq);
-            const div = document.createElement('div');
-            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
-            div.innerHTML = `
-                <textarea id="static-instr-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новая инструкция..."></textarea>
-                <button class="btn btn-secondary" onclick="removeStaticInstructionEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
-            `;
-            container.appendChild(div);
-        }
-        
-        function addModeratorMessageEditor() {
-            const container = document.getElementById('moderatorMessagesEditor');
-            const idx = 'new' + (++editorRowSeq);
-            const div = document.createElement('div');
-            div.style.cssText = 'display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;';
-            div.innerHTML = `
-                <textarea id="mod-msg-edit-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Новое руководство..."></textarea>
-                <button class="btn btn-secondary" onclick="removeModeratorMessageEditor('${idx}')" style="padding:8px 12px;margin:0;">❌</button>
-            `;
-            container.appendChild(div);
-        }
-        
-        function removeStaticInstructionEditor(idx) {
-            const el = document.getElementById(`static-instr-edit-${idx}`);
-            if (el) el.parentElement.remove();
-        }
-        
-        function removeModeratorMessageEditor(idx) {
-            const el = document.getElementById(`mod-msg-edit-${idx}`);
-            if (el) el.parentElement.remove();
         }
         
         // Эмодзи-аватар: клик по значку в ленте открывает набор (сам значок

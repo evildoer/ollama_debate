@@ -34,6 +34,7 @@
     а питоновский `\n` в шаблоне не рвёт строку JS пополам.
 """
 
+import base64
 import builtins
 import collections
 import copy
@@ -46,6 +47,7 @@ import os
 import re
 import shutil
 import socket
+import struct
 import subprocess
 import symtable
 import sys
@@ -3386,6 +3388,43 @@ class TestPlayKeptInDump(unittest.TestCase):
                          "прежние реплики стёрлись или номер новой не продолжился")
         self.assertIn("Сказано после занавеса.", play["posts"][-1]["content"])
 
+    def test_the_attached_picture_comes_back_with_the_reply(self):
+        """Приложенное к реплике возвращается вместе с прежним спектаклем.
+
+        В ДАМП едут имя файла и адрес, а не сама картинка: файл лежит в папке
+        экземпляра, а запись — текст, и base64 утопил бы в нём всю хронологию
+        (см. attachment_lines). По этим строкам приложенное и находится при
+        чтении — а пропавший файл просто не возвращается: рамка без картинки
+        хуже, чем её отсутствие.
+        """
+        picture = ("data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+        with tempfile.TemporaryDirectory() as folder:
+            uploads = Path(folder) / "uploads"
+            with mock.patch.object(settings, "UPLOAD_DIR", uploads), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                attachment, error = show.save_upload("зелёный.png", picture)
+                self.assertEqual(error, "", "картинка не приложилась — проверять нечего")
+                _written, dump = self._play(folder)
+                post = {"id": 99, "timestamp": "22:09", "display_name": "Жанна",
+                        "avatar_emoji": "🦸", "gender": "female", "model_used": "human",
+                        "role_name": "Участник", "round": 1, "content": "Вот картинка.",
+                        "attachments": [attachment]}
+                with mock.patch.object(settings, "DUMP_FILE", dump):
+                    show.save_dump_entry(post)
+                written = dump.read_text(encoding="utf-8")
+                play = show.parse_dump(written)
+                # Файл картинки пропал (папку экземпляра когда-то почистили)
+                (uploads / attachment["url"].rsplit("/", 1)[-1]).unlink()
+                gone = show.parse_dump(written)
+
+        self.assertIn("**Приложено:** зелёный.png → " + attachment["url"], written,
+                      "приложенное не попало в запись — и не вернётся с репликой")
+        restored = [p for p in play["posts"] if p["id"] == 99][0]
+        self.assertEqual(restored["attachments"], [attachment],
+                         "вернувшаяся реплика осталась без своего приложения")
+        self.assertEqual([p for p in gone["posts"] if p["id"] == 99][0]["attachments"], [],
+                         "за пропавшим файлом тянется пустая рамка")
+
     def test_the_portrait_comes_back_with_the_reply(self):
         """У вернувшейся реплики то же лицо: портрет назван в составе записи.
 
@@ -3979,7 +4018,7 @@ class TestScenePanel(unittest.TestCase):
 
     def test_every_scene_action_has_a_control(self):
         for control in ("addCast()", "removeCast(", "moveCast(", "setCastRole(",
-                        "resetEverything()"):
+                        "resetEverything()", "checkVision()"):
             with self.subTest(control=control):
                 self.assertIn(control, self.page, f"в пульте нет управления {control}")
 
@@ -4112,9 +4151,10 @@ class FakeGateway:
 
     def __init__(self, models=("qwen/qwen3.7-flash",), content="Канберра.",
                  status=200, body_text=None, statuses=(), stream_text=None, texts=(),
-                 balances=()):
+                 balances=(), cut_bodies=0):
         self.requests = []        # что до нас донеслось: метод, путь, ключ, тело
         self.balances = list(balances)   # остаток на ключе: очередь для «до» и «после»
+        self.cut_bodies = int(cut_bodies)   # столько первых ответов оборвать на половине
         self.models = list(models)
         self.content = content
         self.status = status
@@ -4140,6 +4180,22 @@ class FakeGateway:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
+                if gateway.take_cut():
+                    # Разговор уже начался — заголовки и половина ответа ушли, —
+                    # а потом шлюз оборвал его: соединение брошено со сбросом
+                    # (RST), а не закрыто с прощанием. Сокет отдаёт клиенту это
+                    # как есть (ConnectionResetError), мимо URLError — см.
+                    # cloud._request. Тихим закрытием тут быть не должно:
+                    # у тихого закрытия свой разбор (короткое тело — это
+                    # IncompleteRead, и это уже другой разговор)
+                    self.wfile.write(payload[:len(payload) // 2])
+                    self.wfile.flush()
+                    time.sleep(0.2)      # дать клиенту прочитать заголовки и тело
+                    self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                                               struct.pack("hh", 1, 0))
+                    self.connection.close()
+                    self.close_connection = True
+                    return
                 self.wfile.write(payload)
 
             def do_GET(self):
@@ -4162,6 +4218,13 @@ class FakeGateway:
     def next_status(self) -> int:
         """Код ответа: очередь задана — отдаём по одному, иначе всегда один и тот же."""
         return self.statuses.pop(0) if self.statuses else self.status
+
+    def take_cut(self) -> bool:
+        """Оборвать ли этот ответ на половине (см. cut_bodies)."""
+        if self.cut_bodies > 0:
+            self.cut_bodies -= 1
+            return True
+        return False
 
     def _serve(self):
         self.httpd.timeout = 0.1
@@ -5376,6 +5439,34 @@ class TestCloudGateway(unittest.TestCase):
                          "оборванный разговор — не наша поломка: следа в консоли не надо")
         self.assertTrue([step for step in journal["steps"] if step.get("kind") == "link"])
 
+    def test_a_conversation_broken_mid_answer_is_retried_too(self):
+        """Шлюз оборвал разговор посреди ответа — это тоже обрыв связи.
+
+        Не то же самое, что повешенная трубка (см. соседнюю проверку): там
+        разговор не начинался, и urllib заворачивает обрыв в URLError. Здесь
+        ответ уже пошёл — заголовки и половина тела дошли, — и сокет отдаёт
+        исключение как есть (ConnectionResetError), мимо URLError. Без этой
+        ветки такой обрыв считался нашей поломкой: трассировка в консоль
+        и «шлюз недоступен» без единого повтора.
+        """
+        self.gateway.cut_bodies = 1
+        cloud_setting(self, "CLOUD_RECONNECT_DELAYS", (0, 0))
+        journal = {"steps": []}
+        printer = mock.Mock()
+        with mock.patch.object(cloud.traceback, "print_exc", printer):
+            content, _tools = cloud.chat(self.MODEL, [{"role": "user", "content": "Привет!"}],
+                                         report=journal)
+
+        self.assertEqual(len(self.gateway.requests), 2,
+                         "половина ответа — повод спросить заново")
+        self.assertEqual(content, "Канберра.", "вторая попытка должна была пройти")
+        self.assertEqual(printer.call_count, 0,
+                         "обрыв разговора — не наша поломка: следа в консоли не надо")
+        self.assertTrue([step for step in journal["steps"] if step.get("kind") == "link"],
+                        "в хронологии хода обязан быть след обрыва связи")
+        self.assertFalse(cloud.link_state()["waiting"],
+                         "связь вернулась — сайдбару нечего ждать")
+
     def test_the_sidebar_learns_that_the_link_is_down(self):
         """Пока связи нет, состояние для сайдбара говорит «ждём связь», а не «думает».
 
@@ -6066,6 +6157,104 @@ class TestRoutes(unittest.TestCase):
                          page.HTML_TEMPLATE.rstrip("\n"),
                          "отдаётся не то, что лежит в коде: тогда правка вёрстки "
                          "не появится даже после перезапуска")
+
+    def test_the_money_left_on_the_key_rides_with_the_state(self):
+        """Остаток на ключе идёт в состояние — рядом с ценой спектакля.
+
+        Цена говорит, сколько ушло, а остаток — сколько есть: это одно и то же
+        знание о деньгах, и шлюзу за остатком ходит либо ход, либо показ
+        (см. web.shown_balance). Спрашивается он не заново: ответ берётся
+        из того же кэша, что и цена (см. cloud.balance).
+        """
+        self.session.runtime_participants = [
+            {"display_name": "Нелли", "model": "cloud:google/gemma-4-31b-it"}]
+        with mock.patch.object(cloud, "balance_url", return_value="https://gateway/balance"), \
+             mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "balance",
+                               return_value=({"balance": 97.5}, "")) as asked:
+            payload = self.client.get("/api/status?lastPostCount=0").get_json()
+
+        self.assertEqual(payload["balance"], 97.5,
+                         "остатка нет в состоянии — а его и просили показывать")
+        asked.assert_called_once()
+
+    def test_a_local_show_does_not_ask_about_the_key(self):
+        """У местного спектакля платить не за что — и остаток никто не спрашивает.
+
+        Иначе опрос страницы тянул бы за собой запрос к шлюзу, к которому
+        у этого спектакля нет ни одной причины обращаться.
+        """
+        self.session.runtime_participants = [{"display_name": "Глазастик",
+                                              "model": "g1:latest"}]
+        with mock.patch.object(cloud, "balance_url", return_value="https://gateway/balance"), \
+             mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "balance", side_effect=AssertionError(
+                 "у местного спектакля платить не за что")):
+            payload = self.client.get("/api/status?lastPostCount=0").get_json()
+
+        self.assertIsNone(payload["balance"])
+
+    def test_the_vision_button_asks_about_every_model_in_the_cast(self):
+        """Кнопка «Проверить зрение» спрашивает про все модели состава — и правду.
+
+        У местной модели чтение картинок видно в `capabilities` Ollama, у облачной —
+        только из ответа самого шлюза (см. cloud.probe_images). Кнопка потому
+        и отдельная: у облачной проверка — это запрос за деньги, и он должен быть
+        решением режиссёра, а не тихим побочным расходом хода.
+        """
+        self.session.runtime_participants = [
+            {"display_name": "Глазастик", "model": "g1:latest"},
+            {"display_name": "Слепыш", "model": "s1:latest"},
+            {"display_name": "Жанна", "model": "human"},
+        ]
+        asked = []
+
+        def answer(model):
+            asked.append(model)
+            return model == "g1:latest"
+
+        with mock.patch.object(ollama_api, "takes_images", side_effect=answer):
+            data = self.client.post("/api/vision/check").get_json()
+
+        self.assertTrue(data["success"])
+        self.assertEqual(asked, ["g1:latest", "s1:latest"],
+                         "живого участника проверять нечем: он и прикладывает картинки")
+        self.assertEqual([one["reads_images"] for one in data["checked"]], [True, False],
+                         "в ответе должна быть правда о каждой модели, а не общая отписка")
+        self.assertEqual(data["checked"][1]["name"], "Слепыш",
+                         "без имени непонятно, кому именно картинки не уедут")
+        self.assertEqual(data["reads"], 1)
+
+    def test_the_archive_routes_save_name_list_return_and_remove(self):
+        """Архив проверяется через те же маршруты, которыми его зовёт пульт.
+
+        Сохранение без имени — понятная ошибка, а не безымянная папка в архиве:
+        по имени его потом и находят (см. show.save_play).
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            with mock.patch.object(settings, "SAVES_DIR", root / "saves"), \
+                 mock.patch.object(settings, "DUMP_FILE", root / "damp.md"), \
+                 mock.patch.object(settings, "UPLOAD_DIR", root / "uploads"):
+                nameless = self.client.post("/api/saves/save", json={})
+                self.assertFalse(nameless.get_json()["success"],
+                                 "безымянное сохранение прошло — его потом не найти")
+                self.assertEqual(nameless.status_code, 400)
+                saved = self.client.post("/api/saves/save",
+                                         json={"name": "ветка"}).get_json()
+                self.assertTrue(saved["success"], saved.get("error"))
+                listing = self.client.get("/api/saves").get_json()
+                self.assertEqual([one["name"] for one in listing["saves"]], ["ветка"])
+                self.assertIn("saves", listing["dir"],
+                              "без папки архива не найти сохранений на диске")
+                ident = saved["saved"]["id"]
+                loaded = self.client.post("/api/saves/load", json={"id": ident}).get_json()
+                self.assertTrue(loaded["success"], loaded.get("error"))
+                stranger = self.client.post("/api/saves/load", json={"id": "../чужое"})
+                self.assertFalse(stranger.get_json()["success"])
+                removed = self.client.post("/api/saves/delete", json={"id": ident}).get_json()
+                self.assertTrue(removed["success"], removed.get("error"))
+                self.assertEqual(removed["saves"], [])
 
     def test_empty_topic_field_uses_the_one_on_the_server(self):
         """Тот самый баг: поле в форме стёрли, а тема на сервере осталась."""
@@ -6969,6 +7158,769 @@ class TestAvatarBelongsToTheCast(unittest.TestCase):
 
 # ---------------------------------------------------------------- сообщения
 
+# ---------------------------------------- приложенное к реплике
+
+# Настоящая сигнатура PNG: по ней и узнаётся картинка (см. show.image_kind)
+PNG_SIGN = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+
+
+class FakeShow:
+    """Ответ /api/show: читается как настоящий (ответ urllib — тоже файл)."""
+
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *arguments):
+        return False
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class PicturesTest(unittest.TestCase):
+    """Общее для проверок приёма: своя папка приложенного вместо папки экземпляра."""
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.folder = Path(folder.name)
+        for name, value in (("UPLOAD_DIR", self.folder),
+                            ("MAX_UPLOAD_BYTES", 1024)):
+            patcher = mock.patch.object(settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def data_url(raw: bytes = PNG_SIGN, declared: str = "image/png") -> str:
+        """Файл так, как его присылает страница: адресом-данными."""
+        return f"data:{declared};base64," + base64.b64encode(raw).decode("ascii")
+
+    def attach(self, name: str = "схема.png", raw: bytes = PNG_SIGN) -> dict:
+        """Приложенная картинка в том виде, в каком её отдаёт /api/upload."""
+        attachment, error = show.save_upload(name, self.data_url(raw))
+        self.assertEqual(error, "", "картинка обязана приниматься")
+        return attachment
+
+
+class TestThePictureArrives(PicturesTest):
+    """Приложенный файл: что принимается, а что нет.
+
+    Режиссёр прикладывает картинку к реплике человека, и она уезжает тем моделям,
+    которые умеют их читать. Всё, что до проверок, — чужой текст: и имя файла,
+    и объявленный тип. Поэтому вид картинки определяется по содержимому.
+    """
+
+    def test_a_picture_is_saved_under_our_own_name(self):
+        """Имя файла на диске придумываем сами: присланное — чужой текст.
+
+        В имени бывает и «../../», и что угодно ещё, а по нему файл потом
+        открывается (см. show.post_images). Настоящее имя хранится рядом —
+        оно для показа.
+        """
+        attachment, error = show.save_upload("../../photo.png", self.data_url())
+        self.assertEqual(error, "")
+
+        self.assertEqual(attachment["name"], "../../photo.png",
+                         "имя для показа остаётся тем, что выбрал режиссёр")
+        file = attachment["url"].split("/")[-1]
+        self.assertNotIn("..", file, "присланное имя не должно попадать в путь")
+        self.assertNotEqual(file, "photo.png")
+        self.assertTrue((self.folder / file).is_file())
+        self.assertEqual((self.folder / file).read_bytes(), PNG_SIGN,
+                         "на диск ложится ровно то, что прислали")
+
+    def test_a_file_without_a_picture_inside_is_refused(self):
+        """Тип от файла не принимается на слово: смотрим, что внутри.
+
+        Браузер называет тип по расширению, и «заметки.txt», переименованные
+        в .png, выдавали бы себя за картинку — а модель получила бы мусор.
+        """
+        attachment, error = show.save_upload(
+            "photo.png", self.data_url("просто текст".encode("utf-8")))
+        self.assertIsNone(attachment)
+        self.assertIn("картинки", error)
+
+    def test_a_huge_picture_is_refused(self):
+        """Приложение весом в мегабайты уедет в модель целиком и оплатится.
+
+        Такую реплику лучше не прикладывать вовсе, чем отправлять: за неё
+        заплатит каждый запрос хода.
+        """
+        attachment, error = show.save_upload("большая.png",
+                                            self.data_url(PNG_SIGN + b"0" * 4096))
+        self.assertIsNone(attachment)
+        self.assertIn("больше", error)
+        self.assertEqual(list(self.folder.iterdir()), [],
+                         "отказанное не должно оставаться на диске")
+
+    def test_only_files_of_our_own_instance_are_taken(self):
+        """Адрес пришёл из формы — по нему нельзя прочитать любой файл.
+
+        Секрет рядом с папкой приложенных не должен уехать модели только
+        потому, что страница попросила «/uploads/../secret.png».
+        """
+        secret = self.folder.parent / "secret.png"
+        secret.write_bytes(PNG_SIGN)
+        self.addCleanup(secret.unlink)
+        (self.folder / "ok.png").write_bytes(PNG_SIGN)
+
+        taken = show.upload_files([{"url": "/uploads/../secret.png", "name": "secret"},
+                                   {"url": "/uploads/ok.png", "name": "ok.png"},
+                                   {"url": "/uploads/нет-такого.png"}])
+        self.assertEqual([one["name"] for one in taken], ["ok.png"])
+
+    def test_the_model_gets_the_picture_as_a_data_address(self):
+        """Картинка из реплики — адресом-данными: и своя Ollama, и шлюз поймут.
+
+        Вид у них разный (у OpenAI — data-URL целиком, у Ollama — голый base64),
+        и приводит их по дороге ollama_api.messages_for: тут — одна строка на всех.
+        """
+        picture = self.attach()
+        images = show.post_images([picture])
+
+        self.assertEqual(len(images), 1)
+        self.assertTrue(images[0].startswith("data:image/png;base64,"),
+                        "без вида картинки шлюз не поймёт, что это")
+        self.assertEqual(base64.b64decode(images[0].split(",", 1)[1]), PNG_SIGN)
+        self.assertEqual(show.post_images([{"url": "/uploads/нет.png"}]), [],
+                         "за пропавшим файлом в модель ничего не уезжает")
+
+
+class TestThePictureGoesWithTheReplica(PicturesTest):
+    """Приложенное — часть реплики: и в ленте, и в истории для моделей.
+
+    Картинка лежит рядом с текстом реплики, а не отдельным сообщением: только
+    так историю можно собирать снова на каждом ходу, а модель — понимать, к чему
+    эта картинка была приложена.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+
+    def test_the_history_carries_the_picture_with_the_replica(self):
+        """Реплика человека с картинкой уходит моделям вместе с ней."""
+        picture = self.attach()
+        self.session.add_post("Живой", "human", "Смотрите, что нашёл (схема справа).",
+                              1, dump=False, attachments=[picture])
+
+        messages = self.session._format_history("Пётр", self.session.conversation_history)
+        self.assertEqual(len(messages), 1)
+        self.assertTrue(messages[0]["images"], "картинка не доехала до истории")
+        self.assertIn("image/png", messages[0]["images"][0],
+                      "должна уехать сама картинка, а не её имя")
+
+    def test_a_replica_without_pictures_has_nothing_extra(self):
+        """У обычной реплики поля с картинками нет вовсе.
+
+        Не пустой список, а именно нет поля: пустое поле у Ollama значило бы
+        «картинки были, но их нет» — а это уже другая реплика.
+        """
+        self.session.add_post("Мария", "fake-model", "Привет", 1, dump=False)
+        messages = self.session._format_history("Пётр", self.session.conversation_history)
+        self.assertNotIn("images", messages[0])
+
+
+class TestThePictureIsShownOnce(PicturesTest):
+    """Каждой модели приложенное уезжает один раз — дальше о ней только строка.
+
+    Картинка занимает в контексте тысячи токенов, а уезжает она в каждом
+    следующем запросе заново — хотя модель уже видела её своими глазами.
+    Поэтому показанное помнится по модели (см. show.commit_shown_pictures),
+    а в реплике вместо картинки остаётся строка о ней: бесследно пропасть она
+    не должна — иначе следующая реплика была бы про картинку, которой
+    в разговоре как будто не было.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.person = non_judge_ai(self.session)
+        self.picture = self.attach()
+
+    def spoken(self, round_num: int = 2) -> list:
+        """Реплики так, как их увидит эта модель."""
+        return self.session.build_messages_for_ai(self.person, round_num)
+
+    @staticmethod
+    def joined(messages: list) -> str:
+        return "\n".join(str(message.get("content") or "") for message in messages)
+
+    def turn(self, reads: bool = True) -> None:
+        """Ход дошёл до ответа: приложенное к нему считается показанным."""
+        with mock.patch.object(ollama_api, "takes_images", return_value=reads):
+            self.session.commit_shown_pictures(self.person["model"])
+
+    def with_picture(self) -> None:
+        self.session.add_post("Живой", "human", "Смотрите, что нашёл.", 1,
+                              dump=False, attachments=[self.picture])
+
+    def test_the_second_turn_does_not_pay_for_the_picture_again(self):
+        """Первый ход после приложения — с картинкой, следующие — со строкой о ней.
+
+        И строка эта с именем файла: «картинка «схема.png» уже показана» знает,
+        о чём речь, а безымянное «картинка была» — нет.
+        """
+        self.with_picture()
+        first = self.spoken()
+        self.assertTrue([m for m in first if m.get("images")],
+                        "в первом ходу после приложения картинка обязана уехать")
+        self.turn()
+
+        second = self.spoken()
+        self.assertEqual([m for m in second if m.get("images")], [],
+                         "за ту же картинку заплатили второй раз")
+        self.assertIn("уже показана", self.joined(second))
+        self.assertIn(self.picture["name"], self.joined(second),
+                      "без имени непонятно, какая картинка имеется в виду")
+        self.assertEqual(self.session.posts[-1]["attachments"], [self.picture],
+                         "из самой реплики картинка пропала — она часть её")
+
+    def test_the_picture_stays_in_every_request_of_that_turn(self):
+        """Запросов в ходу несколько (поиск, повтор после него) — картинка нужна во всех.
+
+        Поэтому показанной она становится только в конце хода: отметив её сразу,
+        мы бы отправили второй запрос того же хода без неё — и модель потеряла бы
+        картинку посреди собственного хода.
+        """
+        self.with_picture()
+        for attempt in (1, 2):
+            messages = self.spoken()
+            self.assertTrue([m for m in messages if m.get("images")],
+                            f"картинка потерялась на запросе {attempt} одного хода")
+
+    def test_a_model_that_has_not_seen_it_still_gets_the_picture(self):
+        """Показанное — про конкретную модель: у соседа по сцене та же картинка впервые."""
+        self.with_picture()
+        self.spoken()
+        self.turn()
+        other = [one for one in ai_participants(self.session)
+                 if one["display_name"] != self.person["display_name"]][0]
+
+        seen_again = self.session.build_messages_for_ai(other, 2)
+        self.assertTrue([m for m in seen_again if m.get("images")],
+                        "модель, не видавшая картинку, осталась без неё")
+        self.assertNotIn("уже показана", self.joined(seen_again))
+
+    def test_a_model_without_vision_is_never_told_it_was_shown(self):
+        """Слепой модели приложенное не уезжает вовсе — и строки о нём ей не кладут.
+
+        Иначе она рассказывала бы про картинку, которой никогда не видела
+        (см. ollama_api.messages_for).
+        """
+        self.with_picture()
+        self.spoken()
+        self.turn(reads=False)
+
+        self.assertEqual(self.session.images_shown, {},
+                         "показанным стало то, чего модель не видела")
+        self.assertNotIn("уже показана", self.joined(self.spoken()))
+
+    def test_a_message_that_was_trimmed_away_is_not_counted(self):
+        """Обрезанное сообщение до модели не доехало — и показанным не считается.
+
+        Иначе картинка числилась бы показанной, так ни разу и не уехав: место
+        в окне отдано свежим репликам (см. text.trim_history_with_report).
+        """
+        keys = {id(self.picture): [self.picture["url"]]}
+        self.session.remember_pictures_to_send(self.person["model"], [], keys)
+
+        self.assertEqual(self.session.images_pending, {}, "обрезанное уехало бы в счёт показанного")
+
+    def test_a_new_show_sends_the_picture_again(self):
+        """В новом спектакле модель картинку не видела: показывать придётся заново."""
+        self.with_picture()
+        self.spoken()
+        self.turn()
+        self.session.forget_shown_pictures()
+
+        self.assertTrue([m for m in self.spoken() if m.get("images")],
+                        "в новом спектакле картинка не уехала, будто её уже показывали")
+
+
+class CloudVisionTest(unittest.TestCase):
+    """Общее для проверок зрения у облачных моделей.
+
+    Знание о картинках живёт в памяти модуля и в файле экземпляра, поэтому
+    каждый такой тест получает свой файл и чистую память: иначе один тест
+    учил бы следующий за него (и ни один не ходит в сеть сам.
+    """
+
+    MESSAGES = [{"role": "user", "content": "вот схема",
+                 "images": ["data:image/png;base64,AAAA"]}]
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        patcher = mock.patch.object(settings, "VISION_FILE",
+                                    Path(folder.name) / "vision.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        kept = dict(cloud._IMAGE_READERS)
+        self.addCleanup(self.forget, kept)
+        cloud._IMAGE_READERS.clear()
+        cloud._VISION_LOADED = False
+
+    @staticmethod
+    def forget(kept: dict):
+        cloud._IMAGE_READERS.clear()
+        cloud._IMAGE_READERS.update(kept)
+        cloud._VISION_LOADED = False
+
+
+class TestWhoReadsPictures(CloudVisionTest):
+    """Кому картинка отправляется, а кому нет — и в каком виде.
+
+    Модель без зрения на приложенную картинку либо отвечает ошибкой запроса,
+    либо (это хуже) считает сообщение пустым. Поэтому ей картинки не уезжают
+    вовсе, а о причине говорится вслух — в консоли и в хронологии хода.
+    """
+
+    def test_a_model_without_vision_gets_no_picture(self):
+        """Слепой модели картинку не отправляем, но не молчим об этом."""
+        journal = {"steps": []}
+        with mock.patch.object(ollama_api, "model_supports_vision", return_value=False):
+            out = ollama_api.messages_for("qwen3", self.MESSAGES, journal)
+
+        self.assertNotIn("images", out[0])
+        self.assertEqual(out[0]["content"], "вот схема", "текст не трогаем")
+        self.assertTrue([step for step in journal["steps"] if step.get("kind") == "images"],
+                        "в хронологии хода обязано быть сказано, почему картинок нет")
+
+    def test_a_local_model_that_reads_pictures_gets_bare_base64(self):
+        """Ollama ждёт голый base64: префикс адреса она не разбирает."""
+        with mock.patch.object(ollama_api, "model_supports_vision", return_value=True):
+            out = ollama_api.messages_for("llava", self.MESSAGES, {})
+
+        self.assertEqual(out[0]["images"], ["AAAA"])
+        self.assertEqual(self.MESSAGES[0]["images"], ["data:image/png;base64,AAAA"],
+                         "историю в памяти трогать нельзя: она ещё понадобится")
+
+    def test_a_local_model_is_not_asked_of_the_gateway(self):
+        """У своей Ollama спрашивают её саму: в шлюз за этим не ходят."""
+        with mock.patch.object(ollama_api, "model_supports_vision", return_value=True), \
+             mock.patch.object(cloud, "_request", side_effect=AssertionError(
+                 "местную модель у шлюза спрашивать нечего")):
+            out = ollama_api.messages_for("llava", self.MESSAGES, {})
+
+        self.assertEqual(out[0]["images"], ["AAAA"])
+
+    def test_a_cloud_model_the_gateway_vouched_for_gets_the_picture(self):
+        """Проверка и есть то, из-за чего картинка уезжает: по имени тут — «не читает».
+
+        По приметам в имени «qwen/qwen3.8-flash» выходит слепым, а шлюз на
+        крошечную картинку отвечает. Значит, дело не в приметах: решила
+        проверка (см. cloud.probe_images), и картинка уехала.
+        """
+        answer = ({"choices": [{"message": {"content": "синий"}}]}, None)
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", return_value=answer):
+            out = ollama_api.messages_for("cloud:qwen/qwen3.8-flash", self.MESSAGES, {})
+
+        self.assertEqual(out[0]["images"], ["data:image/png;base64,AAAA"])
+        self.assertTrue(cloud.images_known("cloud:qwen/qwen3.8-flash"))
+
+    def test_a_cloud_model_gets_the_address_as_is(self):
+        """Шлюзу картинка едет адресом целиком — этот вид и есть его вид.
+
+        Модель, про которую шлюз уже сказал «читает», получает картинку
+        безо всяких догадок по имени (см. cloud.probe_images).
+        """
+        with mock.patch.object(cloud, "images_known", return_value=True), \
+             mock.patch.object(cloud, "model_reads_images", return_value=True):
+            out = ollama_api.messages_for("cloud:google/gemini-2.0-flash",
+                                          self.MESSAGES, {})
+
+        self.assertEqual(out[0]["images"], ["data:image/png;base64,AAAA"])
+
+    def test_a_cloud_blind_model_gets_no_picture(self):
+        """Шлюз сказал «не читает» — картинка не уезжает, и это видно в хронологии."""
+        journal = {"steps": []}
+        with mock.patch.object(cloud, "images_known", return_value=True), \
+             mock.patch.object(cloud, "model_reads_images", return_value=False):
+            out = ollama_api.messages_for("cloud:z-ai/glm-5.3-flash",
+                                          self.MESSAGES, journal)
+
+        self.assertNotIn("images", out[0])
+        self.assertEqual(out[0]["content"], "вот схема")
+        self.assertTrue([step for step in journal["steps"] if step.get("kind") == "images"])
+
+    def test_the_gateway_is_asked_once_and_the_answer_is_remembered(self):
+        """Про картинки у шлюза спрашивают один раз на модель — и это переживает перезапуск.
+
+        Спрашивать на каждом ходу значило бы платить за один и тот же ответ,
+        а узнавать его после ошибки — «получать ошибку каждый раз», от чего
+        режиссёр и просил избавиться. Проверка — запрос с крошечной картинкой
+        (см. cloud.TINY_PICTURE), и она же нужна затем, чтобы знак «+» у модели
+        не был догадкой (см. web.get_models).
+        """
+        asked = []
+
+        def answer(path, **kwargs):
+            asked.append(kwargs.get("payload"))
+            return {"choices": [{"message": {"content": "синий"}}]}, None
+
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", side_effect=answer):
+            first = cloud.probe_images("cloud:qwen/qwen3.8-flash")
+            second = cloud.probe_images("cloud:qwen/qwen3.8-flash")
+
+        self.assertTrue(first, "шлюз ответил — значит картинку читает")
+        self.assertTrue(second)
+        self.assertEqual(len(asked), 1, "второй раз спрашивать некого: ответ запомнен")
+        # Спрашиваем тем же видом, каким картинка поедет и вправду
+        parts = asked[0]["messages"][0]["content"]
+        self.assertEqual(parts[1]["type"], "image_url")
+        self.assertTrue(parts[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        # Узнанное лежит в файле экземпляра, а не только в памяти
+        cloud._IMAGE_READERS.clear()
+        cloud._VISION_LOADED = False
+        self.assertTrue(cloud.images_known("cloud:qwen/qwen3.8-flash"))
+
+    def test_a_model_that_refused_the_picture_is_remembered_as_blind(self):
+        """Отказ по самой картинке — это ответ «не читает», и его тоже помнят."""
+        refusal = cloud.GatewayError("шлюз ответил HTTP 400 Bad Request", 400)
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", return_value=(None, refusal)):
+            told = cloud.probe_images("cloud:some/text-model")
+
+        self.assertFalse(told)
+        self.assertTrue(cloud.images_known("cloud:some/text-model"),
+                        "отказ запоминается: иначе он повторялся бы каждый раз")
+
+    def test_a_probe_that_could_not_be_asked_is_not_remembered(self):
+        """Нет ключа или связи — это «не знаем»: связывать модель по рукам нельзя.
+
+        Запомнить тут False значило бы, что один упавший интернет навсегда
+        лишил модель приложенных картинок.
+        """
+        blind_note = cloud.GatewayError("шлюз недоступен по адресу ...")
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", return_value=(None, blind_note)), \
+             mock.patch.object(ollama_api, "model_supports_vision", return_value=False):
+            told = cloud.probe_images("cloud:qwen/qwen3.8-flash")
+            # Спросить не вышло — остаётся догадка по имени: у gemini она «читает»,
+            # и картинка ему уезжает, а не пропадает на этом ходу
+            out = ollama_api.messages_for("cloud:google/gemini-2.0-flash",
+                                          self.MESSAGES, {})
+
+        self.assertIsNone(told)
+        self.assertFalse(cloud.images_known("cloud:qwen/qwen3.8-flash"),
+                         "о неудавшемся спросе не помнят ничего")
+        self.assertEqual(out[0]["images"], ["data:image/png;base64,AAAA"])
+
+    def test_without_a_key_nobody_is_asked(self):
+        """Ключа нет — спрашивать некого: проверка не превращается в отказ картинке."""
+        with mock.patch.object(cloud, "is_configured", return_value=False), \
+             mock.patch.object(cloud, "_request", side_effect=AssertionError(
+                 "без ключа запрос в шлюз не уходит")):
+            told = cloud.probe_images("cloud:qwen/qwen3.8-flash")
+
+        self.assertIsNone(told)
+
+    def test_the_gateway_gets_the_picture_inside_the_message(self):
+        """У OpenAI картинка — часть content, а не поле рядом с текстом."""
+        out = cloud.openai_messages([{"role": "user", "content": "вот схема",
+                                      "images": ["data:image/png;base64,AAAA"]}])
+
+        self.assertEqual(out[0]["content"],
+                         [{"type": "text", "text": "вот схема"},
+                          {"type": "image_url",
+                           "image_url": {"url": "data:image/png;base64,AAAA"}}])
+
+    def test_a_message_without_pictures_keeps_its_plain_text(self):
+        """Обычное сообщение остаётся строкой, как и было."""
+        out = cloud.openai_messages([{"role": "user", "content": "вот схема"}])
+        self.assertEqual(out[0]["content"], "вот схема")
+
+    def test_cloud_vision_without_asking_is_guessed_by_the_name(self):
+        """Пока не спросили — судим по имени: это первое слово, а не приговор.
+
+        Имена вендоры пишут по своим линейкам, и «-flash» может и читать
+        картинки, и нет: в списке моделей способностей нет вовсе, поэтому
+        догадка тут — то, на что опираются до проверки (см. probe_images).
+        """
+        self.assertTrue(cloud.model_reads_images("cloud:google/gemini-2.0-flash"),
+                        "gemini назван вендором словами про зрение")
+        self.assertTrue(cloud.model_reads_images("cloud:qwen/qwen2.5-vl-72b"))
+        self.assertFalse(cloud.model_reads_images("cloud:qwen/qwen3.7-flash"))
+        self.assertFalse(cloud.model_reads_images("cloud:z-ai/glm-5.3-flash"))
+        self.assertFalse(cloud.model_reads_images("human"))
+
+    def test_what_the_gateway_said_beats_the_guess(self):
+        """Спрошенное важнее догадки — в обе стороны.
+
+        Так проверка и работает: у «qwen3.8-flash» по имени выходило «не читает»,
+        а шлюз на крошечную картинку отвечает как ни в чём не бывало.
+        """
+        cloud._IMAGE_READERS.update({"qwen/qwen3.8-flash": True,
+                                     "google/gemini-2.0-flash": False,
+                                     "deepseek/deepseek-v4.1-flash": True})
+        self.assertTrue(cloud.model_reads_images("cloud:qwen/qwen3.8-flash"))
+        self.assertFalse(cloud.model_reads_images("cloud:google/gemini-2.0-flash"))
+        self.assertTrue(cloud.images_known("cloud:deepseek/deepseek-v4.1-flash"))
+        self.assertFalse(cloud.images_known("cloud:google/gemini-3-flash"))
+        self.assertTrue(cloud.model_reads_images("cloud:google/gemini-3-flash"),
+                        "про кого не спрашивали — того судим по имени")
+
+    def test_the_capability_is_asked_of_ollama_and_remembered(self):
+        """У местной модели про зрение спрашивают /api/show — один раз на модель."""
+        answer = {"capabilities": ["completion", "vision"]}
+        self.addCleanup(ollama_api.MODELS_VISION_SUPPORT.pop, "fake-vision-model", None)
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(return_value=FakeShow(answer))) as called:
+            first = ollama_api.model_supports_vision("fake-vision-model")
+            second = ollama_api.model_supports_vision("fake-vision-model")
+
+        self.assertTrue(first)
+        self.assertTrue(second)
+        self.assertEqual(called.call_count, 1,
+                         "второй раз спрашивать некого: ответ не меняется")
+
+    def test_a_model_that_cannot_be_asked_is_not_remembered(self):
+        """Ошибку сети не запоминаем: иначе мигающая Ollama учила бы модель слепоте."""
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(side_effect=OSError("Ollama спит"))):
+            self.assertFalse(ollama_api.model_supports_vision("fake-awake-model"))
+        self.assertNotIn("fake-awake-model", ollama_api.MODELS_VISION_SUPPORT)
+
+
+class TestAPictureNobodyCanOpen(CloudVisionTest):
+    """Картинка, которую модель не открыла, не уносит с собой реплику.
+
+    Битый файл или модель, которая картинок всё-таки не читает, отвечают
+    отказом уже на самом запросе — и раньше это значило «ход пропал»: в ленте
+    оставалась строка [ОШИБКА: HTTP 400] вместо реплики (такое случилось на
+    живом спектакле с приложенным значком). Теперь тот же запрос уходит без
+    приложенного, а модель запоминается слепой — то есть ошибка бывает один
+    раз, а не на каждом ходу.
+    """
+
+    def test_the_local_replica_survives_a_picture_that_was_not_opened(self):
+        """Ollama не разобрала картинку — реплика всё равно состоится."""
+        refusal = urllib.error.HTTPError(
+            settings.OLLAMA_URL, 400, "Bad Request", {},
+            io.BytesIO(json.dumps({"error": {"message":
+                "Failed to load image or audio file"}}).encode("utf-8")))
+        answer = FakeShow({"message": {"content": "Зелёный"}})
+        self.addCleanup(ollama_api.MODELS_VISION_SUPPORT.pop, "fake-eyes", None)
+        report = {"steps": []}
+        with mock.patch.object(ollama_api, "model_supports_vision", return_value=True), \
+             mock.patch.object(ollama_api, "check_model_tools_support", return_value=False), \
+             mock.patch.object(ollama_api.urllib.request, "urlopen",
+                               mock.Mock(side_effect=[refusal, answer])) as called:
+            spoken, _ = ollama_api.ask_model_with_tools("fake-eyes", self.MESSAGES,
+                                                       report=report)
+
+        self.assertEqual(spoken, "Зелёный", "реплика пропала вместо того, чтобы состояться")
+        self.assertEqual(called.call_count, 2, "повтора без картинок не было")
+        asked = json.loads(called.call_args_list[1][0][0].data.decode("utf-8"))
+        self.assertNotIn("images", asked["messages"][0],
+                         "во втором запросе картинка осталась на месте")
+        self.assertFalse(ollama_api.MODELS_VISION_SUPPORT["fake-eyes"],
+                         "модель не запомнили слепой — ошибка повторится")
+        self.assertTrue([step for step in report["steps"] if step.get("kind") == "images"],
+                        "в хронологии хода должно быть сказано, что с картинкой вышло")
+
+    def test_the_gateway_picture_refusal_drops_the_picture_and_is_remembered(self):
+        """Шлюз отказал из-за картинки — убираем её из тела и помним отказ."""
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "вот схема"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,AAAA"}}]}]}
+        refusal = cloud.GatewayError(
+            'шлюз ответил HTTP 400 Bad Request: {"message":"Failed to load image"}', 400)
+
+        eased = cloud._eased_body("cloud:some/text-model", body, refusal)
+
+        self.assertTrue(eased, "отказ по картинке должен лечиться, а не показываться как есть")
+        self.assertEqual(eased["messages"][0]["content"], "вот схема")
+        self.assertTrue(cloud.images_known("cloud:some/text-model"),
+                        "отказ забыли — и картинка поехала бы снова")
+        self.assertFalse(cloud.model_reads_images("cloud:some/text-model"),
+                         "такой модели картинки больше не поедут")
+        self.assertEqual(body["messages"][0]["content"][1]["type"], "image_url",
+                         "исходное тело править нельзя: его ещё будет чем сравнить")
+
+    def test_another_refusal_leaves_the_picture_alone(self):
+        """Отказ не про картинку — не повод терять приложение."""
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "вот схема"},
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,AAAA"}}]}]}
+        other = cloud.GatewayError("шлюз ответил HTTP 400 — Unknown parameter: 'min_p'", 400)
+
+        self.assertIsNone(cloud._eased_body("cloud:some/model", body, other))
+        self.assertFalse(cloud.images_known("cloud:some/model"),
+                         "о картинках тут ничего не решено — запоминать нечего")
+
+
+class TestArchiveOfPlays(unittest.TestCase):
+    """Архив спектаклей: сохранение — это сам спектакль, а не примета порта.
+
+    Сохраняется всё, из чего спектакль состоит: пульт (состав, тема, правила
+    и инструкции), ДАМП — в нём вся история — и приложенные картинки. Лежит
+    архив вне папки экземпляра (см. settings.SAVES_DIR), поэтому сейв,
+    сделанный в театре на 5077, открывается и на 5000, а веток у одного
+    спектакля бывает сколько угодно.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        # И экземпляр, и архив — свои: тест не имеет права тронуть ни настоящий
+        # архив проекта, ни настоящий спектакль в .theatre порта
+        self.port = root / "instance"
+        self.port.mkdir()
+        self.saves = root / "saves"
+        for name, value in (("SETTINGS_FILE", self.port / "settings.json"),
+                            ("DUMP_FILE", self.port / "damp.md"),
+                            ("UPLOAD_DIR", self.port / "uploads"),
+                            ("SAVES_DIR", self.saves),
+                            ("MAX_UPLOAD_BYTES", 4096)):
+            patcher = mock.patch.object(settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _play_with_a_picture(self) -> dict:
+        """Спектакль на диске: пульт, одна реплика с приложением — и сама картинка."""
+        picture = "data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii")
+        attachment, error = show.save_upload("зелёный.png", picture)
+        self.assertEqual(error, "", "картинка не приложилась — проверять нечего")
+        settings.SETTINGS_FILE.write_text(json.dumps(
+            {"topic": "Про картинку",
+             "cast": [{"display_name": "Жанна", "model": "human", "gender": "female"}]},
+            ensure_ascii=False), encoding="utf-8")
+        show.start_dump("Про картинку")
+        show.save_dump_entry({"id": 1, "timestamp": "10:00", "display_name": "Жанна",
+                              "avatar_emoji": "🦸", "gender": "female", "model_used": "human",
+                              "role_name": "Участник", "round": 1, "content": "Смотрите.",
+                              "attachments": [attachment]})
+        return attachment
+
+    def test_the_archive_is_one_for_every_port(self):
+        """Папка архива не переезжает вместе с портом: сейв — общий.
+
+        Проверяется по самому коду: перенос настроек экземпляра (use_instance)
+        трогает файлы порта — пульт, ДАМП, приложенное — и не имеет права
+        трогать архив, иначе спектакль одного порта было бы не видно другому.
+        """
+        source = (Path(__file__).resolve().parent.parent / "aitheatre" / "settings.py")
+        written = source.read_text(encoding="utf-8")
+        self.assertIn("SAVES_DIR = INSTANCE_ROOT / \"saves\"", written)
+        moved = re.search(r"def use_instance\(.*?(?=\ndef )", written, re.DOTALL)
+        self.assertIsNotNone(moved, "use_instance пропал — проверять нечего")
+        self.assertNotIn("SAVES_DIR", moved.group(0),
+                         "архив начал переезжать вместе с портом")
+
+    def test_a_saved_play_is_the_whole_play(self):
+        """Сохранение берёт весь спектакль: и пульт, и историю, и картинки."""
+        self._play_with_a_picture()
+        show.load_play_from_dump("read")
+
+        saved, error = show.save_play("до правки состава", port=5077)
+
+        self.assertEqual(error, "")
+        self.assertEqual(saved["name"], "до правки состава")
+        self.assertEqual(saved["posts"], 1, "без истории сохранение — половина спектакля")
+        self.assertEqual(saved["topic"], "Про картинку")
+        self.assertEqual(saved["port"], 5077, "видно, где играли — но это только пометка")
+        folder = self.saves / saved["id"]
+        self.assertTrue((folder / "settings.json").is_file(), "пульт не сохранён")
+        self.assertTrue((folder / "damp.md").is_file(), "история не сохранена")
+        self.assertEqual(len(list((folder / "uploads").iterdir())), 1,
+                         "приложенные картинки не поехали вместе со спектаклем")
+        self.assertEqual([one["name"] for one in show.list_saves()], ["до правки состава"])
+        self.assertTrue(show.list_saves()[0]["pictures"], "о картинках в списке не сказано")
+
+    def test_a_saved_play_returns_to_another_port_with_its_history_and_pictures(self):
+        """Сохранённый спектакль возвращается и в другом порту — целиком."""
+        attachment = self._play_with_a_picture()
+        show.load_play_from_dump("read")
+        saved, error = show.save_play("ветка первая")
+        self.assertEqual(error, "")
+
+        # Другой порт: своя пустая папка — ни пульта, ни истории, ни картинок
+        other = Path(self.port.parent) / "port-5077"
+        other.mkdir()
+        with mock.patch.object(settings, "SETTINGS_FILE", other / "settings.json"), \
+             mock.patch.object(settings, "DUMP_FILE", other / "damp.md"), \
+             mock.patch.object(settings, "UPLOAD_DIR", other / "uploads"):
+            self.session.posts, self.session.turn_log = [], {}
+            self.session.restored = False
+            meta, error = show.load_save(saved["id"])
+            posts = list(self.session.posts)
+            pictures = show.post_images(posts[0]["attachments"])
+
+        self.assertEqual(error, "", "сохранение не вернулось")
+        self.assertEqual(meta["posts"], 1)
+        self.assertEqual(self.session.topic, "Про картинку", "тема приехала не с спектаклем")
+        self.assertEqual(self.session.spent, 0.0)
+        self.assertTrue(self.session.restored, "вернувшийся спектакль выдан за новый")
+        self.assertEqual(posts[0]["attachments"], [attachment],
+                         "приложенное к реплике не вернулось в другом порту")
+        self.assertEqual(pictures[0].split(",", 1)[0], "data:image/png;base64",
+                         "картинка не читается — файл не приехал вместе с сохранением")
+
+    def test_a_running_show_is_not_replaced_by_a_save(self):
+        """Идущий спектакль архивом не подменяется: об этом говорят словами."""
+        self._play_with_a_picture()
+        saved, error = show.save_play("ветка")
+        self.assertEqual(error, "")
+        self.session.running = True
+
+        meta, error = show.load_save(saved["id"])
+
+        self.assertIsNone(meta, "спектакль подменили на ходу — ДАМП и пульт перепутаны")
+        self.assertIn("идёт", error)
+        self.assertTrue(settings.DUMP_FILE.exists(), "архив всё равно что-то переписал")
+
+    def test_a_foreign_name_cannot_walk_the_archive(self):
+        """Имя сохранения из формы не открывает чужие папки — ни на чтение, ни на удаление."""
+        self._play_with_a_picture()
+        saved, error = show.save_play("ветка")
+        self.assertEqual(error, "")
+        outside = Path(self.port.parent) / "чужое"
+        outside.mkdir()
+        (outside / "save.json").write_text("{}", encoding="utf-8")
+
+        for bad in ("..", "../чужое", "чужое", "", "save.json",
+                    saved["id"] + "/.."):
+            with self.subTest(name=bad):
+                meta, told = show.load_save(bad)
+                self.assertIsNone(meta)
+                self.assertTrue(told)
+                done, told = show.delete_save(bad)
+                self.assertFalse(done)
+                self.assertTrue(told)
+
+        self.assertTrue((outside / "save.json").is_file(), "чужую папку тронули")
+        self.assertTrue((self.saves / saved["id"]).is_dir(), "сохранение удалили чужой рукой")
+
+    def test_deleting_a_save_removes_only_it(self):
+        """Удаляется только выбранное сохранение."""
+        self._play_with_a_picture()
+        first, error = show.save_play("первая")
+        self.assertEqual(error, "")
+        second, error = show.save_play("вторая")
+        self.assertEqual(error, "")
+
+        done, error = show.delete_save(first["id"])
+
+        self.assertTrue(done, error)
+        self.assertFalse((self.saves / first["id"]).exists())
+        self.assertTrue((self.saves / second["id"]).is_dir(), "удалилось лишнее")
+        self.assertEqual([one["name"] for one in show.list_saves()], ["вторая"])
+
+
 class TestProblemMessages(unittest.TestCase):
 
     def test_missing_models_are_named_with_pull_commands(self):
@@ -7515,13 +8467,27 @@ class TestPageScript(unittest.TestCase):
         self.assertEqual(out, [False, True, True, False])
 
     def test_the_show_price_is_named_or_silent_when_there_is_nothing_to_pay(self):
-        """Строка цены для сайдбара: с копейками, а на нуле — пустая."""
+        """Строка цены для сайдбара: с копейками, а на нуле — пустая.
+
+        Рядом с ценой — остаток на ключе (см. web.shown_balance): цена говорит,
+        сколько ушло, а остаток — сколько есть, и это одно и то же знание
+        о деньгах. Остаток виден и без цены: у местного спектакля тратить
+        нечего, а знать, чем располагаешь, всё равно нужно.
+        """
         out = self._run_in_node("spentLine({spent: 12.5})", "spentLine({spent: 0})",
-                                "spentLine({})")
+                                "spentLine({})", "spentLine({spent: 12.5, balance: 97.5})",
+                                "spentLine({spent: 0, balance: 97.5})",
+                                "spentLine({balance: 0})")
         self.assertIn("за спектакль", out[0])
         self.assertIn("12,50 ₽", out[0])
+        self.assertNotIn("на ключе", out[0], "остатка не знаем — и не выдумываем его")
         self.assertEqual(out[1], "", "нечего было тратить — нечего и показывать")
         self.assertEqual(out[2], "")
+        self.assertIn("за спектакль 12,50 ₽", out[3])
+        self.assertIn("на ключе 97,50 ₽", out[3])
+        self.assertNotIn("за спектакль", out[4], "тратить было нечего")
+        self.assertIn("на ключе 97,50 ₽", out[4], "а остаток всё равно виден")
+        self.assertIn("на ключе 0,00 ₽", out[5], "пустой ключ — это тоже ответ")
 
     def test_a_broken_link_is_named_instead_of_the_model_thinking(self):
         """Связи нет — и в сайдбаре сказано про связь, а не «думает».
@@ -7761,18 +8727,156 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("updatePosts()", start[start.index("data.replay"):],
                       "ленту надо перечитать с сервера, а не ждать опроса")
 
+    def test_a_changed_avatar_repaints_the_old_replies_at_once(self):
+        """Смена аватара — правка состава: лицо меняется у всех прежних реплик сразу.
+
+        Лицо — свойство места, а не реплики (см. show.post_view). Проверяю тем же
+        кодом, что уедет в браузер: и разметку лица, и перерисовку. Раньше
+        переписывался один только значок эмодзи, поэтому у реплик с портретом
+        лицо оставалось прежним, а у новых реплик — новым: аватар выглядел
+        свойством реплики.
+        """
+        out = self._run_page(
+            ("escapeHtml", "avatarHtml", "postAvatarHtml", "refreshAvatars"),
+            "(() => {"
+            " cast = [{display_name: 'Мария', avatar_emoji: '👩🔬',"
+            "          avatar_url: '/avatars/maria.jpg'},"
+            "         {display_name: 'Пётр', avatar_emoji: '🐺', avatar_url: null}];"
+            " const spot = name => ({dataset: {avatarFor: name}, outerHTML: ''});"
+            " const posts = [spot('Мария'), spot('Пётр'), spot('Ушедший')];"
+            " posts[0].outerHTML = avatarHtml(null, '🦊', 'Мария');"
+            " posts[1].outerHTML = avatarHtml(null, '🐺', 'Пётр');"
+            " posts[2].outerHTML = avatarHtml(null, '🐘', 'Ушедший');"
+            " globalThis.document = {querySelectorAll: () => posts};"
+            " refreshAvatars('Мария');"
+            " return [posts[0].outerHTML, posts[1].outerHTML, posts[2].outerHTML];"
+            " })()")
+        maria, peter, gone = out[0]
+
+        self.assertIn('<img src="/avatars/maria.jpg"', maria,
+                      "новый портрет места обязан встать и в прежние реплики")
+        self.assertIn('data-avatar-for="Мария"', maria,
+                      "без приметы следующая смена аватара эту реплику не найдёт")
+        self.assertIn('🐺', peter, "чужое лицо смена не трогает")
+        self.assertIn('🐘', gone, "ушедший из труппы остаётся со своим лицом")
+
+    def test_a_reply_takes_its_face_from_the_cast_until_the_place_leaves(self):
+        """Лицо берётся у состава, а у ушедшего из труппы остаётся своё.
+
+        И обратно: снятый портрет возвращает лицу эмодзи — и в ленте тоже,
+        а не только у следующих реплик.
+        """
+        out = self._run_page(
+            ("escapeHtml", "avatarHtml", "postAvatarHtml", "refreshAvatars"),
+            "(() => {"
+            " const said = {display_name: 'Мария', avatar_emoji: '🦊',"
+            "              avatar_url: '/avatars/old.jpg'};"
+            " const saidByEmoji = {display_name: 'Пётр', avatar_emoji: '🐘', avatar_url: null};"
+            " cast = [{display_name: 'Мария', avatar_emoji: '👩🔬', avatar_url: null}];"
+            " const fromCast = postAvatarHtml(said);"
+            " cast = [];"
+            " const goneWithFace = postAvatarHtml(said);"
+            " const goneWithEmoji = postAvatarHtml(saidByEmoji);"
+            " const spot = {dataset: {avatarFor: 'Мария'},"
+            "               outerHTML: avatarHtml('/avatars/old.jpg', '🦊', 'Мария')};"
+            " cast = [{display_name: 'Мария', avatar_emoji: '👩🔬', avatar_url: null}];"
+            " globalThis.document = {querySelectorAll: () => [spot]};"
+            " refreshAvatars();"
+            " return [fromCast, goneWithFace, goneWithEmoji, spot.outerHTML];"
+            " })()")
+        from_cast, gone_with_face, gone_with_emoji, repainted = out[0]
+
+        self.assertIn('👩🔬', from_cast, "лицо берётся у места, а не у реплики")
+        self.assertNotIn('/avatars/old.jpg', from_cast, "снятый портрет больше не лицо")
+        self.assertIn('/avatars/old.jpg', gone_with_face,
+                      "у ушедшего из состава лицо остаётся своё — тот портрет, с которым он говорил")
+        self.assertIn('🐘', gone_with_emoji, "и свой эмодзи тоже остаётся")
+        self.assertIn('👩🔬', repainted, "без имени перерисовываются все реплики")
+        self.assertNotIn('/avatars/old.jpg', repainted,
+                         "и портрет уходит с экрана вместе с составом")
+
+    def test_the_picture_is_attached_to_the_human_reply(self):
+        """Приложить картинку можно к реплике человека — откуда её и берут модели.
+
+        Файл читает браузер и отправляет адресом-данными: на сервере он проверяется
+        и ложится в папку экземпляра (см. show.save_upload), а вместе с репликой
+        уезжает тем моделям, которые картинки читают. Наборов без этой дороги
+        проверить нельзя — ошибка тут видна только зрителю: кнопки есть, а файл
+        никуда не идёт.
+        """
+        source = page.HTML_TEMPLATE
+        self.assertIn('id="fileInput"', source, "выбрать файл нечем")
+        self.assertIn('accept="image/*"', source, "прикладывать можно только картинки")
+        self.assertIn('id="attachChips"', source, "приложенное должно быть видно до отправки")
+        self.assertIn('onclick="pickFiles()"', source)
+        self.assertIn("'/api/upload'", source, "файл некуда послать")
+
+        send = self._function("sendModeratorMessage")
+        self.assertIn("attachments: attachments", send,
+                      "реплика уезжает без приложенного")
+        self.assertLess(send.index("const attachments"), send.index("fetch("),
+                        "собирать приложения надо до отправки")
+        self.assertIn("pendingUploads = []", send,
+                      "приложение должно уехать ровно с одной репликой")
+
+        # Приложенное видно в самой ленте: иначе непонятно, о чём была реплика
+        self.assertIn("${postAttachmentsHtml(post)}", source)
+        self.assertIn("function postAttachmentsHtml(post)", source)
+
+    def test_the_sign_of_a_model_that_reads_pictures(self):
+        """«+» у модели значит: приложенное к реплике она правда увидит.
+
+        Считается тем же кодом, что уедет в браузер: и знак, и сама разметка
+        лица. Проверять есть что: «q1» и «q1:latest» — одна модель, а облачное
+        имя носит префикс «cloud:», и без него оно потеряло бы вендора.
+        """
+        out = self._run_page(
+            ("escapeHtml", "avatarHtml", "modelReadsImages", "visionMark",
+             "postAttachmentsHtml"),
+            "(() => {"
+            " visionModels = ['llava:latest', 'cloud:google/gemini-2.0-flash'];"
+            " return [visionMark(null, 'llava'), visionMark(null, 'qwen3'),"
+            "         visionMark({reads_images: true}, 'qwen3'),"
+            "         visionMark(null, 'cloud:google/gemini-2.0-flash'),"
+            "         visionMark(null, 'human'), visionMark(null, ''),"
+            "         postAttachmentsHtml({attachments: [{name: 'схема.png',"
+            "           url: '/uploads/abc.png'}]}),"
+            "         postAttachmentsHtml({})];"
+            " })()")
+        llava, qwen, from_cast, gemini, human, empty, post, nothing = out[0]
+
+        self.assertIn('title="Читает картинки', llava, "у зоркой модели обязан быть знак")
+        self.assertEqual(qwen, "", "слепой модели знак не полагается")
+        self.assertIn('title="Читает картинки', from_cast,
+                      "состав знает про модель больше страницы — его ответ главнее")
+        self.assertIn('title="Читает картинки', gemini, "облачная модель тоже видна")
+        self.assertEqual(human, "", "живому участнику модель не приписывают")
+        self.assertEqual(empty, "")
+        self.assertIn('/uploads/abc.png', post, "приложенное не рисуется в ленте")
+        self.assertIn('схема.png', post)
+        self.assertEqual(nothing, "", "у обычной реплики ничего лишнего")
+
     def test_the_emoji_avatar_is_clickable_and_the_name_is_not_in_the_handler(self):
         """По эмодзи в ленте можно кликнуть — и имя уезжает в данные, а не в код.
 
         Имя — текст режиссёра: кавычка или апостроф в нём сломали бы обработчик,
-        нарисованный строкой (см. postAvatarHtml), а вместе с ним и все кнопки
-        ленты — как уже бывало с toggleTheme.
+        нарисованный строкой (см. avatarHtml — одна разметка лица на всё: и на
+        готовую реплику, и на черновик, и на перерисовку), а вместе с ним и все
+        кнопки ленты — как уже бывало с toggleTheme.
         """
-        avatar = self._function("postAvatarHtml")
+        avatar = self._function("avatarHtml")
         self.assertIn("data-emoji-for=", avatar)
+        self.assertIn("data-avatar-for=", avatar,
+                      "без этой приметы лицо нечем перерисовать (см. refreshAvatars)")
         self.assertNotIn("onclick=\"openEmojiPicker", avatar,
                          "имя в обработчике — это сломанный скрипт на кавычке в имени")
-        self.assertIn("avatar_url", avatar, "у картинки остаётся прежний клик")
+        self.assertIn("showAvatarFull", avatar, "у картинки остаётся прежний клик")
+        # Лицо реплики берётся у состава, а не у самой реплики: иначе аватар
+        # остался бы свойством реплики и у прежних реплик не менялся
+        post = self._function("postAvatarHtml")
+        self.assertIn("cast.find(p => p.display_name === post.display_name)", post)
+        self.assertIn("avatarHtml(url, emoji, post.display_name)", post,
+                      "разметка лица должна быть одна на все случаи")
 
         source = page.HTML_TEMPLATE
         self.assertIn('id="emojiMenuGrid"', source, "меню значков должно быть в разметке")
@@ -7783,6 +8887,149 @@ class TestPageScript(unittest.TestCase):
         editor = self._function("openAvatarModal")
         self.assertIn("openEmojiPicker", editor)
         self.assertIn("avatarModalImg", editor)
+
+    def test_a_paused_rule_is_recognized_by_the_page(self):
+        """Страница узнаёт паузу по той же пометке, что и театр (см. RULE_OFF_MARK).
+
+        Пометка хранится в тексте правила — значит, разбирать её приходится
+        обоим: театру — чтобы не говорить правило модели, странице — чтобы
+        показать его приглушённым и уметь вернуть обратно.
+        """
+        out = self._run_page(
+            ("ruleIsOff", "ruleText", "ruleToggleLabel"),
+            "ruleIsOff('⏸ Живо и по делу')",
+            "ruleIsOff('Живо и по делу')",
+            "ruleIsOff(null)",
+            "ruleText('⏸  Живо и по делу ')",
+            "ruleText('  Живо и по делу  ')",
+            "ruleText(null)",
+            "ruleToggleLabel(true)",
+            "ruleToggleLabel(false)",
+            constants=("RULE_OFF_MARK",))
+        self.assertEqual(out, [True, False, False,
+                               "Живо и по делу", "Живо и по делу", "", "▶", "⏸"],
+                         "страница и театр читают пометку «на паузе» по-разному")
+
+
+class TestRulesOnPause(unittest.TestCase):
+    """Правило можно снять на раунд, не удаляя: оно ждёт своего часа в списке.
+
+    Раньше единственным способом убрать правило было удаление — и текст
+    приходилось вспоминать или копировать себе на память. Теперь рядом с «❌»
+    стоит пауза: правило остаётся в редакторе и в файле, но спектаклю не
+    говорится (см. show.RULE_OFF_MARK). Пометка живёт в самом тексте правила,
+    поэтому пауза переживает и файл настроек, и архив, а хранилище как было
+    списком строк, так и осталось.
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.page = page.HTML_TEMPLATE
+
+    def test_a_paused_rule_is_named_and_its_text_comes_back_whole(self):
+        """Пометка — это знак паузы, а не часть правила."""
+        self.assertTrue(show.rule_is_off("⏸ Живо и по делу"))
+        self.assertFalse(show.rule_is_off("Живо и по делу"))
+        self.assertFalse(show.rule_is_off(""))
+        self.assertEqual(show.rule_text("⏸  Живо и по делу "), "Живо и по делу")
+        self.assertEqual(show.rule_text("Живо и по делу"), "Живо и по делу")
+        self.assertEqual(show.rules_in_force(["Живо", "⏸ Побольше ругани", "  "]),
+                         ["Живо"], "выключенное или пустое правило уехало в промпт")
+
+    def test_a_paused_rule_does_not_reach_the_model(self):
+        """Пока правило на паузе, спектаклю оно не говорится — и всем сразу."""
+        self.session.static_instructions = ["Живо и по делу", "⏸ Побольше ругани"]
+        self.session.moderator_guidelines = ["Не спорь с режиссёром", "⏸ Судья молчит"]
+        self.session.judge_rules = ["Оценивай строго", "⏸ Хвали всех"]
+
+        participant = self.session.get_system_prompt(plain_participant(self.session))
+        judge = self.session.get_system_prompt(judge_of(self.session))
+
+        self.assertIn("Живо и по делу", participant)
+        self.assertIn("Не спорь с режиссёром", participant)
+        self.assertNotIn("Побольше ругани", participant,
+                         "правило на паузе уехало модели")
+        self.assertNotIn("Судья молчит", participant,
+                         "выключенное руководство уехало модели")
+        self.assertIn("Оценивай строго", judge)
+        self.assertNotIn("Хвали всех", judge, "выключенное правило судьи уехало судье")
+        self.assertNotIn(show.RULE_OFF_MARK, participant,
+                         "служебная пометка уехала в промпт")
+
+    def test_all_rules_on_pause_mean_no_rules_at_all(self):
+        """Пустой список правил — это дефолты из `settings.py`, а все на паузе — нет.
+
+        Разница важная: выключив всё, режиссёр просил молчания, а не возврата
+        к настройкам, которые он только что снял.
+        """
+        fresh = show.DebateSession()
+        self.assertEqual(fresh.rules_of_communication(),
+                         list(settings.DEFAULT_STATIC_INSTRUCTIONS),
+                         "правил не задавали — значит работают дефолтные")
+
+        self.session.static_instructions = ["⏸ Одно", "⏸ Два"]
+        self.assertEqual(self.session.rules_of_communication(), [],
+                         "всё на паузе — а правила вернулись из дефолтов")
+        self.assertEqual(self.session._base_rules_block(
+            plain_participant(self.session)), [],
+            "выключенные правила доехали до модели")
+
+    def test_the_pause_survives_the_settings_file(self):
+        """Пауза — часть пульта: после перезапуска правило всё ещё ждёт своего часа."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            with mock.patch.object(settings, "SETTINGS_FILE", path):
+                self.session.static_instructions = ["Живо", "⏸ Побольше ругани"]
+                show.save_theatre_settings("правила")
+                stored = json.loads(path.read_text(encoding="utf-8"))
+                self.session.static_instructions = []
+                show.load_theatre_settings()
+
+        self.assertEqual(stored["static_instructions"], ["Живо", "⏸ Побольше ругани"])
+        self.assertEqual(self.session.static_instructions,
+                         ["Живо", "⏸ Побольше ругани"])
+        self.assertTrue(show.rule_is_off(self.session.static_instructions[1]),
+                        "вернувшееся правило потеряло паузу — и снова уехало модели")
+        self.assertEqual(self.session.rules_of_communication(), ["Живо"])
+
+    def test_the_editor_gets_the_marks_and_the_sidebar_does_not(self):
+        """Редактору — список как есть (по пометке он рисует паузу), сайдбару — нет.
+
+        Сайдбар перечисляет то, что правда говорится моделям, поэтому выключенное
+        правило оттуда уходит — но с оговоркой, сколько их на паузе, иначе оно
+        выглядит пропавшим, а не выключенным.
+        """
+        self.session.static_instructions = ["Живо", "⏸ Побольше ругани"]
+        with web_app.app.test_client() as client:
+            editor = client.get("/api/moderator/instructions").get_json()
+
+        self.assertEqual(editor["static_instructions"], ["Живо", "⏸ Побольше ругани"],
+                         "редактору нужен список как есть: по пометке рисуется пауза")
+        self.assertIn("pausedRules", self.page, "сайдбар молчит про паузы")
+        self.assertIn("!ruleIsOff(rule)", self.page, "в сайдбар уехало выключенное правило")
+
+    def test_the_pause_button_stands_next_to_the_delete_one(self):
+        """Пауза — рядом с удалением, а не вместо него."""
+        for control in ("toggleRuleRow", "setRuleRowOff", "collectRuleRows",
+                        "removeRuleRow"):
+            with self.subTest(control=control):
+                self.assertIn(control, self.page, f"в пульте нет управления {control}")
+        self.assertIn("const RULE_OFF_MARK = '⏸';", self.page)
+        self.assertIn("RULE_OFF_MARK + ' ' + text", self.page,
+                      "нажатая пауза не уехала бы на сервер: правило стало бы рабочим")
+        self.assertIn("${ruleToggleLabel(off)}", self.page,
+                      "кнопка паузы показывает не то состояние: у правила на паузе — «▶»")
+        self.assertIn(".rule-row.rule-off textarea", self.page,
+                      "отключённое правило ничем не отличается от рабочего")
+        self.assertIn("rule-row${off ? ' rule-off' : ''}", self.page,
+                      "приглушённый вид ставится только по нажатию: правило,\n"
+                      "пришедшее с паузой из файла, выглядит рабочим")
+        for editor in ("staticInstructionsEditor", "moderatorMessagesEditor",
+                       "judgeRulesEditor"):
+            with self.subTest(editor=editor):
+                self.assertIn(f"collectRuleRows('{editor}')", self.page,
+                              f"{editor}: отключённое правило уехало бы рабочим")
 
 
 if __name__ == "__main__":

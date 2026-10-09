@@ -119,6 +119,10 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         # ход (см. show._note_money), а не страница: тарифов не знает никто,
         # а остаток знает только шлюз
         "spent": round(float(show.session.spent or 0.0), 2),
+        # И сколько на ключе осталось: цена говорит, сколько ушло, а остаток —
+        # сколько есть. Это одно и то же знание о деньгах, и держать его врозь
+        # незачем (см. shown_balance)
+        "balance": shown_balance(),
         # Какой это запуск театра: по нему открытая страница замечает перезапуск
         # и собирается заново — иначе она остаётся с прежним спектаклем
         # и прежней вёрсткой (см. SERVER_BOOT)
@@ -142,6 +146,24 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
     if with_posts:
         payload["posts"] = [show.post_view(p) for p in show.session.posts]
     return payload
+
+
+def shown_balance():
+    """Остаток на ключе — тот, что уже получен, а не новый запрос по каждому кругу.
+
+    Цена хода читает остаток заново (разницу иначе не сосчитать), а для показа
+    довольно недавнего ответа: спрашивать его на трёхсекундном опросе значило бы
+    ходить в шлюз чаще, чем говорит спектакль (см. CLOUD_BALANCE_TTL). И только
+    там, где в труппе есть облачная модель: у местного спектакля платить не за
+    что, и остаток на ключе к нему не относится.
+    """
+    if not cloud.balance_url() or not cloud.is_configured():
+        return None
+    cast = show.session.runtime_participants or settings.PARTICIPANTS
+    if not any(cloud.is_cloud_model(p.get("model", "")) for p in cast):
+        return None
+    reading, _error = cloud.balance()
+    return cloud.balance_number(reading)
 
 
 def publish_status():
@@ -215,6 +237,29 @@ def favicon():
 def serve_avatar(filename):
     return send_from_directory(settings.AVATAR_DIR, filename)
 
+
+@app.route('/uploads/<path:filename>')
+def serve_upload(filename):
+    """Приложенная к реплике картинка: её видно и в ленте, и в превью набора."""
+    return send_from_directory(settings.UPLOAD_DIR, filename)
+
+
+@app.route('/api/upload', methods=['POST'])
+def upload_attachment():
+    """Приложить картинку к реплике человека.
+
+    Файл приходит адресом-данными (base64): так в одном теле едет и содержимое,
+    и имя файла, и не приходится разбирать границы формы. Проверки — в show.save_upload:
+    там же решается, какая это картинка на самом деле (по содержимому, а не по
+    расширению файла) и не больше ли она предела.
+    """
+    data = request.get_json(silent=True) or {}
+    attachment, error = show.save_upload(str(data.get("name", "") or ""),
+                                         str(data.get("data_url", "") or ""))
+    if error:
+        return jsonify({"success": False, "error": error}), 400
+    return jsonify({"success": True, **attachment})
+
 @app.route('/api/static_instructions')
 def get_static_instructions():
     """Возвращает дефолтные статичные инструкции"""
@@ -228,11 +273,18 @@ def get_models():
     # Облачные идут отдельным списком: в пульте они будут своей группой, чтобы
     # было видно, куда уйдёт реплика — в свой компьютер или в интернет
     cloud_state = cloud.status()
+    cloud_names = [cloud.cloud_model_id(n) for n in cloud_state["models"]]
     return jsonify({
         "models": names,
         # Кто из моделей умеет размышлять: интерфейс не даст включить это там, где нельзя
         "thinking_models": [n for n in names if ollama_api.model_supports_thinking(n)],
-        "cloud_models": [cloud.cloud_model_id(n) for n in cloud_state["models"]],
+        # Кто читает картинки: рядом с такой моделью стоит «+», и это же решает,
+        # уедет ли ей приложенное к реплике (см. ollama_api.messages_for). Облачные
+        # в этом же списке: у них спрашивать некого, но по имени видно (см. cloud)
+        "vision_models": ([n for n in names if ollama_api.model_supports_vision(n)]
+                          + [cloud.cloud_model_id(n) for n in cloud_state["models"]
+                             if cloud.model_reads_images(n)]),
+        "cloud_models": cloud_names,
         "cloud": {"configured": cloud_state["configured"],
                   "base_url": cloud_state["base_url"],
                   "error": cloud_state["error"]},
@@ -266,6 +318,9 @@ def cast_payload() -> list:
         item = dict(p)
         # Роль одним словом: странице так проще, чем два флага
         item["role"] = show.cast_role(p)
+        # И одно слово про картинки: «+» у модели значит, что приложенное к
+        # реплике она правда увидит (для облачной это догадка по имени, см. cloud)
+        item["reads_images"] = ollama_api.model_supports_vision(p.get("model", ""))
         if p.get("model") != "human":
             merged = ollama_api._merge_options(p)
             item["effective_options"] = {
@@ -288,6 +343,28 @@ def saved_payload() -> dict:
     пустой словарь страница молча пропустит.
     """
     return {"saved": show.last_settings_write()}
+
+
+@app.route('/api/vision/check', methods=['POST'])
+def check_vision():
+    """Спросить про картинки у всех моделей состава — до спектакля, а не на ходу.
+
+    У местной модели способность видна в `capabilities` Ollama, а у облачной
+    её иначе не узнать, чем спросив самого шлюза пробной картинкой
+    (см. cloud.probe_images) — это запрос, и он стоит денег. Поэтому и кнопкой:
+    спрашивают один раз и по своему решению, а не тихо на каждом ходу.
+    """
+    checked = []
+    for participant in show.session.runtime_participants or settings.PARTICIPANTS:
+        model = str((participant or {}).get("model") or "")
+        if not model or model == "human":
+            # Живому участнику читать картинки нечем: он их и прикладывает
+            continue
+        checked.append({"name": participant.get("display_name") or model,
+                        "model": model,
+                        "reads_images": ollama_api.takes_images(model)})
+    return jsonify({"success": True, "checked": checked,
+                    "reads": sum(1 for one in checked if one["reads_images"])})
 
 
 @app.route('/api/participant/emoji', methods=['POST'])
@@ -584,9 +661,19 @@ def handle_request_status():
 
 @app.route('/api/moderator/message', methods=['POST'])
 def moderator_message():
+    """Реплика режиссёра — и реплика живого участника, когда очередь за ним.
+
+    Вместе с текстом едут приложенные картинки: они часть этой же реплики, а не
+    отдельное сообщение (см. play_show и show.save_upload). Проверяются они
+    здесь же — адрес приходит из формы, и по нему нельзя прочитать любой файл
+    на диске (см. show.upload_files).
+    """
     data = request.get_json(silent=True) or {}
     show.session.moderator_message = data.get("message", "") or ""
-    return jsonify({"success": True})
+    attachments = show.upload_files(data.get("attachments") or [])
+    if attachments:
+        show.session.pending_attachments = attachments
+    return jsonify({"success": True, "attachments": attachments})
 
 @app.route('/api/moderator/topic', methods=['POST'])
 def moderator_topic():
@@ -684,6 +771,48 @@ def update_moderator_instructions():
     show.save_theatre_settings("правила и инструкции")
 
     return jsonify({"success": True, **saved_payload()})
+
+@app.route('/api/saves', methods=['GET'])
+def saves():
+    """Архив спектаклей: что сохранено, когда и где лежит.
+
+    Папка архива отдаётся странице не ради красоты: сохранения лежат вне порта
+    (см. settings.SAVES_DIR), и найти их на диске иначе неоткуда.
+    """
+    return jsonify({"success": True, "saves": show.list_saves(),
+                    "dir": str(settings.SAVES_DIR)})
+
+
+@app.route('/api/saves/save', methods=['POST'])
+def save_show():
+    """Сохранить нынешний спектакль в архив — под именем, которое дал режиссёр."""
+    data = request.get_json(silent=True) or {}
+    saved, error = show.save_play(str(data.get("name", "") or ""))
+    if error:
+        return jsonify({"success": False, "error": error}), 400
+    return jsonify({"success": True, "saved": saved, "saves": show.list_saves()})
+
+
+@app.route('/api/saves/load', methods=['POST'])
+def load_show():
+    """Вернуть сохранённый спектакль на сцену этого порта — со всей историей."""
+    data = request.get_json(silent=True) or {}
+    loaded, error = show.load_save(str(data.get("id", "") or ""))
+    if error:
+        return jsonify({"success": False, "error": error}), 400
+    return jsonify({"success": True, "loaded": loaded,
+                    "topic": show.session.topic, "posts": len(show.session.posts)})
+
+
+@app.route('/api/saves/delete', methods=['POST'])
+def delete_show():
+    """Удалить сохранение — когда спектакль уже точно не нужен."""
+    data = request.get_json(silent=True) or {}
+    done, error = show.delete_save(str(data.get("id", "") or ""))
+    if not done:
+        return jsonify({"success": False, "error": error}), 400
+    return jsonify({"success": True, "saves": show.list_saves()})
+
 
 @app.route('/api/shutdown', methods=['POST'])
 def shutdown():

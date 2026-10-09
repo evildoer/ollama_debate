@@ -425,13 +425,162 @@ def openai_messages(messages: list, keep_names: bool = False) -> list:
                 # шлюз считает ошибкой
                 item = {"role": "user", "content": content}
         else:
-            item = {"role": role if role in _OPENAI_ROLES else "user", "content": content}
+            item = {"role": role if role in _OPENAI_ROLES else "user",
+                    "content": pictures_content(content, message.get("images"))}
 
         if keep_names and message.get("name"):
             item["name"] = str(message["name"])
         result.append(item)
 
     return result
+
+
+# Приметы моделей со зрением — в имени. Это только первое слово: список моделей
+# у шлюза — одни имена, и способностей в нём нет (у Ollama это /api/show →
+# capabilities). Знакомые слова (gpt-4o, gemini, qwen-vl, llava) говорят,
+# что картинки читаются, — но имена вендоры пишут по своим линейкам, и свежая
+# «-flash» может и читать, и нет. Поэтому догадка тут же и проверяется опытом
+# (см. probe_images): ошибиться в догадке не страшно — ошибиться в проверке нельзя
+VISION_NAME_MARKS = ("gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-5", "o3", "o4",
+                     "chatgpt-4o", "claude-3", "claude-4", "claude-5", "claude-sonnet",
+                     "claude-opus", "claude-haiku", "gemini", "llava", "vision",
+                     "multimodal", "pixtral", "gemma-3", "gemma3", "internvl",
+                     "minicpm-v", "glm-4v", "glm-4.1v", "step-1v", "grok-2",
+                     "grok-3", "grok-4", "-vl-", ":vl", "/vl-", "qwen-vl",
+                     "mistral-small-3", "phi-3-vision", "phi-4-multimodal")
+
+
+# Что мы знаем про картинки у облачных моделей: имя (без «cloud:») -> True/False.
+# Заполняется опытом (см. probe_images): у шлюза способностей не спросить,
+# а имя — не примета (у одного вендора «flash» картинки читает, у другого нет).
+# Живёт в файле экземпляра, а не только в памяти: проверка — это запрос, и он
+# стоит денег, поэтому делается раз на модель, а не раз на запуск
+_IMAGE_READERS = {}
+_VISION_LOADED = False
+
+# Картинка для проверки: синий пиксель 1x1. Модели с глазами и этого хватает,
+# чтобы ответить «синий»; модель без зрения на такое сообщение отвечает отказом
+# (его и ловим). Размер тут ни при чём — важно, что картинка есть вовсе
+TINY_PICTURE = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
+                "AAAADElEQVR42mNgYPgPAAEDAQA2dBFAAAAAAElFTkSuQmCC")
+
+
+def load_image_readers() -> None:
+    """Прочитать, что мы уже знаем о картинках у облачных моделей (один раз)."""
+    global _VISION_LOADED
+    if _VISION_LOADED:
+        return
+    _VISION_LOADED = True
+    try:
+        if settings.VISION_FILE.exists():
+            data = json.loads(settings.VISION_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _IMAGE_READERS.update({str(k): bool(v) for k, v in data.items()})
+    except Exception as e:
+        print(f"  ⚠️  Не читается {settings.VISION_FILE.name}: {e}")
+
+
+def save_image_readers() -> None:
+    try:
+        settings.VISION_FILE.write_text(
+            json.dumps(_IMAGE_READERS, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"  ⚠️  Не сохраняется {settings.VISION_FILE.name}: {e}")
+
+
+# Ответы шлюза, из которых видно, что дело в самой картинке: запрос до модели
+# не дошёл и разобрать её некому. Остальные коды (401, 402, 429, 500) про
+# способности модели не говорят ничего (см. probe_images)
+_PICTURE_REFUSAL_CODES = (400, 415, 422)
+
+
+def images_known(model: str) -> bool:
+    """Знаем ли про эту модель правду — а не только догадку по имени (см. probe_images)."""
+    load_image_readers()
+    return bare_model_name(model) in _IMAGE_READERS
+
+
+def probe_images(model: str):
+    """Спросить у шлюза, читает ли эта модель картинки: True/False, иначе None.
+
+    Так проверка идёт до отправки, а не после: узнанное запоминается навсегда
+    (в памяти и в файле экземпляра, см. settings.VISION_FILE), поэтому за неё
+    платят один раз на модель — это и есть «не получать ошибку каждый раз».
+    Ошибка тут читается по-разному: отказ по самой картинке (шлюз называет её
+    причиной, обычно 400) — это «не читает», а молчание ключа и обрыв связи —
+    «не знаем»: запомнить такое значило бы навсегда связать модель по рукам.
+    Заканчивается всё равно ответом: и то, что модель сказала, и то, что
+    шлюз отказал, — уже правда (см. ollama_api.takes_images).
+    """
+    load_image_readers()
+    name = bare_model_name(model)
+    if name in _IMAGE_READERS:
+        return _IMAGE_READERS[name]
+    if not is_configured():
+        return None
+
+    answer, error = _request("chat/completions", method="POST", payload={
+        "model": name, "stream": False,
+        "messages": openai_messages([{
+            "role": "user",
+            "content": "Ответь одним словом: какого цвета эта картинка?",
+            "images": [TINY_PICTURE]}])})
+    if error:
+        code = getattr(error, "code", None)
+        if code not in _PICTURE_REFUSAL_CODES:
+            # Ключ, баланс, связь, чужой тупик шлюза: про картинки это ничего
+            # не говорит, поэтому остаёмся при догадке по имени (см. ниже)
+            print(f"  🔎 Не удалось спросить у шлюза про картинки "
+                  f"({bare_model_name(model)}): {hide_key(str(error))[:120]}")
+            return None
+        reads = False
+    else:
+        reads = True
+
+    _IMAGE_READERS[name] = reads
+    save_image_readers()
+    print(f"  🔎 Спросил у шлюза: {name} картинки "
+          f"{'читает' if reads else 'не читает'} — запомнил")
+    return reads
+
+
+def model_reads_images(model: str) -> bool:
+    """Читает ли облачная модель картинки.
+
+    Знаем точно — говорим точно (это проверено опытом, см. probe_images).
+    Не знаем — догадка по имени (VISION_NAME_MARKS): у «gemini» и «gpt-4o»
+    картинки читаются, а вот свежая «-flash» может и читать, и нет — на этом
+    основании рубить модель нельзя, поэтому догадка тут только первое слово,
+    а решает дело проверка. Префикс «cloud:» и вендор в имени не решают ничего:
+    примета ищется в самом имени внутри («google/gemini» — да, «qwen/qwen3-flash» —
+    по приметам нет, хотя читает)
+    """
+    load_image_readers()
+    name = bare_model_name(model).lower()
+    if name in _IMAGE_READERS:
+        return _IMAGE_READERS[name]
+    return any(mark in name for mark in VISION_NAME_MARKS)
+
+
+def pictures_content(content, images) -> object:
+    """Содержимое сообщения с картинками — в виде OpenAI.
+
+    У Ollama картинки лежат полем images рядом с текстом, у OpenAI — частями
+    внутри content: сначала текст, потом данные картинки. Проверять, читает ли
+    модель картинки, здесь некого (это делает ollama_api.messages_for): шлюз
+    про способности своей модели молчит.
+    """
+    pictures = [one for one in (images or []) if isinstance(one, str) and one]
+    if not pictures:
+        return content
+    parts = []
+    if content:
+        parts.append({"type": "text", "text": content})
+    parts.extend({"type": "image_url",
+                  "image_url": {"url": one if one.startswith("data:")
+                                else f"data:image/png;base64,{one}"}}
+                 for one in pictures)
+    return parts
 
 
 def is_cloud_model(model: str) -> bool:
@@ -724,6 +873,45 @@ def named_field(text: str) -> str:
     return found.group(1) if found else ""
 
 
+# Слова, которыми шлюз говорит, что дело в самой картинке: разобрать её он не смог
+# или модель её не принимает. Разбирать тут нечего — приложенное убирается
+# (см. _eased_body), а модель запоминается слепой
+_PICTURE_MARKS = ("load image", "load the image", "invalid image", "image too",
+                  "failed to load image", "does not support image",
+                  "doesn't support image", "images are not supported",
+                  "unsupported image", "cannot read image", "image_url")
+
+
+def picture_refused(text: str) -> bool:
+    """Похоже ли, что шлюз отказал из-за приложенной картинки."""
+    asked = (text or "").lower()
+    return any(mark in asked for mark in _PICTURE_MARKS)
+
+
+def pictures_in(body: dict) -> bool:
+    """Есть ли в теле запроса картинки — они лежат частями внутри content (OpenAI)."""
+    for message in (body or {}).get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url"
+                for part in content):
+            return True
+    return False
+
+
+def without_pictures(body: dict) -> dict:
+    """То же тело запроса, но без картинок — и без пустых частей, в которые они были вложены."""
+    messages = []
+    for message in (body or {}).get("messages") or []:
+        content = message.get("content")
+        if isinstance(content, list):
+            spoken = " ".join(str(part.get("text") or "") for part in content
+                              if isinstance(part, dict) and part.get("type") == "text").strip()
+            message = {**message, "content": spoken or "(приложение не приложилось)"}
+        messages.append(message)
+    return {**body, "messages": messages}
+
+
 def _eased_body(model: str, body: dict, error):
     """Тело запроса без того, на что шлюз пожаловался (или None).
 
@@ -741,6 +929,14 @@ def _eased_body(model: str, body: dict, error):
     то есть выключить их выборочно было нельзя, и ход пропадал на каждом круге.
     Теперь названное поле убирается из тела и запоминается для этой модели.
 
+    И еще одна причина — приложенная к реплике картинка: шлюз отвечает
+    «Failed to load image» (не разобрал файл) или «does not support image»
+    (модель её не принимает). Ход из-за приложенного пропадать не должен:
+    тот же запрос уходит без картинок, а модель запоминается слепой — в
+    следующий раз они ей не поедут вовсе (см. probe_images). Иначе редко
+    встречающийся файл или модель-обманщик убивали бы каждый ход, где есть
+    приложение
+
     Третья. Если запрос с инструментом поиска не проходит, а такой же без него
     проходит — модель его не принимает. Признаком этого делится вызывающий:
     он видит, что запрос без инструмента удался (см. _MODELS_WITHOUT_TOOLS).
@@ -754,6 +950,15 @@ def _eased_body(model: str, body: dict, error):
     """
     text = str(error)
     named = named_field(text)
+
+    # Приложенная картинка: убираем её и повторяем — реплика важнее приложения
+    if pictures_in(body) and picture_refused(text):
+        name = bare_model_name(model)
+        _IMAGE_READERS[name] = False
+        save_image_readers()
+        print(f"  🖼  Облако: {name} не открыла приложенную картинку — "
+              f"повторяю реплику без неё, и больше этой модели картинок не шлю")
+        return without_pictures(body)
 
     # max_tokens — не лишнее поле, а другое его имя, и шлюз прямо это пишет
     if "max_tokens" in body and (named == "max_tokens" or "max_completion_tokens" in text):

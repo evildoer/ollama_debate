@@ -1143,7 +1143,7 @@ BUGS = {
     ],
     "под-версия записи снова стала нечитаемой": [
         ("aitheatre/show.py",
-         "DUMP_FORMATS_READABLE = (4, 3)",
+         "DUMP_FORMATS_READABLE = (5, 4, 3)",
          "DUMP_FORMATS_READABLE = (DUMP_FORMAT,)"),
     ],
     "о чужом формате снова не спрашивают, а догадываются": [
@@ -1282,9 +1282,221 @@ BUGS = {
     "клик по эмодзи-аватару в ленте снова не работает": [
         ("aitheatre/page.py",
          """
-                : `<div class="emoji" data-emoji-for="${escapeHtml(post.display_name)}" title="Клик — сменить эмодзи-аватар">${emoji}</div>`;""",
+                : `<div class="emoji" ${marks} data-emoji-for="${who}" title="Клик — сменить эмодзи-аватар">${emoji}</div>`;""",
          """
                 : `<div class="emoji">${emoji}</div>`;"""),
+    ],
+    "смена аватара снова меняет лицо только у новых реплик": [
+        ("aitheatre/page.py",
+         """
+            document.querySelectorAll('[data-avatar-for]').forEach(spot => {
+                const who = spot.dataset.avatarFor;
+                if (name && who !== name) return;
+                const person = cast.find(p => p.display_name === who);
+                if (!person) return;
+                spot.outerHTML = avatarHtml(person.avatar_url || '',
+                                            person.avatar_emoji || '📣', who);
+            });""",
+         "\n            return;"),
+    ],
+    "приложенный файл снова принимают по расширению, а не по содержимому": [
+        ("aitheatre/show.py",
+         "    if kind not in settings.UPLOAD_TYPES:",
+         "    if False:"),
+    ],
+    "имя присланного файла снова попадает в путь": [
+        ("aitheatre/show.py",
+         '    filename = f"{uuid.uuid4().hex[:12]}{settings.UPLOAD_TYPES[kind]}"',
+         '    filename = str(name or "file.png")'),
+    ],
+    "слишком тяжёлое приложение снова ложится на диск": [
+        ("aitheatre/show.py",
+         "    if len(raw) > settings.MAX_UPLOAD_BYTES:",
+         "    if False:"),
+    ],
+    "по адресу приложения снова читают любой файл на диске": [
+        ("aitheatre/show.py",
+         "        if not (settings.UPLOAD_DIR / file).is_file():",
+         "        if False:"),
+    ],
+    "приложенное снова уезжает модели без зрения": [
+        ("aitheatre/ollama_api.py",
+         "    if takes_images(model, report):",
+         "    if True:"),
+    ],
+    "про картинки у шлюза снова не спрашивают": [
+        ("aitheatre/ollama_api.py",
+         "    told = cloud.probe_images(model)",
+         "    told = cloud.model_reads_images(model)"),
+    ],
+    "спрошенное у шлюза снова не помнят (спрашивают на каждом ходу)": [
+        ("aitheatre/cloud.py",
+         "    name = bare_model_name(model)\n    if name in _IMAGE_READERS:\n"
+         "        return _IMAGE_READERS[name]",
+         "    name = bare_model_name(model)\n    if False:\n"
+         "        return _IMAGE_READERS[name]"),
+    ],
+    "спрошенное снова остаётся только в памяти": [
+        ("aitheatre/cloud.py",
+         "    _IMAGE_READERS[name] = reads\n    save_image_readers()",
+         "    _IMAGE_READERS[name] = reads"),
+    ],
+    "нечитаемая картинка снова уносит реплику с собой": [
+        ("aitheatre/ollama_api.py",
+         "        if carries_pictures(messages) and cloud.picture_refused(error_body):",
+         "        if False:"),
+    ],
+    "кнопка зрения снова называет слепыми всех": [
+        ("aitheatre/web.py",
+         "                        \"reads_images\": ollama_api.takes_images(model)})",
+         "                        \"reads_images\": True})"),
+    ],
+    "живого участника снова спрашивают про зрение": [
+        ("aitheatre/web.py",
+         "        if not model or model == \"human\":",
+         "        if not model:"),
+    ],
+    "остаток на ключе снова просят у шлюза без надобности": [
+        ("aitheatre/web.py",
+         "    if not any(cloud.is_cloud_model(p.get(\"model\", \"\")) for p in cast):",
+         "    if False:"),
+    ],
+    "остатка на ключе снова нет в состоянии спектакля": [
+        ("aitheatre/web.py",
+         "        \"balance\": shown_balance(),",
+         "        \"balance\": None,"),
+    ],
+    "сохранение снова берёт только пульт, без истории": [
+        ("aitheatre/show.py",
+         "        if settings.DUMP_FILE.is_file():\n"
+         "            shutil.copyfile(settings.DUMP_FILE, folder / \"damp.md\")",
+         "        if False:\n"
+         "            shutil.copyfile(settings.DUMP_FILE, folder / \"damp.md\")"),
+    ],
+    "приложенные картинки снова не едут со спектаклем": [
+        ("aitheatre/show.py",
+         "        if settings.UPLOAD_DIR.is_dir():\n            target = folder / \"uploads\"",
+         "        if False:\n            target = folder / \"uploads\""),
+    ],
+    "сохранение без имени снова проходит": [
+        ("aitheatre/show.py",
+         "    if not name:\n        return None, \"сохранению нужно имя — по нему его потом и найдут\"",
+         "    if False:\n        return None, \"сохранению нужно имя — по нему его потом и найдут\""),
+    ],
+    "вернуть сохранение снова можно и на ходу": [
+        ("aitheatre/show.py",
+         "    if session.running:\n        return None, \"спектакль идёт: подожди до занавеса\"",
+         "    if False:\n        return None, \"спектакль идёт: подожди до занавеса\""),
+    ],
+    "имя сохранения снова ходит по чужим папкам": [
+        ("aitheatre/show.py",
+         "    if not save_id or save_id != Path(save_id).name or save_id.startswith(\".\"):",
+         "    if not save_id:"),
+    ],
+    "удаление сохранения снова уносит весь архив": [
+        ("aitheatre/show.py",
+         "        shutil.rmtree(folder)",
+         "        shutil.rmtree(settings.SAVES_DIR)"),
+    ],
+    "приложенное снова не едет в ДАМП": [
+        ("aitheatre/show.py",
+         "    pictures = \"\".join(line + \"\\n\" for line in attachment_lines(post))",
+         "    pictures = \"\""),
+    ],
+    "приложенное возвращается из ДАМПа без проверки файла": [
+        ("aitheatre/show.py",
+         "    return upload_files(found)",
+         "    return found"),
+    ],
+    "отказ шлюза по картинке снова уносит ход с собой": [
+        ("aitheatre/cloud.py",
+         "    if pictures_in(body) and picture_refused(text):",
+         "    if False:"),
+    ],
+    "обрыв связи снова запоминают как слепоту модели": [
+        ("aitheatre/cloud.py",
+         "        if code not in _PICTURE_REFUSAL_CODES:",
+         "        if False:"),
+    ],
+    "картинка снова едет отдельно от самой реплики": [
+        ("aitheatre/show.py",
+         "            if pairs and len(messages) > before:",
+         "            if False:"),
+    ],
+    "картинка снова уезжает модели на каждом ходу": [
+        ("aitheatre/show.py",
+         "            shown = self.images_shown.get(model, set()) if model else set()",
+         "            shown = set()"),
+    ],
+    "показанная картинка снова пропадает из реплики бесследно": [
+        ("aitheatre/show.py",
+         "            if stale and len(messages) > before:",
+         "            if False:"),
+    ],
+    "показанное снова отмечается в середине хода, а не в конце": [
+        ("aitheatre/show.py",
+         "        sending = self.images_pending.pop(model, None)",
+         "        sending = None"),
+    ],
+    "незрячей модели снова рассказывают о показанной картинке": [
+        ("aitheatre/show.py",
+         "        if sending and ollama_api.takes_images(model):",
+         "        if sending:"),
+    ],
+    "новый спектакль снова помнит, кому что было показано": [
+        ("aitheatre/show.py",
+         "        self.images_shown = {}\n        self.images_pending = {}",
+         "        pass"),
+    ],
+    "выключенное правило снова уезжает модели": [
+        ("aitheatre/show.py",
+         "            if str(line or \"\").strip() and not rule_is_off(line)]",
+         "            if str(line or \"\").strip()]"),
+    ],
+    "пометка «на паузе» снова едет в промпт вместе с правилом": [
+        ("aitheatre/show.py",
+         "    return written[len(RULE_OFF_MARK):].strip() if rule_is_off(written) else written",
+         "    return written"),
+    ],
+    "все правила на паузе — и снова работают дефолтные": [
+        ("aitheatre/show.py",
+         "        if not self.static_instructions:\n            return list(settings.DEFAULT_STATIC_INSTRUCTIONS)",
+         "        if not rules_in_force(self.static_instructions):\n            return list(settings.DEFAULT_STATIC_INSTRUCTIONS)"),
+    ],
+    "пауза снова теряется при записи пульта": [
+        ("aitheatre/show.py",
+         "                \"static_instructions\": list(session.static_instructions or []),",
+         "                \"static_instructions\": rules_in_force(session.static_instructions),"),
+    ],
+    "страница снова забывает пометить правило на паузе": [
+        ("aitheatre/page.py",
+         "                rules.push(row.dataset.off === '1' ? RULE_OFF_MARK + ' ' + text : text);",
+         "                rules.push(text);"),
+    ],
+    "правило с паузой снова выглядит рабочим": [
+        ("aitheatre/page.py",
+         "            return `<div class=\"rule-row${off ? ' rule-off' : ''}\" data-off=\"${off ? 1 : 0}\"",
+         "            return `<div class=\"rule-row\" data-off=\"${off ? 1 : 0}\""),
+    ],
+    "кнопка паузы снова показывает не то состояние": [
+        ("aitheatre/page.py",
+         "            return off ? '▶' : '⏸';",
+         "            return '⏸';"),
+    ],
+    "в сайдбаре снова видно выключенное правило": [
+        ("aitheatre/page.py",
+         "                const activeRules = rules.filter(rule => rule.trim() && !ruleIsOff(rule));",
+         "                const activeRules = rules.filter(rule => rule.trim());"),
+    ],
+    "приложенное к реплике снова не уезжает вместе с ней": [
+        ("aitheatre/page.py",
+         "body: JSON.stringify({message: input.value, attachments: attachments})",
+         "body: JSON.stringify({message: input.value})"),
+    ],
+    "у модели снова нет знака, что она читает картинки": [
+        ("aitheatre/page.py",
+         "            return visionModels.some(m => bare(m) === bare(name));",
+         "            return false;"),
     ],
     "меню эмодзи снова предлагает один набор всем": [
         ("aitheatre/page.py",

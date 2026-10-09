@@ -9,10 +9,12 @@
 модуль ничего не знает про Flask и Socket.IO.
 """
 
+import base64
 import copy
 import json
 import random
 import re
+import shutil
 import sys
 import threading
 import time
@@ -82,6 +84,38 @@ def _load_saved_instructions(data: dict):
         setattr(session, field, lines)
         if lines:
             print(f"📝 Загружены сохранённые {title}: {len(lines)} пунктов")
+
+
+# Отключённое правило остаётся в списке, но помечено: « ⏸ » впереди значит
+# «пока не работает». Удалять правило ради одной паузы не приходится: оно ждёт
+# здесь, пока его включат обратно (см. page.ruleIsOff), а спектаклю в это время
+# не говорится (см. rules_in_force). Пометка живёт прямо в тексте правила,
+# поэтому переживает и файл настроек, и архив: хранилище как было списком строк,
+# так и осталось, и чужая старая запись читается как есть.
+RULE_OFF_MARK = "⏸"
+
+
+def rule_is_off(line) -> bool:
+    """Выключено ли правило — по пометке впереди его текста."""
+    return str(line or "").strip().startswith(RULE_OFF_MARK)
+
+
+def rule_text(line) -> str:
+    """Текст правила без пометки «выключено» — то, что видит режиссёр и модель."""
+    written = str(line or "").strip()
+    return written[len(RULE_OFF_MARK):].strip() if rule_is_off(written) else written
+
+
+def rules_in_force(lines) -> list:
+    """Только работающие правила: выключенные спектаклю не говорятся.
+
+    Пометку снимаем по дороге — в промпт уезжает само правило, а не служебный
+    знак (см. RULE_OFF_MARK). Пауза при этом не удаление: правило остаётся
+    в списке и в редакторе, а снятие пометки возвращает его на сцену целиком,
+    с тем же текстом, что был.
+    """
+    return [rule_text(line) for line in lines or []
+            if str(line or "").strip() and not rule_is_off(line)]
 
 
 # ── СЛЕД ЗАПИСИ ПУЛЬТА ─────────────────────────────────────────────────────
@@ -462,8 +496,8 @@ SKETCH_HINT = "Так бывает, когда модель сначала от�
 # в списке ниже. Как только меняется сама запись — разделы, шапка, порядок, —
 # номер уходит из списка, и тогда о расхождении спрашивают вслух
 # (см. ask_about_dump): прочитать чужую запись можно, но обещать этого нельзя
-DUMP_FORMAT = 4
-DUMP_FORMATS_READABLE = (4, 3)
+DUMP_FORMAT = 5
+DUMP_FORMATS_READABLE = (5, 4, 3)
 
 # Что отвечают на тот вопрос: сцена пустая, прежний спектакль только на чтение
 # или он же — с продолжением (см. load_play_from_dump)
@@ -723,9 +757,35 @@ def dump_turn_tail(post: dict, turn: dict) -> str:
     if summary.get("seconds") is not None:
         out.append(f"\n**Ход длился:** {duration_words(summary['seconds'])}"
                    f" — от начала обрезки истории до готовой реплики\n")
+    # Приложенное к реплике — рядом с самой репликой, а не отдельным разделом:
+    # оно и есть часть её, и по этим строкам картинка вернётся в ленту вместе
+    # с прежним спектаклем (см. attachment_lines)
+    pictures = attachment_lines(post)
+    if pictures:
+        out.append("")
+        out.extend(pictures)
     out.append("\n" + TURN_SECTIONS["answer"] + "\n")
     out.append(quoted(post.get("content")))
     return "\n".join(out) + "\n"
+
+
+def attachment_lines(post: dict) -> list:
+    """Приложенное к реплике — строками ДАМПа: имя файла и куда он лёг.
+
+    В ДАМП едут только имена и адреса, а не сами картинки: файл лежит в папке
+    экземпляра и никуда оттуда не денется, а ДАМП — текст, и мегабайты base64
+    в нём утопили бы всю хронологию. По этим строкам приложенное и возвращается
+    вместе с прежним спектаклем (см. parse_dump): адрес — тот же, что у реплики
+    в ленте, поэтому лицо картинки не теряется и после перезапуска театра.
+    """
+    out = []
+    for one in post.get("attachments") or []:
+        url = str((one or {}).get("url") or "").strip()
+        if not url:
+            continue
+        name = str((one or {}).get("name") or "").strip() or url.rsplit("/", 1)[-1]
+        out.append(f"**Приложено:** {name} → {url}")
+    return out
 
 
 def dump_human_markdown(post: dict) -> str:
@@ -735,8 +795,10 @@ def dump_human_markdown(post: dict) -> str:
                                   post.get("gender")),
                        str(post.get("model_used") or ""),
                        str(post.get("role_name") or ""), f"Акт {post.get('round')}"])
+    pictures = "".join(line + "\n" for line in attachment_lines(post))
     return (f"\n{head}\n\n"
             + f"Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
+            + pictures
             + quoted(post.get("content")) + "\n")
 
 
@@ -1121,6 +1183,8 @@ _CUT_LINE_RE = re.compile(
 _MESSAGE_RE = re.compile(
     r"^- №(?P<index>\d+)/(?P<total>\d+) · (?P<role>[^·]*) · (?P<rest>.*)$")
 _AVATAR_RE = re.compile(r"^\*\*Аватар:\*\* (?P<path>\S+)$")
+# Приложенное к реплике: имя файла и его адрес в папке экземпляра (см. attachment_lines)
+_ATTACH_RE = re.compile(r"^\*\*Приложено:\*\* (?P<name>.+?) → (?P<url>\S+)$")
 
 
 def _as_int(raw) -> int:
@@ -1397,6 +1461,25 @@ def _avatar_from(lines: list) -> str:
     return ""
 
 
+def _attachments_from(lines: list) -> list:
+    """Приложенное к реплике из записи — обратно тому, что пишет attachment_lines.
+
+    Ищется по всей записи, как и лицо: у реплики человека разделов нет вовсе,
+    а у машинной приложенное стоит рядом с самой репликой (см. dump_turn_tail).
+    Каждое имя проверяется тем же сторожем, что и у поста из формы (см. upload_files):
+    адрес в файле — такой же чужой текст, и по нему нельзя прочитать что попало.
+    Пропавшие файлы отсеиваются молча: ДАМП живёт дольше картинок, и адрес в нём
+    бывает уже никуда не ведёт — рамка без картинки хуже, чем её отсутствие.
+    """
+    found = []
+    for line in lines or []:
+        match = _ATTACH_RE.match(line)
+        if match:
+            found.append({"name": match.group("name").strip(),
+                          "url": match.group("url").strip()})
+    return upload_files(found)
+
+
 def _avatar_that_exists(url) -> str:
     """Адрес портрета, если сам файл ещё на месте (пустая строка — нет его).
 
@@ -1480,7 +1563,7 @@ def restored_summary(turn: dict, seconds=None, spent=None) -> dict:
 
 def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str,
                summary, queries: list, faces: dict = None,
-               interrupted: bool = False) -> dict:
+               interrupted: bool = False, attachments: list = None) -> dict:
     """Реплика ленты из разобранной записи — теми же полями, что create_post.
 
     interrupted=True — ход оборвала смерть процесса, а не модель (см. _parse_record):
@@ -1524,6 +1607,9 @@ def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str
         "gender": gender,
         "gender_symbol": gender_symbol(gender),
         "interrupted": bool(interrupted),
+        # Приложенное к реплике возвращается вместе с ней (см. _attachments_from):
+        # адрес тот же, что и в ленте, поэтому картинка видна и у прежнего спектакля
+        "attachments": list(attachments or []),
     }
 
 
@@ -1537,6 +1623,7 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> di
                           else "male")
     who["role"] = ROLE_BY_NAME.get(who.get("role_name") or "", "participant")
     who["avatar"] = _avatar_from(body)
+    who["attachments"] = _attachments_from(body)
     who["topic"] = ""
     if not [key for key in sections if key]:
         # Ни одного знакомого раздела: либо реплика человека (у неё запросов
@@ -1544,7 +1631,8 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> di
         # театра — тогда реплика там последним разделом (см. _last_quoted)
         return {"post": _post_dict(post_id, who,
                                    _last_quoted(body) or _section_text(body),
-                                   "", "", None, [], faces),
+                                   "", "", None, [], faces,
+                                   attachments=who["attachments"]),
                 "turn": None}
     # Записи без раздела «💬 Реплика, которой ход кончился» обрывает не модель,
     # а смерть процесса: хвост записи пишется одним куском в самом конце хода
@@ -1580,7 +1668,8 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> di
         turn["summary"]["tokens"] = int(budget.get("request_tokens") or 0)
     queries = [step.get("query") or "" for step in steps if step.get("kind") == "search"]
     post = _post_dict(post_id, who, turn["answer"], turn["sketch"], turn["thinking"],
-                      turn["summary"], queries, faces, interrupted=interrupted)
+                      turn["summary"], queries, faces, interrupted=interrupted,
+                      attachments=who["attachments"])
     turn["interrupted"] = interrupted
     return {"post": post, "turn": turn}
 
@@ -1822,6 +1911,188 @@ def load_play_from_dump(mode: str = None) -> int:
     return len(play["posts"])
 
 
+# ── АРХИВ СПЕКТАКЛЕЙ (СЕЙВЫ) ────────────────────────────────
+#
+# Спектакль целиком — это два файла экземпляра и приложенные картинки: пульт
+# (см. save_theatre_settings) и ДАМП, в котором лежит сама история (см. parse_dump).
+# Значит, сохранить спектакль — это просто положить их рядом под именем, а вернуть —
+# положить обратно. Хранятся они НЕ по порту (см. settings.SAVES_DIR): театр на 5077 —
+# та же игра на той же машине, и спектакль, сыгранный там, должен открываться и на 5000.
+# Поэтому же у одного спектакля бывает сколько угодно сохранений: одно — то, что было
+# вчера, другое — ветка, которую хочется посмотреть.
+
+
+def saves_dir() -> Path:
+    """Папка архива — одна на все порты (создаётся при первом обращении)."""
+    settings.SAVES_DIR.mkdir(parents=True, exist_ok=True)
+    return settings.SAVES_DIR
+
+
+def save_folder(name: str) -> str:
+    """Имя папки сохранения из имени спектакля — своё, а не присланное.
+
+    Имя — текст режиссёра: в нём бывает и «../../», и что угодно ещё, поэтому
+    папка собирается только из букв и цифр, а для похожих имён к ней дописывается
+    короткий отпечаток. Папка — не имя: как сохранение называется, лежит в save.json.
+    """
+    clean = re.sub(r"[^\w]+", "-", str(name or "").lower(), flags=re.UNICODE).strip("-")
+    clean = clean[:40] or "спектакль"
+    return f"{clean}-{uuid.uuid4().hex[:6]}"
+
+
+def _save_folder_path(save_id: str) -> Path:
+    """Папка сохранения по его имени — или None, если такое имя нам не годится.
+
+    Имя приходит из формы (см. web.saves): внутрь архива ему ходить нельзя
+    ни в какую сторону — ни за его пределы, ни по чужому пути.
+    """
+    save_id = str(save_id or "").strip()
+    if not save_id or save_id != Path(save_id).name or save_id.startswith("."):
+        return None
+    folder = settings.SAVES_DIR / save_id
+    if not (folder / "save.json").is_file():
+        return None
+    return folder
+
+
+def save_play(name: str, port: int = None) -> tuple:
+    """Сохранить нынешний спектакль в архив — целиком, под именем режиссёра.
+
+    Копируется всё, что составляет спектакль: пульт, ДАМП и приложенные картинки.
+    Картинки — потому что посты ссылаются на них адресами (см. post_images),
+    и в другом порту те же адреса вели бы в пустое место: своё сохранение
+    приносит и своё приложенное.
+    """
+    name = str(name or "").strip()
+    if not name:
+        return None, "сохранению нужно имя — по нему его потом и найдут"
+    folder = settings.SAVES_DIR / save_folder(name)
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        if settings.SETTINGS_FILE.is_file():
+            shutil.copyfile(settings.SETTINGS_FILE, folder / "settings.json")
+        if settings.DUMP_FILE.is_file():
+            shutil.copyfile(settings.DUMP_FILE, folder / "damp.md")
+        pictures = 0
+        if settings.UPLOAD_DIR.is_dir():
+            target = folder / "uploads"
+            target.mkdir(parents=True, exist_ok=True)
+            for one in settings.UPLOAD_DIR.iterdir():
+                if one.is_file():
+                    shutil.copyfile(one, target / one.name)
+                    pictures += 1
+        meta = {
+            "id": folder.name,
+            "name": name,
+            "saved_at": time.strftime("%d.%m.%Y %H:%M"),
+            "at": time.time(),
+            "port": int(port if port is not None else settings.PORT),
+            "topic": str(session.topic or ""),
+            "posts": len(session.posts),
+            "round": int(session.current_round or 0),
+            "spent": round(float(session.spent or 0.0), 2),
+            "cast": [str(p.get("display_name") or "") for p in session.runtime_participants],
+            "pictures": pictures,
+        }
+        (folder / "save.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:
+        print(f"  ⚠️  Спектакль не сохранился: {e}")
+        return None, f"спектакль не сохранился: {e}"
+    print(f"💾 Сохранён спектакль «{name}»: реплик {meta['posts']}, "
+          f"актов {meta['round']}, приложенного {pictures} — {folder}")
+    return meta, ""
+
+
+def list_saves() -> list:
+    """Что лежит в архиве — от свежих сохранений к старым.
+
+    Чужой мусор в папке архива — не наша забота: сохранением считается только
+    то, у чего есть save.json (так же, как чужая запись не ДАМП).
+    """
+    found = []
+    root = saves_dir()
+    for folder in root.iterdir():
+        if not folder.is_dir() or not (folder / "save.json").is_file():
+            continue
+        try:
+            meta = json.loads((folder / "save.json").read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"  ⚠️  Не читается сохранение {folder.name}: {e}")
+            continue
+        if not isinstance(meta, dict):
+            continue
+        meta["id"] = folder.name
+        meta.setdefault("name", folder.name)
+        meta.setdefault("at", 0)
+        found.append(meta)
+    return sorted(found, key=lambda meta: float(meta.get("at") or 0), reverse=True)
+
+
+def load_save(save_id: str) -> tuple:
+    """Вернуть сохранённый спектакль на сцену — в этом порту.
+
+    Кладутся обратно те же три вещи, что и были взяты (см. save_play), а потом
+    пульт и история читаются тем же кодом, что и при запуске театра: иначе
+    сохранённый спектакль жил бы своей жизнью, отличной от прежнего (см.
+    load_theatre_settings и load_play_from_dump).
+
+    Идущий спектакль этому помешает: ДАМП и пульт подменяются как раз в тот момент,
+    когда по ним пишут. Поэтому о таком отказе надо сказать словами, а не портить
+    и архив, и сцену (см. web.saves).
+    """
+    folder = _save_folder_path(save_id)
+    if folder is None:
+        return None, "такого сохранения нет в архиве"
+    if session.running:
+        return None, "спектакль идёт: подожди до занавеса"
+    try:
+        meta = json.loads((folder / "save.json").read_text(encoding="utf-8"))
+    except Exception as e:
+        return None, f"сохранение не читается: {e}"
+    try:
+        if (folder / "settings.json").is_file():
+            shutil.copyfile(folder / "settings.json", settings.SETTINGS_FILE)
+        if (folder / "damp.md").is_file():
+            shutil.copyfile(folder / "damp.md", settings.DUMP_FILE)
+        source = folder / "uploads"
+        if source.is_dir():
+            settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            for one in source.iterdir():
+                if one.is_file():
+                    shutil.copyfile(one, settings.UPLOAD_DIR / one.name)
+    except Exception as e:
+        print(f"  ⚠️  Сохранение не вернулось: {e}")
+        return None, f"сохранение не вернулось: {e}"
+    _dump_reset()          # прежний файл больше не наш: его перезаписали
+    load_theatre_settings()
+    # Другое обсуждение — и приложенное в нём другое: эта модель картинок
+    # вернувшегося спектакля не видела (см. forget_shown_pictures)
+    session.forget_shown_pictures()
+    posts = load_play_from_dump("read")
+    print(f"📂 Вернулся сохранённый спектакль «{meta.get('name')}»: реплик {posts}")
+    meta["posts"] = posts
+    return meta, ""
+
+
+def delete_save(save_id: str) -> tuple:
+    """Удалить сохранение — когда спектакль уже точно не нужен.
+
+    Папка удаляется целиком и только внутри архива: имя приходит из формы,
+    и ходить по нему куда угодно (см. _save_folder_path) нельзя.
+    """
+    folder = _save_folder_path(save_id)
+    if folder is None:
+        return False, "такого сохранения нет в архиве"
+    try:
+        shutil.rmtree(folder)
+    except Exception as e:
+        print(f"  ⚠️  Сохранение не удалилось: {e}")
+        return False, f"сохранение не удалилось: {e}"
+    print(f"🗑  Сохранение {folder.name} удалено")
+    return True, ""
+
+
 def forget_play() -> None:
     """Забыть прежний спектакль — и в памяти, и на диске.
 
@@ -1835,6 +2106,9 @@ def forget_play() -> None:
     session.spent = 0.0
     session.money_told = False
     session.restored = False
+    # Прощён и он, и показанное в нём: прежние адреса никуда не ведут, а новый
+    # спектакль начинается с чистой памяти (см. forget_shown_pictures)
+    session.forget_shown_pictures()
     # Прежний спектакль прощён — и доигрывать его тоже больше нечего
     session.resume_ready = False
     _dump_reset()
@@ -2192,10 +2466,13 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
                 avatar_url: str = None, avatar_emoji: str = None,
                 search_count: int = 0, search_queries: list = None,
                 role: str = "participant", gender: str = "male",
-                thinking: str = "", sketch: str = "", turn: dict = None) -> dict:
+                thinking: str = "", sketch: str = "", turn: dict = None,
+                attachments: list = None) -> dict:
     """Единая функция создания поста для любого участника (human или AI)"""
     if search_queries is None:
         search_queries = []
+    if attachments is None:
+        attachments = []
     
     # Роли и значки — из общего словаря: тот же значок нужен и посту, собранному
     # из прочитанного ДАМПа, и разойтись эти два места не должны
@@ -2227,8 +2504,152 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
         "role_icon": ROLE_ICONS.get(role, "🎭"),
         "role_name": role_names.get(role, "Участник"),
         "gender": gender,
-        "gender_symbol": gender_symbol(gender)
+        "gender_symbol": gender_symbol(gender),
+        # Приложенные к реплике картинки (см. save_upload): в ленте это то, что
+        # режиссёр приложил сам, а моделям они уезжают по истории (см. post_images)
+        "attachments": attachments,
     }
+
+
+# Приложенные к реплике картинки: их читают для отправки модели (см. ниже),
+# поэтому base64 держим в памяти — файл на диске уже никуда не денется
+_UPLOAD_IMAGES = {}
+
+# Про кого и какую картинку уже сказано в консоли, что повторно она не уехала:
+# без этого одна и та же строка повторялась бы на каждом ходу до конца
+# спектакля (см. _format_history)
+_IMAGES_NOT_RESENT = set()
+
+# Вид картинки по её содержимому, а не по имени файла: браузер называет тип
+# по расширению, и «photo.txt», переименованный в .png, выдавал бы себя за
+# картинку. Ollama же разбирает именно содержимое
+_IMAGE_SIGNS = ((b"\x89PNG\r\n\x1a\n", "image/png"),
+                (b"\xff\xd8\xff", "image/jpeg"),
+                (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"))
+
+
+def image_kind(data: bytes) -> str:
+    """Что это за картинка на самом деле — по её первым байтам.
+
+    Пустая строка — не картинка (или такая, которой мы не знаем).
+    """
+    for sign, kind in _IMAGE_SIGNS:
+        if data.startswith(sign):
+            return kind
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return ""
+
+
+def save_upload(name: str, data_url: str) -> tuple:
+    """Приложенная к реплике картинка — на диск. Возвращает (приложение, ошибка).
+
+    Страница присылает файл адресом-данными («data:image/png;base64,…»), а не
+    потоком: так одно и то же тело несёт и имя файла, и его содержимое, и не
+    надо разбираться с границами формы. Всё, что до проверок, — чужой текст:
+    и имя файла, и объявленный тип. Вид картинки определяется по содержимому.
+    """
+    marker = "base64,"
+    if not data_url.startswith("data:") or marker not in data_url:
+        return None, "файл пришёл не картинкой: ожидался адрес данных с base64"
+    try:
+        raw = base64.b64decode(data_url.split(marker, 1)[1], validate=True)
+    except Exception:
+        return None, "содержимое файла не читается: это не base64"
+    kind = image_kind(raw)
+    if kind not in settings.UPLOAD_TYPES:
+        return None, ("такое приложение не отправить: принимаются картинки "
+                      "(png, jpeg, webp, gif)")
+    if len(raw) > settings.MAX_UPLOAD_BYTES:
+        return None, ("картинка больше "
+                      f"{settings.MAX_UPLOAD_BYTES // (1024 * 1024)} МБ — модель её "
+                      "всё равно не прочитает")
+
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    # Имя своё, а не присланное: имя файла — текст режиссёра, и в нём бывает
+    # и «../../», и что угодно ещё. Оригинальное имя хранится рядом для показа
+    filename = f"{uuid.uuid4().hex[:12]}{settings.UPLOAD_TYPES[kind]}"
+    (settings.UPLOAD_DIR / filename).write_bytes(raw)
+    print(f"  🖼  Приложено к реплике: {name or filename} "
+          f"({len(raw) // 1024} Кб, {kind})")
+    return {"name": str(name or filename), "url": f"/uploads/{filename}"}, ""
+
+
+def upload_files(urls: list) -> list:
+    """Приложения страницы в том виде, в каком они пойдут в пост.
+
+    Адрес — чужой текст (он приходит из формы), поэтому каждое имя файла
+    проверяется: и что оно не выводит из папки экземпляра, и что файл в ней
+    правда есть. Остальное отбрасывается, а не «примеряется».
+    """
+    result = []
+    for item in urls or []:
+        url = str((item or {}).get("url") if isinstance(item, dict) else item or "")
+        file = url.rstrip("/").split("/")[-1]
+        if not file or file != Path(file).name:
+            continue
+        if not (settings.UPLOAD_DIR / file).is_file():
+            continue
+        name = str((item or {}).get("name") if isinstance(item, dict) else "") or file
+        result.append({"name": name, "url": f"/uploads/{file}"})
+    return result
+
+
+def post_image_pairs(attachments: list) -> list:
+    """Картинки поста для модели — парами «адрес файла + его содержимое».
+
+    Адрес нужен рядом с картинкой затем, чтобы помнить, кому она уже показана:
+    повторно за неё платить нечем (см. _format_history), а у самих картинок
+    в запросе имени нет — только base64.
+    """
+    images = []
+    for item in attachments or []:
+        url = str((item or {}).get("url") or "")
+        file = url.rstrip("/").split("/")[-1]
+        if not file or file != Path(file).name:
+            continue
+        path = settings.UPLOAD_DIR / file
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        key = (file, stat.st_size)
+        if key not in _UPLOAD_IMAGES:
+            kind = image_kind(path.read_bytes())
+            if not kind:
+                continue
+            _UPLOAD_IMAGES[key] = (f"data:{kind};base64,"
+                                   + base64.b64encode(path.read_bytes()).decode("ascii"))
+        images.append((url, _UPLOAD_IMAGES[key]))
+    return images
+
+
+def post_images(attachments: list) -> list:
+    """Картинки поста для модели — одними адресами-данными (base64 внутри).
+
+    Читаются в тот момент, когда история уезжает модели, а не при загрузке:
+    пост с картинкой лежит в памяти весь спектакль, а запросов за это время
+    десятки. Прочитанное помним по имени файла и размеру: файл приложенной
+    картинки не переписывается никогда (см. save_upload).
+    """
+    return [payload for _url, payload in post_image_pairs(attachments)]
+
+
+def images_already_shown_note(attachments: list) -> str:
+    """Строка о картинке, которая этой модели уже показана.
+
+    Место в контексте она занимает то же, что и тексты (тысячи токенов),
+    поэтому повторно не уезжает — но и пропасть бесследно не должна: иначе
+    модель решила бы, что к реплике ничего не прикладывали, и в лучшем случае
+    переспросила бы, а в худшем — выдумала бы её содержание.
+    """
+    names = []
+    for one in attachments or []:
+        url = str((one or {}).get("url") or "")
+        names.append(str((one or {}).get("name") or url.rsplit("/", 1)[-1]))
+    return ("📎 К реплике приложена картинка "
+            + ", ".join(f"«{name}»" for name in names)
+            + " — она уже показана тебе в этом обсуждении, повторно не прикладывается")
 
 def role_of(is_moderator: bool, is_judge: bool) -> str:
     """Роль места в ленте: модератор старше судьи — как и при разборе состава."""
@@ -2413,6 +2834,20 @@ class DebateSession:
         self.moderator_guidelines = []
         self.waiting_for_human = False
         self.moderator_message = None
+        # Приложения к реплике живого участника: страница кладёт их сюда вместе
+        # с самой репликой (см. web.moderator_message), а ход человека забирает
+        # их ровно один раз (см. play_show) — иначе картинка прилипла бы к трём
+        # следующим репликам подряд
+        self.pending_attachments = []
+        # Кому какая картинка уже показана: модель → адреса приложенного к её
+        # репликам. Повторно картинка не уезжает: она занимает в контексте
+        # тысячи токенов, а модель уже видела её своими глазами (см.
+        # _format_history)
+        self.images_shown = {}
+        # Что этой модели уедет на этом ходу: в показанное попадает только
+        # после удачного хода — запросов в нём несколько (поиск и повтор после
+        # него), и картинка должна быть во всех (см. commit_shown_pictures)
+        self.images_pending = {}
         self.moderator_finished = False
         self.runtime_participants = []
         self.conversation_history = []
@@ -2546,6 +2981,11 @@ class DebateSession:
         self.finished = False
         self.waiting_for_human = False
         self.moderator_message = None
+        self.pending_attachments = []
+        # Занавес поднимается — и про показанное спрашивать не у кого: модели
+        # пришли на этот спектакль с пустой головой (даже если он сам вернулся
+        # из ДАМПа после перезапуска — модель картинку не помнит)
+        self.forget_shown_pictures()
         self.moderator_finished = False
         # Спектакль играется сейчас: слова «прежний, возвращённый из ДАМПа»
         # после этого уже неверны, а доигранный когда-то спектакль не должен
@@ -2692,7 +3132,7 @@ class DebateSession:
     def add_post(self, display_name, model_used, content, round_num,
                  search_count=0, search_queries=None,
                  is_moderator=False, is_judge=False, gender="male", thinking="",
-                 sketch="", turn=None, dump=True):
+                 sketch="", turn=None, dump=True, attachments=None):
         """Создать пост.
 
         dump=False — ход уже писался в ДАМП по ходу дела (см. open_dump_turn):
@@ -2705,16 +3145,19 @@ class DebateSession:
 
         post = create_post(display_name, model_used, content, round_num,
                           avatar_url, avatar_emoji, search_count, search_queries, role,
-                          gender, thinking, sketch, turn)
+                          gender, thinking, sketch, turn, attachments)
         self.posts.append(post)
 
-        if content.strip():
+        if content.strip() or attachments:
+            # Приложенная картинка — часть реплики: и в истории диалога она
+            # лежит рядом с текстом (см. _format_history), а не живёт отдельно
             self.conversation_history.append({
                 "display_name": display_name,
                 "content": content,
                 "is_moderator": is_moderator,
                 "is_judge": is_judge,
                 "round": round_num,
+                "attachments": list(attachments or []),
             })
         # Размышления в память спектакля не идут (иначе следующая модель прочитала
         # бы чужой черновик мыслей как сказанное вслух), а в ДАМП — идут: там
@@ -2891,12 +3334,22 @@ class DebateSession:
     # Формат истории в messages
     # ------------------------------------------------------------
 
-    def _format_history(self, viewer_name: str, history: list) -> list:
+    def _format_history(self, viewer_name: str, history: list, model: str = "",
+                        image_keys: dict = None) -> list:
+        """История — сообщениями для модели.
+
+        model — та, которой эти сообщения уедут: она решает, что из приложенного
+        уже показано ей раньше, а что едет впервые (см. images_shown).
+        image_keys — необязательная посуда: в неё ложится, какие картинки
+        в какие сообщения приложены, — по ней этот ход и отметит их
+        показанными (см. commit_shown_pictures).
+        """
         messages = []
         for post in history:
             speaker = post.get("display_name", "")
             speaker_norm = speaker.lower().replace(" ", "_")
             content = post.get("content", "")
+            before = len(messages)
 
             if post.get("is_moderator"):
                 messages.append({
@@ -2927,7 +3380,79 @@ class DebateSession:
                     "content": f"{speaker} говорит: {content}",
                     "name": speaker_norm,
                 })
+
+            # Приложенные к реплике картинки едут вместе с ней: у Ollama они
+            # живут полем images рядом с текстом. Кому их не читать — решает
+            # ollama_api.messages_for: там известна модель, которой всё это
+            # уезжает, а здесь — только история
+            #
+            # Каждой модели картинка уезжает один раз: показанную она уже
+            # видела, а платить за неё заново на каждом ходу — не за что.
+            # Показанное не пропадает из реплики совсем: вместо самой картинки
+            # остаётся строка о ней (см. images_already_shown_note)
+            shown = self.images_shown.get(model, set()) if model else set()
+            fresh, stale = [], []
+            for one in post.get("attachments") or []:
+                url = str((one or {}).get("url") or "")
+                (stale if url in shown else fresh).append(one)
+            # Только то, что правда прочиталось: пропавший файл — это не
+            # картинка, и показывать о ней строку нечего
+            pairs = post_image_pairs(fresh)
+            if pairs and len(messages) > before:
+                messages[-1]["images"] = [payload for _url, payload in pairs]
+                if image_keys is not None:
+                    image_keys[id(messages[-1])] = [url for url, _payload in pairs]
+            if stale and len(messages) > before:
+                messages[-1]["content"] += "\n\n" + images_already_shown_note(stale)
+                # В консоли — один раз на модель и картинку: иначе эта же
+                # строка повторялась бы на каждом ходу до конца спектакля
+                for one in stale:
+                    url = str((one or {}).get("url") or "")
+                    if (model, url) in _IMAGES_NOT_RESENT:
+                        continue
+                    _IMAGES_NOT_RESENT.add((model, url))
+                    name = str((one or {}).get("name") or url.rsplit("/", 1)[-1])
+                    print(f"  🖼  {model} уже видел картинку «{name}» — "
+                          f"повторно не отправляю, только строку о ней")
         return messages
+
+    def remember_pictures_to_send(self, model: str, messages: list,
+                                  image_keys: dict) -> None:
+        """Запомнить, какие картинки уедут этой модели на этом ходу.
+
+        Показанными они станут только в конце хода (см. commit_shown_pictures):
+        запросов в ходе несколько (попытка, поиск, повтор после него), и во всех
+        картинка должна быть — иначе модель увидела бы её в первом запросе
+        и потеряла во втором. А обрезанная история в счёт не идёт: выброшенное
+        сообщение до модели не доехало, и показанным его считать нельзя.
+        """
+        # Прежняя запись стирается всегда: она про другой ход, и удачный ход
+        # этого мог бы отметить показанным то, что в нём не уехало вовсе
+        self.images_pending.pop(model, None)
+        sending = {url for message in messages
+                   for url in (image_keys or {}).get(id(message), [])}
+        if sending:
+            self.images_pending[model] = sending
+
+    def commit_shown_pictures(self, model: str) -> None:
+        """Ход состоялся — его картинки считаются показанными этой модели.
+
+        И только той, кто их правда читает: незрячей модели приложенное
+        не уезжает вовсе (см. ollama_api.messages_for), и строка «уже показана»
+        была бы в ней враньём.
+        """
+        sending = self.images_pending.pop(model, None)
+        if sending and ollama_api.takes_images(model):
+            self.images_shown.setdefault(model, set()).update(sending)
+
+    def forget_shown_pictures(self) -> None:
+        """Всё приложенное — снова невиданное: и в памяти, и в показанном.
+
+        Нужно там, где перед моделью другой разговор: ход нового спектакля,
+        возврат из архива, продолжение после перезапуска (см. start_show).
+        """
+        self.images_shown = {}
+        self.images_pending = {}
 
     # ------------------------------------------------------------
     # Блоки системного промпта
@@ -2939,25 +3464,40 @@ class DebateSession:
         text = text.replace("{ТЕМА}", self.topic)
         return text
 
+    def rules_of_communication(self) -> list:
+        """Правила общения, которые сейчас говорятся моделям.
+
+        Выключенное правило на паузе: оно ждёт своего часа в редакторе и в файле,
+        но спектаклю не говорится (см. rules_in_force). Пустой список правил —
+        это «как в settings.py», а все выключенные — это «правил нет»: второе
+        режиссёр выбрал сам, и подсовывать ему дефолты обратно нельзя.
+        """
+        if not self.static_instructions:
+            return list(settings.DEFAULT_STATIC_INSTRUCTIONS)
+        return rules_in_force(self.static_instructions)
+
+    def guidelines_in_force(self) -> list:
+        """Руководства модератора, которые сейчас в силе (выключенные — нет)."""
+        return rules_in_force(self.moderator_guidelines)
+
     def _base_rules_block(self, participant: dict) -> list:
         other_names = [
             n for n in self._get_participants_list()
             if n != participant.get("display_name")
         ]
         if participant.get("is_judge"):
-            rules = [r for r in (self.judge_rules or settings.DEFAULT_JUDGE_RULES) if r.strip()]
-        elif self.static_instructions:
-            rules = [r for r in self.static_instructions if r.strip()]
+            rules = rules_in_force(self.judge_rules or settings.DEFAULT_JUDGE_RULES)
         else:
-            rules = settings.DEFAULT_STATIC_INSTRUCTIONS
+            rules = self.rules_of_communication()
         return [self._substitute(r, participant, other_names) for r in rules]
 
     def _guidelines_block(self) -> list:
-        if not self.moderator_guidelines:
+        guidelines = self.guidelines_in_force()
+        if not guidelines:
             return []
         return [
             "ПРАВИЛА ОТ РУКОВОДИТЕЛЯ ДИАЛОГА (обязательны к исполнению):\n"
-            + "\n".join(f"• {g}" for g in self.moderator_guidelines if g.strip())
+            + "\n".join(f"• {g}" for g in guidelines)
         ]
 
     def _moderator_intro_block(self) -> list:
@@ -3056,6 +3596,11 @@ class DebateSession:
         name = participant.get("display_name", "")
         name_norm = name.lower().replace(" ", "_")
         is_judge = participant.get("is_judge", False)
+        # Кому едут эти сообщения: по модели видно, что из приложенного она уже
+        # видела (см. images_shown), а image_keys собирает то, что приложено
+        # к этому ходу — по нему ход и отметит картинки показанными
+        model = participant.get("model", "")
+        image_keys = {}
 
         system_prompt = self.get_system_prompt(participant)
         messages = [{"role": "system", "content": system_prompt, "name": "system"}]
@@ -3066,11 +3611,13 @@ class DebateSession:
             viewer_options = role_options(participant)
             history = self._get_history_for(participant, mode="participants_only",
                                             round_num=round_num)
-            history_messages = self._format_history(name, history)
+            history_messages = self._format_history(name, history, model,
+                                                    image_keys)
             trimmed, trim_report = text.trim_history_with_report(
                 history_messages, text.estimate_tokens(system_prompt),
                 model=participant.get("model", ""))
             messages.extend(trimmed)
+            self.remember_pictures_to_send(model, trimmed, image_keys)
             if report is not None:
                 report.update(trim_report)
 
@@ -3097,13 +3644,14 @@ class DebateSession:
 
         # ---- Участник ----
         history = self._get_history_for(participant, mode="dialog")
-        history_messages = self._format_history(name, history)
+        history_messages = self._format_history(name, history, model, image_keys)
         # Окно — той модели, которая будет говорить: у облачного оно своё,
         # иначе история сцены режется по олламовским 7 тысячам токенов
         trimmed, trim_report = text.trim_history_with_report(
             history_messages, text.estimate_tokens(system_prompt),
             model=participant.get("model", ""))
         messages.extend(trimmed)
+        self.remember_pictures_to_send(model, trimmed, image_keys)
         if report is not None:
             report.update(trim_report)
 
@@ -3293,6 +3841,12 @@ class DebateSession:
             # сайдбар считает, сколько ей осталось (чтобы после хода там
             # не висело чужое время)
             self.stop_turn_clock()
+
+        # Ход дошёл до ответа — приложенное к нему считается показанным этой
+        # модели: второй раз за ту же картинку платить нечем (см.
+        # commit_shown_pictures). При ошибке сюда не дойдёт, и картинка
+        # поедет заново — это и нужно: модель её так и не увидела
+        self.commit_shown_pictures(participant.get("model", ""))
 
         # Размышления, не попавшие в хронологию шагами (модель без потока, шлюз,
         # отдавший размышления одним куском): мысли оплачены, и это единственный
@@ -4136,6 +4690,7 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
                 
                 if participant.get("model") == "human":
                     session.moderator_message = None
+                    session.pending_attachments = []
                     session.current_action = None
                     time.sleep(0.2)
                     
@@ -4163,8 +4718,12 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
                         current_message = session.moderator_message
                         if current_message is not None:
                             session.waiting_for_human = False
-                            
-                            if current_message.strip():
+                            # Приложения забираются вместе с репликой — и только
+                            # раз: следующий ход человека соберёт свои
+                            attachments = session.pending_attachments
+                            session.pending_attachments = []
+
+                            if current_message.strip() or attachments:
                                 post = session.add_post(
                                     display_name=participant.get("display_name", ""),
                                     model_used="human",
@@ -4174,7 +4733,8 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
                                     search_queries=[],
                                     is_moderator=participant.get("is_moderator", False),
                                     is_judge=participant.get("is_judge", False),
-                                    gender=participant.get("gender", "male")
+                                    gender=participant.get("gender", "male"),
+                                    attachments=attachments
                                 )
                                 print(f"🎬 {participant.get('display_name', '')}: {current_message[:50]}")
                                 if on_post:
