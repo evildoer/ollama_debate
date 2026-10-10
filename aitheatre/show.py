@@ -48,6 +48,11 @@ def load_theatre_settings():
             if isinstance(topic, str) and topic.strip():
                 session.topic = topic
                 print(f"🎯 Загружена сохранённая тема: {topic.splitlines()[0][:60]}")
+            # Приложенное к теме — режиссёрская настройка, как и сама тема:
+            # тема переживает и перезапуск, и архив, и картинка темы — вместе с ней
+            session.topic_attachments = _topic_attachments_from(data)
+            if session.topic_attachments:
+                print(f"🖼  К теме приложено картинок: {len(session.topic_attachments)}")
             _load_saved_instructions(data)
             cast = sanitize_cast(data.get("cast"))
             if cast:
@@ -66,6 +71,30 @@ def load_theatre_settings():
                 print(f"🎬 Загружена сохранённая сцена: мест {len(scene)}")
     except Exception as e:
         print(f"  ⚠️  Не читается {settings.SETTINGS_FILE.name}: {e}")
+
+
+def _topic_attachments_from(data: dict) -> list:
+    """Приложенное к теме из файла пульта — вместе с отметкой, когда его показали.
+
+    Адрес приходит из файла, который правят и руками, поэтому проверяется тем же
+    сторожем, что и приложение из формы (см. upload_files): по адресу нельзя
+    прочитать что попало, а пропавший файл просто не возвращается.
+
+    `since` — сколько реплик было в ленте, когда картинку приложили: по этой
+    отметке после возврата спектакля видно, кто её уже видел (см.
+    restore_shown_pictures). Врать ею можно в обе стороны: слишком поздняя
+    отметка показала бы картинку тому, кто её видел и заплатил за неё, слишком
+    ранняя — спрятала бы её от того, кто не видел. Поэтому отметка берётся
+    из файла, но читается как число, а не как чужой текст (см. _as_int).
+    """
+    taken = upload_files(data.get("topic_attachments") or [])
+    since = {}
+    for one in data.get("topic_attachments") or []:
+        if isinstance(one, dict):
+            since[str(one.get("url") or "")] = _as_int(one.get("since"))
+    for one in taken:
+        one["since"] = since.get(str(one.get("url") or ""), 0)
+    return taken
 
 
 def _load_saved_instructions(data: dict):
@@ -176,6 +205,10 @@ def save_theatre_settings(note: str = "пульт"):
                 # Тема тоже режиссёрская настройка: придумывать её заново каждый
                 # запуск — работа, а не часть спектакля
                 "topic": session.topic or "",
+                # Приложенное к теме лежит рядом с самой темой: у каждой картинки
+                # своё `since` — сколько реплик было в ленте, когда её приложили
+                # (см. _topic_attachments_from)
+                "topic_attachments": [dict(one) for one in session.topic_attachments or []],
                 "judge_rules": list(session.judge_rules or []),
                 "static_instructions": list(session.static_instructions or []),
                 "moderator_guidelines": list(session.moderator_guidelines or []),
@@ -198,12 +231,15 @@ def forget_theatre_settings(note: str = "пульт записан заново"
     то, от чего режиссёр только что отказался. Удалить файл целиком нельзя —
     вместе с ним ушла бы тема, а её не сбрасывает даже полный сброс (см.
     reset_to_defaults): тема — про сюжет, а не про труппу, и в settings.py её нет.
-    Поэтому в файле остаётся одна тема, а состав и правила следующего запуска
-    соберутся заново из settings.py — ровно как при первом запуске.
+    Поэтому в файле остаётся одна тема — и приложенная к ней картинка: она часть
+    темы, а не труппы, — а состав и правила следующего запуска соберутся заново
+    из settings.py, ровно как при первом запуске.
     """
     try:
         settings.SETTINGS_FILE.write_text(
-            json.dumps({"version": 2, "topic": session.topic or ""},
+            json.dumps({"version": 2, "topic": session.topic or "",
+                        "topic_attachments": [dict(one) for one
+                                              in session.topic_attachments or []]},
                        ensure_ascii=False, indent=1),
             encoding="utf-8")
     except OSError as e:
@@ -2643,6 +2679,50 @@ def upload_files(urls: list) -> list:
     return result
 
 
+def set_topic_attachments(attachments: list) -> list:
+    """Приложить картинки к теме — или убрать их (состав списка и есть правка).
+
+    Список приходит целиком: убрать картинку — это тот же список без неё, и так
+    порядок и состав приложенного не разъезжаются между страницей и сервером.
+
+    Отметка `since` — сколько реплик было в ленте, когда картинку приложили:
+    по ней видно, кто её уже видел, когда спектакль вернётся из архива или
+    из ДАМПа (см. restore_shown_pictures). У приложенной до спектакля отметка 0:
+    её видел каждый, кто говорил после начала. У приложенной на ходу — те, кто
+    говорил позже; а успевшие сказать раньше получат её на своём следующем ходу,
+    и это верно: они её ещё не видели.
+    """
+    taken = upload_files(attachments or [])
+    was = {str((one or {}).get("url") or ""): _as_int((one or {}).get("since"))
+           for one in session.topic_attachments or [] if isinstance(one, dict)}
+    now = session.spoken_count()
+    for one in taken:
+        # У уже приложенного отметка своя и не меняется: оно приложено раньше,
+        # и «показано с этой реплики» — про тот момент, а не про сейчас
+        one["since"] = was.get(str(one.get("url") or ""), now)
+    session.topic_attachments = taken
+    return taken
+
+
+def set_topic(text: str) -> str:
+    """Сменить тему — и, если она правда сменилась, начать разговор с ней заново.
+
+    Тема — это про что спектакль, а не подпись к нему: с новой темой модели ещё
+    не слышали приложенного к ней, поэтому картинка к теме снова свежая у каждой
+    и каждая получит её по разу (см. forget_topic_pictures). Та же тема ничего
+    не меняет: нажатие «Применить» второй раз не повторяет показ.
+
+    Место одно на оба пути: и «Применить тему» в пульте, и старт спектакля
+    с темой в теле запроса (см. web.moderator_topic, web.start). Иначе один
+    из них забыл бы сказать, что тема сменилась.
+    """
+    text = str(text or "").strip()
+    if text and text != (session.topic or "").strip():
+        session.forget_topic_pictures()
+        session.topic = text
+    return session.topic or ""
+
+
 def post_image_pairs(attachments: list) -> list:
     """Картинки поста для модели — парами «адрес файла + его содержимое».
 
@@ -2907,6 +2987,13 @@ class DebateSession:
         # после удачного хода — запросов в нём несколько (поиск и повтор после
         # него), и картинка должна быть во всех (см. commit_shown_pictures)
         self.images_pending = {}
+        # Приложенное к теме: у темы нет реплики, к которой картинку можно было бы
+        # приложить, поэтому она лежит отдельно и едет первым сообщением хода
+        # (см. topic_picture_message). Правила те же, что у приложенного
+        # к репликам: каждой модели — один раз, а `since` в записи картинки —
+        # сколько реплик было в ленте, когда её приложили (см.
+        # restore_shown_pictures)
+        self.topic_attachments = []
         self.moderator_finished = False
         self.runtime_participants = []
         self.conversation_history = []
@@ -3064,6 +3151,14 @@ class DebateSession:
             self.money_told = False
             # Новый спектакль — новые реплики: отчёты прежних ходов к ним не подходят
             self.turn_log = {}
+            # И приложенное к теме в новом спектакле модель не помнит: показывать
+            # придётся заново, а отсчёт реплик начинается с пустой ленты. Отметку
+            # сбрасываем здесь, а не в forget_shown_pictures: из архива приходят
+            # картинки с прежней отметкой, и она нужна доигрышу (см. load_save,
+            # restore_shown_pictures)
+            for one in self.topic_attachments or []:
+                if isinstance(one, dict):
+                    one["since"] = 0
             # И переспрашивать нечего: оборванный ход был у прежнего спектакля,
             # а этот начинается с чистой ленты (см. plan_replay)
             self.replay_plan = None
@@ -3184,6 +3279,10 @@ class DebateSession:
         # Тема переживает и «Новый спектакль»: сброс темы — это полный сброс,
         # а не новый состав той же труппы
         topic = self.topic
+        # Приложенное к теме — часть темы, а не труппы: картинку в новом спектакле
+        # придётся показать заново (модель её не помнит), поэтому копия, а не она
+        # сама: правка одного спектакля не должна менять отметки другого
+        topic_attachments = [dict(one) for one in self.topic_attachments or []]
         # Сцена — то, что режиссёр настроил руками, поэтому её и переживает:
         # иначе «Новый спектакль» возвращал бы состав из файла, а не тот,
         # который только что собрали в пульте
@@ -3194,6 +3293,7 @@ class DebateSession:
         self.static_instructions = static_instructions
         self.scene = scene
         self.topic = topic
+        self.topic_attachments = topic_attachments
         # «Новый спектакль» — это новая сцена: прежние реплики в ленту больше
         # не вернутся ни сейчас, ни после перезапуска (см. forget_play)
         forget_play()
@@ -3520,6 +3620,56 @@ class DebateSession:
                           f"повторно не отправляю, только строку о ней")
         return messages
 
+    def topic_picture_message(self, model: str, image_keys: dict = None) -> dict:
+        """Сообщение о приложенной к теме картинке — или None, если её нечего показывать.
+
+        Собирается оттуда же, откуда уезжает приложенное к репликам, и по тем же
+        правилам (см. _format_history): каждой модели — один раз, а показанным
+        картинка становится только после удачного хода (см. commit_shown_pictures),
+        поэтому не успевшая ответить получит её на своём следующем ходу. Дальше
+        о картинке не говорят вовсе: она показана, и разговор идёт своим ходом —
+        так же, как у картинки из реплики, только там вместо самой картинки
+        остаётся строка о ней, а у темы о ней говорит сам системный промпт.
+
+        Модели без зрения картинка не едет: тему она читает и так, а строка
+        о невидимой картинке была бы только шумом (см. ollama_api.messages_for).
+        """
+        if not self.topic_attachments:
+            return None
+        shown = self.images_shown.get(model, set()) if model else set()
+        fresh = [one for one in self.topic_attachments
+                 if str((one or {}).get("url") or "") not in shown]
+        if not fresh:
+            return None
+        # Спрашивать про зрение раньше не о чем: пока картинка не свежа, показывать
+        # её некому (см. takes_images — у облачной это запрос за деньги)
+        if not ollama_api.takes_images(model):
+            return None
+        pairs = post_image_pairs(fresh)
+        if not pairs:
+            return None
+        names = {str((one or {}).get("url") or ""):
+                 str((one or {}).get("name") or str((one or {}).get("url") or "")
+                     .rsplit("/", 1)[-1])
+                 for one in fresh}
+        urls = [url for url, _payload in pairs]
+        listed = ", ".join(f"«{names.get(url) or url}»" for url in urls)
+        one = len(pairs) == 1
+        message = {
+            "role": "user",
+            "content": ("🖼 К теме обсуждения "
+                        + ("приложена картинка " if one else "приложены картинки: ")
+                        + listed
+                        + (" — посмотри на неё: она относится к теме, " if one
+                           else " — посмотри на них: они относятся к теме, ")
+                        + "о которой пойдёт разговор."),
+            "name": "topic",
+            "images": [payload for _url, payload in pairs],
+        }
+        if image_keys is not None:
+            image_keys[id(message)] = urls
+        return message
+
     def remember_pictures_to_send(self, model: str, messages: list,
                                   image_keys: dict) -> None:
         """Запомнить, какие картинки уедут этой модели на этом ходу.
@@ -3559,6 +3709,56 @@ class DebateSession:
         """
         self.images_shown = {}
         self.images_pending = {}
+
+    def spoken_count(self) -> int:
+        """Сколько реплик уже сказано — по истории хода и по ленте, что больше.
+
+        Историю читает ход (см. _format_history), а ленту — возврат спектакля
+        (см. restore_shown_pictures), и числа у них совпадают не всегда: спектакль
+        вернулся из ДАМПа — история хода ещё пуста, а лента полна
+        (см. load_play_from_dump), а тему и приложенное к ней правят как раз перед
+        «Доиграть». Берём большее: ошибиться в меньшую сторону — решить, что
+        картинка уже показана, и не показать её никому.
+        """
+        return max(len(self.conversation_history), len(self.posts))
+
+    def forget_topic_pictures(self) -> None:
+        """Приложенное к теме — снова невиданное: тему сменили, и разговор с ней другой.
+
+        Тема — это про что спектакль: с новой темой модели не слышали приложенного
+        к ней вовсе, поэтому картинка темы снова свежая у каждой — и каждая получит
+        её по разу (см. topic_picture_message). Приложенное к репликам это не
+        трогает: оно принадлежит своим репликам, и смена темы их не переписывает.
+
+        Отметка `since` становится той репликой, на которой тему сменили: кто
+        говорил раньше, тот картинку с новой темой не застал и после возврата
+        спектакля получит её заново (см. restore_shown_pictures).
+        """
+        urls = {str((one or {}).get("url") or "")
+                for one in self.topic_attachments or []}
+        urls.discard("")
+        if not urls:
+            return
+        for model in list(self.images_shown):
+            left = set(self.images_shown[model]) - urls
+            if left:
+                self.images_shown[model] = left
+            else:
+                del self.images_shown[model]
+        # И ход, начатый до смены темы, картинку показанной не отметит: он про
+        # прежний разговор, а с новым она ещё не уезжала (см. commit_shown_pictures)
+        for model in list(self.images_pending):
+            left = set(self.images_pending[model]) - urls
+            if left:
+                self.images_pending[model] = left
+            else:
+                del self.images_pending[model]
+        # Отметка — сколько реплик уже сказано (см. spoken_count): кто говорил
+        # раньше неё, тот картинку с новой темой не застал
+        now = self.spoken_count()
+        for one in self.topic_attachments or []:
+            if isinstance(one, dict):
+                one["since"] = now
 
     def restore_shown_pictures(self, history: list = None) -> None:
         """Вспомнить по истории, кто из моделей уже видел приложенное.
@@ -3601,6 +3801,19 @@ class DebateSession:
             for model, said in last_of_model.items():
                 if said > index:
                     shown.setdefault(model, set()).update(urls)
+        # Приложенное к теме — не к реплике: показывать его начали в тот момент,
+        # когда в ленте было `since` реплик (см. set_topic_attachments). Значит,
+        # его видел тот, чьё слово идёт после этой отметки, — и после возврата
+        # спектакля видно то же, что было на ходу. У картинки, приложенной до
+        # начала, отметка 0: её видел каждый, кто вообще говорил
+        for one in self.topic_attachments or []:
+            url = str((one or {}).get("url") or "")
+            if not url:
+                continue
+            since = _as_int((one or {}).get("since"))
+            for model, said in last_of_model.items():
+                if said >= since:
+                    shown.setdefault(model, set()).update([url])
         self.images_shown = shown
         self.images_pending = {}
         count = sum(len(urls) for urls in shown.values())
@@ -3770,8 +3983,13 @@ class DebateSession:
             trimmed, trim_report = text.trim_history_with_report(
                 history_messages, text.estimate_tokens(system_prompt),
                 model=participant.get("model", ""))
+            # Картинка темы — перед историей: она вводит разговор, а не отвечает
+            # на чужую реплику (см. topic_picture_message)
+            topic_message = self.topic_picture_message(model, image_keys)
+            if topic_message is not None:
+                messages.append(topic_message)
             messages.extend(trimmed)
-            self.remember_pictures_to_send(model, trimmed, image_keys)
+            self.remember_pictures_to_send(model, messages, image_keys)
             if report is not None:
                 report.update(trim_report)
 
@@ -3804,8 +4022,13 @@ class DebateSession:
         trimmed, trim_report = text.trim_history_with_report(
             history_messages, text.estimate_tokens(system_prompt),
             model=participant.get("model", ""))
+        # Картинка темы — первым сообщением, сразу после системного промпта:
+        # она о теме, а не о чьей-то реплике, и место её — перед разговором
+        topic_message = self.topic_picture_message(model, image_keys)
+        if topic_message is not None:
+            messages.append(topic_message)
         messages.extend(trimmed)
-        self.remember_pictures_to_send(model, trimmed, image_keys)
+        self.remember_pictures_to_send(model, messages, image_keys)
         if report is not None:
             report.update(trim_report)
 
@@ -4777,6 +5000,32 @@ def report_cast_vision(participants: list) -> list:
     return checked
 
 
+def report_topic_picture(participants: list) -> None:
+    """Кому уедет приложенное к теме — словами, как и про зрение состава.
+
+    Картинка темы уезжает не всем и не всегда: без зрения она не едет вовсе,
+    а показанную модель помнит и второй раз не получает (см.
+    topic_picture_message). Сказать об этом заранее — то же, что и про само
+    зрение (см. report_cast_vision): иначе «приложил, а реакции нет» выглядит
+    как поломка, а не как слепая модель.
+    """
+    if not session.topic_attachments:
+        return
+    names = ", ".join(f"«{one.get('name') or one.get('url')}»"
+                     for one in session.topic_attachments)
+    readers = []
+    for participant in participants or []:
+        model = str((participant or {}).get("model") or "")
+        if model and model != "human" and ollama_api.takes_images(model):
+            readers.append((participant or {}).get("display_name") or model)
+    if readers:
+        print(f"  🖼  К теме приложено: {names} — уедет в первом акте: "
+              + ", ".join(readers))
+    else:
+        print(f"  🖼  К теме приложено: {names} — но читать её некому: "
+              f"картинок не читает ни одна модель состава")
+
+
 def run_debate_thread(topic: str, on_post=None, on_draft=None):
     """
     Играет спектакль акт за актом, пока режиссёр не опустит занавес.
@@ -4815,6 +5064,9 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     # Кому уедет приложенное — выясняется до первого хода: об этом говорят
     # и пульт, и эта строка, а моделей без зрения больше не застают врасплох
     report_cast_vision(runtime_participants)
+    # И про картинку темы — тем же порядком: приложил режиссёр — сразу видно,
+    # кому она уедет, а кому нет (см. report_topic_picture)
+    report_topic_picture(runtime_participants)
 
     print("\n🎭 Используем подготовленный грим и костюмы...")
     for participant in runtime_participants:

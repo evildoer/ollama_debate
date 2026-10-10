@@ -92,8 +92,17 @@ HTML_TEMPLATE = """
         .post-avatar img { width: 150px; height: 150px; object-fit: cover; border: 1px solid #000000; filter: grayscale(100%); }
         .post-avatar .emoji { width: 150px; height: 150px; background: #ffffff; border: 1px solid #000000; display: flex; align-items: center; justify-content: center; font-size: 75px; }
         .post-attachments { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
-        .post-attachments img { max-height: 220px; max-width: 100%; border: 1px solid #000000; filter: grayscale(100%); cursor: pointer; }
-        body.dark .post-attachments img { border-color: #3a3a3a; filter: grayscale(100%) brightness(0.82); }
+        /* Приложенное к реплике и к теме показывается как есть, в цвете: это то,
+           что принёс режиссёр, — картинка, а не украшение сцены. Аватарки при
+           этом остаются чёрно-белыми: оформление сцены, см. «Тёмная сцена»
+           в README */
+        .post-attachments img { max-height: 220px; max-width: 100%; border: 1px solid #000000; cursor: pointer; }
+        body.dark .post-attachments img { border-color: #3a3a3a; }
+        /* Приложенное к теме — та же рамка, что у картинки реплики, но меньше:
+           это шапка, а не реплика, и во весь экран она бы её вытеснила */
+        .topic-pictures { margin: 16px 0 0 0; }
+        .topic-pictures:empty { display: none; }
+        .topic-pictures img { max-height: 150px; }
         /* «+» у модели — читает картинки: серым и мелко, чтобы не мешало имени */
         .vision-mark { color: #1976d2; font-weight: bold; }
         /* Убрать приложенную картинку: квадратик поверх её угла. Фон — из класса,
@@ -245,6 +254,9 @@ HTML_TEMPLATE = """
         .search-query:not(:last-child)::after { content: " • "; }
         .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.95); cursor: pointer; }
         .modal-content { margin: auto; display: block; max-width: 90%; max-height: 90%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); border: 1px solid #000000; filter: grayscale(100%); }
+        /* Приложенную картинку и в полном размере видно как есть: приглушать
+           её — значит показывать не то, что принёс режиссёр */
+        .modal-content.attachment-full { filter: none; }
         .modal-close { position: absolute; top: 20px; right: 40px; color: white; font-size: 40px; font-weight: bold; cursor: pointer; }
         /* Меню эмодзи-аватара: то же затемнение, что у полного портрета,
            но внутри — набор значков, а не одна картинка */
@@ -381,7 +393,9 @@ HTML_TEMPLATE = """
                     <div class="header-date" id="headerDate"></div>
                     <h1>AI Театр</h1>
                     <div class="header-subtitle">Спектакль нейросетей • Акт I</div>
-                    <div class="header-topic" id="topicDisplay" style="display:none;"></div>
+                    <!-- Тема и приложенная к ней картинка — один блок: пустой
+                         рамки не должно быть ни у того, ни у другого (см. setTopicDisplay) -->
+                    <div class="header-topic" id="topicDisplay" style="display:none;"><span id="topicText"></span><div class="post-attachments topic-pictures" id="topicPictures"></div></div>
                 </div>
                 <!-- Единый режиссёрский пульт: та же форма служит и настройкой
                      спектакля, и пультом модератора на ходу -->
@@ -419,6 +433,15 @@ HTML_TEMPLATE = """
                             <button class="btn btn-secondary" onclick="applyTopic()">🎯 Применить тему</button>
                             <span style="font-size:12px;color:#666;">Ctrl+Enter — применить не отрывая рук</span>
                         </div>
+                        <!-- Картинка к теме: та же приложенная картинка, что и у реплики,
+                             только темы — и по тем же правилам уезжает моделям с «+» -->
+                        <div class="panel-note" style="margin-top:14px;">🖼 <strong>Картинка к теме</strong>: уедет тем моделям, у которых рядом с именем стоит «+», — как и приложенное к реплике, каждой такой модели один раз. Дальше — обсуждение: показанную картинку модель помнит, и второй раз ей она не уезжает. Видна она в шапке, рядом с темой, и хранится вместе с ней — переживёт и перезапуск, и архив.</div>
+                        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+                            <button class="btn btn-secondary" onclick="pickTopicFiles()" title="Приложить картинку к теме. Она уедет только тем моделям, которые читают картинки: у таких рядом с именем стоит «+"">🖼 Приложить картинку к теме</button>
+                            <input type="file" id="topicFileInput" accept="image/*" multiple style="display:none;" onchange="attachTopicFiles(this.files)">
+                            <span id="topicAttachHint" style="font-size:12px;color:#666;font-style:italic;"></span>
+                        </div>
+                        <div id="topicChips" style="margin-top:10px;"></div>
                     </div>
 
                     <div class="panel-section" id="sec-cast">
@@ -597,6 +620,8 @@ HTML_TEMPLATE = """
         let thinkingModels = [];       // из них те, что умеют размышлять (capabilities Ollama)
         let visionModels = [];         // и те, что читают картинки: у них в пульте стоит «+»
         let pendingUploads = [];       // приложенное к реплике, но ещё не отправленное
+        let topicPictures = [];        // приложенное к теме: список держит сервер
+        let topicSavePending = false;  // список в пути: опрос не должен его перебивать
         let debateRunning = false;
         let pollInterval = null;
         let sectionsPhase = null;      // фаза пульта: настройка / спектакль идёт / занавес
@@ -726,6 +751,8 @@ HTML_TEMPLATE = """
                             ? 'на каждый спектакль характеры тянутся заново' : '';
                     }
                     if (data.topic) document.getElementById('topicInput').value = data.topic;
+                    // И приложенное к теме: оно переживает и перезапуск, и архив
+                    syncTopicPictures(data.topic_attachments);
                     return data;
                 })
                 .catch(err => { console.error('Не удалось загрузить состав:', err); return {}; });
@@ -822,6 +849,7 @@ HTML_TEMPLATE = """
 
                     setTopicDisplay(data.topic);
                     if (data.topic) document.getElementById('topicInput').value = data.topic;
+                    syncTopicPictures(data.topic_attachments);
                     document.getElementById('posts').innerHTML = '';
 
                     addNewPosts(data.new_posts);
@@ -1514,8 +1542,8 @@ HTML_TEMPLATE = """
         function openAvatarModal(idx) {
             const u = cast[idx] && cast[idx].avatar_url;
             if (u) {
-                document.getElementById('avatarModalImg').src = u;
-                document.getElementById('avatarModal').style.display = 'block';
+                // Портрет, а не приложение: показывается так же, как стоит в ленте
+                showAvatarFull(u, false);
                 return;
             }
             openEmojiPicker({index: idx});
@@ -1564,6 +1592,10 @@ HTML_TEMPLATE = """
             // и сохранится всё разом
             if (typeof spot.index === 'number' && !runningShow()) {
                 closeEmojiPicker();
+                // Карточки собираются заново из состава, а набранное в поле имя
+                // в состав ещё не попало (его берут из полей, см. collectCast):
+                // без переноса выбор значка стирал бы вписанное имя
+                syncCastFromForm();
                 renderCastEditor();
                 return;
             }
@@ -1614,15 +1646,24 @@ HTML_TEMPLATE = """
             });
         }
         
-        // Тема в шапке: пустой рамки с прочерком быть не должно — пока темы нет,
-        // блока просто не видно. Тема, применённая раньше, остаётся на месте,
-        // даже если поле ввода потом очистили
+        // Видна ли тема в шапке: она есть, если есть хоть слова, хоть картинка —
+        // у темы с картинкой, но без слов, пустой рамки быть не должно
+        function topicBoxVisible(text, pictures) {
+            return !!(String(text === undefined || text === null ? '' : text).trim()
+                      || (pictures || []).length);
+        }
+
+        // Тема в шапке: пустой рамки с прочерком быть не должно — пока ни темы,
+        // ни картинки нет, блока просто не видно. Тема, применённая раньше,
+        // остаётся на месте, даже если поле ввода потом очистили, а приложенная
+        // к теме картинка показывается рядом с ней (см. renderTopicPictures)
         function setTopicDisplay(text) {
             const box = document.getElementById('topicDisplay');
-            if (!box) return;
+            const words = document.getElementById('topicText');
+            if (!box || !words) return;
             const clean = String(text === undefined || text === null ? '' : text).trim();
-            box.textContent = clean;
-            box.style.display = clean ? 'block' : 'none';
+            words.textContent = clean;
+            box.style.display = topicBoxVisible(clean, topicPictures) ? 'block' : 'none';
         }
 
         // Тема: одна кнопка на обе стадии — и в настройке, и на ходу режиссёра
@@ -1637,6 +1678,7 @@ HTML_TEMPLATE = """
                     if (!data.success) { alert('❌ ' + (data.error || 'не удалось сменить тему')); return; }
                     input.value = data.topic;
                     setTopicDisplay(data.topic);
+                    syncTopicPictures(data.topic_attachments);
                     noteSettingsWrite(data.saved, true);
                 })
                 .catch(err => { console.error('Ошибка смены темы:', err); alert('❌ ' + err.message); });
@@ -1701,6 +1743,7 @@ HTML_TEMPLATE = """
                 }
                 // Тему в шапке берём из ответа сервера: он знает, с какой играет
                 setTopicDisplay(data.topic || topic);
+                syncTopicPictures(data.topic_attachments);
                 // Спектакль пошёл: убираем баннер с прошлой неудачной попытки
                 const box = document.getElementById('modelsWarning');
                 if (box) { box.style.display = 'none'; box.innerHTML = ''; }
@@ -1750,6 +1793,9 @@ HTML_TEMPLATE = """
                         document.getElementById('topicInput').value = data.topic;
                         setTopicDisplay(data.topic);
                     }
+                    // Картинка темы переживает и «Новый спектакль»: она про сюжет,
+                    // а не про труппу (см. show.new_show)
+                    syncTopicPictures(data.topic_attachments);
                     noteSettingsWrite(data.saved, true);
                     return loadCast();
                 })
@@ -2770,7 +2816,7 @@ HTML_TEMPLATE = """
             if (!list.length) return '';
             return '<div class="post-attachments">' + list.map(one =>
                 `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
-                + ` onclick="showAvatarFull('${one.url}')">`).join('') + '</div>';
+                + ` onclick="showAvatarFull('${one.url}', true)">`).join('') + '</div>';
         }
 
         // Текст реплики в ленте. У хода, оборванного смертью процесса, текста нет
@@ -2858,7 +2904,17 @@ HTML_TEMPLATE = """
             if (postText) postText.innerHTML = draft.content_html || escapeHtml(draft.content || '');
         }
         
-        function showAvatarFull(url) { document.getElementById('avatarModalImg').src = url; document.getElementById('avatarModal').style.display = 'block'; }
+        // Картинка целиком. Портрет показывается так же, как стоит в ленте, —
+        // чёрно-белым, как всё оформление сцены; приложенная к реплике или к теме —
+        // как есть, в цвете: её принёс режиссёр, а не сцена (см. .attachment-full)
+        function showAvatarFull(url, picture) {
+            const img = document.getElementById('avatarModalImg');
+            if (img) {
+                img.classList.toggle('attachment-full', !!picture);
+                img.src = url;
+            }
+            document.getElementById('avatarModal').style.display = 'block';
+        }
 
         // Формулы: сервер отдаёт LaTeX внутри span.math (markdown его не портит),
         // здесь он превращается в MathML — рисует сам браузер, без картинок и шрифтов.
@@ -3049,6 +3105,9 @@ HTML_TEMPLATE = """
             // Запись пульта могла быть и не отсюда: о ней рассказывает состояние
             noteSettingsWrite(data.settings_write);
             if (data.topic) setTopicDisplay(data.topic);
+            // Приложенное к теме приходит с каждым состоянием: так его изменение
+            // видно и в другой вкладке, и после возврата спектакля из архива
+            syncTopicPictures(data.topic_attachments);
             updatePanel();
             if (data.waiting_for_human) {
                 // Ход человека: имя всегда, роль — только если она особенная
@@ -3178,10 +3237,124 @@ HTML_TEMPLATE = """
             box.innerHTML = pendingUploads.map((one, index) =>
                 '<span style="position:relative;display:inline-block;margin-right:14px;">'
                 + `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
-                + ' style="height:72px;border:1px solid #000000;filter:grayscale(100%);">'
+                + ' style="height:72px;border:1px solid #000000;">'
                 + `<button class="chip-drop" onclick="dropUpload(${index})"`
                 + ' title="Убрать приложение">✕</button>'
                 + '</span>').join('');
+        }
+
+        // ── ПРИЛОЖЕННОЕ К ТЕМЕ ────────────────────────────────────────────
+        // Тема — не реплика: приложить картинку к ней в истории было не к чему,
+        // и она лежит отдельно. Уезжает она по тем же правилам, что и приложенное
+        // к реплике (см. show.topic_picture_message), а хозяин списка — сервер:
+        // страница показывает то, что он вернул, а не то, что набрала сама
+        function readAsDataUrl(file) {
+            return new Promise((done, fail) => {
+                const reader = new FileReader();
+                reader.onload = () => done(reader.result);
+                reader.onerror = () => fail(new Error('не удалось прочитать ' + file.name));
+                reader.readAsDataURL(file);
+            });
+        }
+
+        // Приложенное к теме: превью в пульте и сама картинка в шапке
+        function renderTopicPictures() {
+            const chips = document.getElementById('topicChips');
+            if (chips) chips.innerHTML = topicPictures.map((one, index) =>
+                '<span style="position:relative;display:inline-block;margin-right:14px;">'
+                + `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
+                + ' style="height:72px;border:1px solid #000000;">'
+                + `<button class="chip-drop" onclick="dropTopicPicture(${index})"`
+                + ' title="Убрать картинку от темы">✕</button></span>').join('');
+            const box = document.getElementById('topicPictures');
+            if (box) box.innerHTML = topicPictures.map(one =>
+                `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
+                + ` onclick="showAvatarFull('${one.url}', true)">`).join('');
+            // Шапка после этого решает сама, видно ли тему: она видна и когда
+            // слов нет, а картинка есть (см. setTopicDisplay)
+            const words = document.getElementById('topicText');
+            setTopicDisplay(words ? words.textContent : '');
+        }
+
+        // Список с сервера: он один хозяин приложенного, и по нему видно то,
+        // что вернули архив или «Новый спектакль» (см. applyStatus)
+        function syncTopicPictures(list) {
+            // Своё приложение ещё в пути: перебить его старым списком — значит
+            // показать его же, но без только что приложенной картинки
+            if (topicSavePending) return;
+            const now = (list || []).map(one => `${one.name}|${one.url}`).join(',');
+            const had = topicPictures.map(one => `${one.name}|${one.url}`).join(',');
+            if (now === had) return;
+            topicPictures = (list || []).map(one => ({name: one.name, url: one.url}));
+            renderTopicPictures();
+        }
+
+        function pickTopicFiles() {
+            const input = document.getElementById('topicFileInput');
+            if (input) input.click();
+        }
+
+        function noteTopicAttach(text) {
+            const hint = document.getElementById('topicAttachHint');
+            if (hint) hint.textContent = text || '';
+        }
+
+        function attachTopicFiles(files) {
+            const input = document.getElementById('topicFileInput');
+            // Файл читает браузер и отправляет адресом-данными: так его принимает
+            // сервер (см. /api/upload и show.save_upload)
+            const pictures = Array.from(files || []).filter(file => file.type.startsWith('image/'));
+            // Поле очищается сразу: иначе тот же файл второй раз не приложить
+            if (input) input.value = '';
+            if (!pictures.length) { noteTopicAttach('⚠️ Только картинки'); return; }
+            noteTopicAttach('⏳ прикладываю…');
+            // Каждый файл сам по себе: непринятый не должен уносить с собой
+            // остальные — иначе выбранные разом картинки пропадали бы из-за одной
+            Promise.all(pictures.map(file => readAsDataUrl(file).then(dataUrl =>
+                fetch('/api/upload', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name: file.name, data_url: dataUrl})
+                }).then(r => r.json().then(data => {
+                    if (!r.ok) throw new Error(data.error || 'не принято');
+                    return data;
+                })).then(one => {
+                    topicPictures.push({name: one.name, url: one.url});
+                    return '';
+                }).catch(err => '⚠️ ' + file.name + ': ' + (err.message || 'не приложилось'))
+            )))
+            .then(problems => {
+                const failed = problems.filter(text => text);
+                renderTopicPictures();
+                // Приложенное уходит на сервер одним списком: он один его и держит
+                const saved = topicPictures.length ? saveTopicAttachments() : Promise.resolve();
+                saved.then(() => noteTopicAttach(failed.length ? failed[0] : ''));
+            });
+        }
+
+        function dropTopicPicture(index) {
+            topicPictures.splice(index, 1);
+            renderTopicPictures();
+            saveTopicAttachments();
+        }
+
+        // Список уходит целиком: убрать картинку — это тот же список без неё
+        // (см. /api/moderator/topic/attachments). Возвращает обещание: приложение
+        // нескольких файлов ждёт его, а не гадает, когда список дошёл до сервера
+        function saveTopicAttachments() {
+            topicSavePending = true;
+            return fetch('/api/moderator/topic/attachments', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({attachments: topicPictures.map(one => ({name: one.name, url: one.url}))})
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) { alert('❌ ' + (data.error || 'не удалось приложить картинку к теме')); return; }
+                topicPictures = (data.topic_attachments || []).map(one => ({name: one.name, url: one.url}));
+                noteTopicAttach('');
+                noteSettingsWrite(data.saved, true);
+            })
+            .catch(err => { console.error('Ошибка приложения к теме:', err); alert('❌ ' + err.message); })
+            .finally(() => { topicSavePending = false; renderTopicPictures(); });
         }
 
         function sendModeratorMessage() {

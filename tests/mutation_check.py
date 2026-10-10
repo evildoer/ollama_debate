@@ -821,14 +821,16 @@ BUGS = {
     ],
     "полный сброс снова оставляет в файле весь сохранённый пульт": [
         ("aitheatre/show.py",
-         '            json.dumps({"version": 2, "topic": session.topic or ""},',
+         '            json.dumps({"version": 2, "topic": session.topic or "",\n'
+         '                        "topic_attachments": [dict(one) for one\n'
+         '                                              in session.topic_attachments or []]},',
          '            json.dumps({"version": 2, "topic": session.topic or "",\n'
          '                        "cast": [dict(place) for place in session.runtime_participants]},'),
     ],
     "полный сброс снова забывает тему": [
         ("aitheatre/show.py",
-         '            json.dumps({"version": 2, "topic": session.topic or ""},',
-         '            json.dumps({"version": 2, "topic": ""},'),
+         '            json.dumps({"version": 2, "topic": session.topic or "",',
+         '            json.dumps({"version": 2, "topic": "",'),
     ],
     "правка инструкций в редакторе снова не сохраняется": [
         ("aitheatre/web.py",
@@ -1375,6 +1377,125 @@ BUGS = {
         ("aitheatre/show.py",
          '    checked = ollama_api.cast_vision(participants)',
          '    checked = []'),
+    ],
+    "о том, кому уедет картинка темы, снова молчат": [
+        ("aitheatre/show.py",
+         '    if readers:\n'
+         '        print(f"  🖼  К теме приложено: {names} — уедет в первом акте: "\n'
+         '              + ", ".join(readers))',
+         '    if readers:\n'
+         '        print(f"  🖼  К теме приложено: {names}")'),
+    ],
+    "картинка темы снова уезжает и тем, кто картинки не читает": [
+        ("aitheatre/show.py",
+         '        if not ollama_api.takes_images(model):\n'
+         '            return None',
+         '        if False:\n'
+         '            return None'),
+    ],
+    "показанную картинку темы снова отправляют второй раз": [
+        # Именно отбор, а не ранний выход: с одним ранним выходом свежие
+        # всё равно отбираются ниже (см. post_image_pairs), и поломки не вышло бы
+        ("aitheatre/show.py",
+         '        fresh = [one for one in self.topic_attachments\n'
+         '                 if str((one or {}).get("url") or "") not in shown]',
+         '        fresh = list(self.topic_attachments)'),
+    ],
+    "картинка темы снова едет после истории, а не перед ней": [
+        ("aitheatre/show.py",
+         '        topic_message = self.topic_picture_message(model, image_keys)\n'
+         '        if topic_message is not None:\n'
+         '            messages.append(topic_message)\n'
+         '        messages.extend(trimmed)',
+         '        topic_message = self.topic_picture_message(model, image_keys)\n'
+         '        messages.extend(trimmed)\n'
+         '        if topic_message is not None:\n'
+         '            messages.append(topic_message)'),
+    ],
+    "приложенное к теме снова не помнит, когда его приложили": [
+        ("aitheatre/show.py",
+         '        one["since"] = was.get(str(one.get("url") or ""), now)',
+         '        one["since"] = 0'),
+    ],
+    "возврат спектакля снова забывает, кто видел картинку темы": [
+        ("aitheatre/show.py",
+         '            since = _as_int((one or {}).get("since"))\n'
+         '            for model, said in last_of_model.items():\n'
+         '                if said >= since:',
+         '            since = _as_int((one or {}).get("since"))\n'
+         '            for model, said in last_of_model.items():\n'
+         '                if False:'),
+    ],
+    "полный сброс снова забывает картинку темы": [
+        ("aitheatre/show.py",
+         '            json.dumps({"version": 2, "topic": session.topic or "",\n'
+         '                        "topic_attachments": [dict(one) for one\n'
+         '                                              in session.topic_attachments or []]},',
+         '            json.dumps({"version": 2, "topic": session.topic or ""},'),
+    ],
+    "картинка темы снова не сохраняется вместе с темой": [
+        ("aitheatre/show.py",
+         '                "topic_attachments": [dict(one) for one in session.topic_attachments or []],',
+         '                "topic_attachments": [],'),
+    ],
+    "страница снова не знает, что приложено к теме": [
+        ("aitheatre/web.py",
+         '        "topic": show.session.topic,\n'
+         '        # Приложенное к теме: списком, а не одной картинкой — режиссёр прикладывает\n'
+         '        # сколько нужно, а порядок задаёт показ (см. show.topic_picture_message)\n'
+         '        "topic_attachments": [dict(one) for one in show.session.topic_attachments],',
+         '        "topic": show.session.topic,\n'
+         '        "topic_attachments": [],'),
+    ],
+    "тема из одной картинки снова исчезает из шапки": [
+        ("aitheatre/page.py",
+         "            return !!(String(text === undefined || text === null ? '' : text).trim()\n"
+         "                      || (pictures || []).length);",
+         "            return !!String(text === undefined || text === null ? '' : text).trim();"),
+    ],
+    "смена темы снова не показывает её картинку заново": [
+        # Тема — про что спектакль, а не подпись к нему: с новой темой модели
+        # приложенного к ней не видели, и показ обязан начаться заново
+        # (см. forget_topic_pictures)
+        ("aitheatre/show.py",
+         '    if text and text != (session.topic or "").strip():\n'
+         '        session.forget_topic_pictures()\n'
+         '        session.topic = text',
+         '    if text:\n'
+         '        session.topic = text'),
+    ],
+    "смена темы снова поднимает и приложенное к репликам": [
+        # Именно отбор по своей теме, а не ранний выход: без него свежим
+        # становится всё приложенное, и смена темы переписывает чужие реплики
+        ("aitheatre/show.py",
+         '        urls = {str((one or {}).get("url") or "")\n'
+         '                for one in self.topic_attachments or []}',
+         '        urls = {url for shown in self.images_shown.values() for url in shown}'),
+    ],
+    "выбор значка в составе снова стирает набранное имя": [
+        # Карточки собираются заново из состава, а набранное в поле имя в состав
+        # ещё не попало (его берут из полей, см. collectCast)
+        ("aitheatre/page.py",
+         '                syncCastFromForm();\n'
+         '                renderCastEditor();',
+         '                renderCastEditor();'),
+    ],
+    "пульт снова меняет тему, не начиная показ её картинки заново": [
+        ("aitheatre/web.py",
+         "    new_topic = show.set_topic(new_topic)",
+         "    show.session.topic = new_topic"),
+    ],
+    "старт с новой темой снова не начинает показ картинки заново": [
+        ("aitheatre/web.py",
+         "    topic = show.set_topic(topic)",
+         "    show.session.topic = topic"),
+    ],
+    "смена темы снова забывает, кто говорил до неё": [
+        # Перед «Доиграть» история хода ещё пуста, а лента нет: отметка
+        # по одной только истории отпустила бы картинку тем, кто тему уже видел
+        ("aitheatre/show.py",
+         "        return max(len(self.conversation_history), len(self.posts))",
+         "        return len(self.conversation_history)"),
     ],
     "остаток на ключе снова просят у шлюза без надобности": [
         ("aitheatre/web.py",

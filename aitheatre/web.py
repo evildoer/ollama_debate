@@ -91,6 +91,9 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         "finished": show.session.finished,
         "session_id": show.session.session_id,
         "topic": show.session.topic,
+        # Приложенное к теме: списком, а не одной картинкой — режиссёр прикладывает
+        # сколько нужно, а порядок задаёт показ (см. show.topic_picture_message)
+        "topic_attachments": [dict(one) for one in show.session.topic_attachments],
         "new_posts": ([show.post_view(p) for p in show.session.posts[max(0, last_post_count):]]
                       if with_posts else []),
         "total_posts": len(show.session.posts),
@@ -438,6 +441,9 @@ def participants():
         "running": show.session.running,
         "finished": show.session.finished,
         "topic": show.session.topic,
+        # Приложенное к теме — при загрузке страницы: пульт должен показать
+        # прежнюю картинку, а не пустое место (см. show.load_theatre_settings)
+        "topic_attachments": [dict(one) for one in show.session.topic_attachments],
         # Сразу сообщаем интерфейсу, если нужных моделей нет в Ollama
         "models_status": models_status_payload(models),
         # И если они не влезают в видеопамять при текущем num_ctx
@@ -520,7 +526,9 @@ def start():
     if not topic:
         return jsonify({"success": False,
                         "error": "Тема не указана — напишите её в блоке «01 · Сюжет»"})
-    show.session.topic = topic
+    # Старт с новой темой — тоже смена темы: приложенное к ней двинется
+    # всем по разу, даже если прежде тему меняли на ходу (см. show.set_topic)
+    topic = show.set_topic(topic)
     # Перед спектаклем на диск уходит и тема, и состав: «нажал старт» — значит
     # настроенное уже в файле, а не осталось в памяти процесса
     show.save_theatre_settings("старт спектакля: тема и состав")
@@ -569,6 +577,8 @@ def start():
     # как новый спектакль с чистого листа
     return jsonify({"success": True, "session_id": show.session.session_id,
                     "topic": show.session.topic,
+                    "topic_attachments": [dict(one) for one
+                                          in show.session.topic_attachments],
                     "resumed": show.session.resumed,
                     **saved_payload(),
                     # Ход, оборванный смертью процесса, театр переспросит и запишет
@@ -589,7 +599,10 @@ def reset():
     # Тему возвращаем вместе с составом: «Новый спектакль» имена меняет,
     # а тему оставляет — поле в пульте должно остаться заполненным
     return jsonify({"success": True, "participants": cast_payload(),
-                    "topic": show.session.topic, **saved_payload()})
+                    "topic": show.session.topic,
+                    "topic_attachments": [dict(one) for one
+                                          in show.session.topic_attachments],
+                    **saved_payload()})
 
 
 @app.route('/api/settings/reset', methods=['POST'])
@@ -685,12 +698,38 @@ def moderator_topic():
     if not new_topic:
         return jsonify({"success": False, "error": "Тема не указана"})
     
-    show.session.topic = new_topic
+    # Смена темы — это и новый разговор: приложенное к новой теме модели
+    # ещё не видели, и каждая получит его по разу (см. show.set_topic)
+    new_topic = show.set_topic(new_topic)
     # Тема — часть пульта: придуманное однажды не должно спрашиваться заново
     # в каждом запуске
     show.save_theatre_settings("тема")
     print(f"🎬 Режиссёр сменил тему: {new_topic}")
-    return jsonify({"success": True, "topic": new_topic, **saved_payload()})
+    return jsonify({"success": True, "topic": new_topic,
+                    "topic_attachments": [dict(one) for one
+                                          in show.session.topic_attachments],
+                    **saved_payload()})
+
+
+@app.route('/api/moderator/topic/attachments', methods=['POST'])
+def moderator_topic_attachments():
+    """Приложить картинку к теме — или убрать приложенное (пустой список).
+
+    Приложенное приходит списком целиком: убрать картинку — это тот же список
+    без неё. Так состав и порядок приложенного не разъезжаются между страницей
+    и сервером, и одного маршрута хватает и на добавление, и на уборку.
+    Файл к этому моменту уже принят и проверен (см. /api/upload), а адреса
+    проверяются теми же сторожами (см. show.set_topic_attachments).
+    """
+    data = request.get_json(silent=True) or {}
+    taken = show.set_topic_attachments(data.get("attachments") or [])
+    # Приложенное к теме — часть пульта: придуманное и подобранное не должно
+    # спрашиваться заново в каждом запуске (см. show.save_theatre_settings)
+    show.save_theatre_settings("картинка к теме")
+    print(f"🎬 К теме приложено картинок: {len(taken)}")
+    return jsonify({"success": True,
+                    "topic_attachments": [dict(one) for one in taken],
+                    **saved_payload()})
 
 @app.route('/api/moderator/finish', methods=['POST'])
 def moderator_finish():

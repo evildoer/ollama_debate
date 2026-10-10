@@ -6369,6 +6369,145 @@ class TestRoutes(unittest.TestCase):
         self.assertTrue(data["success"])
         self.assertEqual(self.session.topic, "Новая тема")
 
+    def test_the_picture_of_the_theme_is_attached_and_removed_by_one_route(self):
+        """Приложить картинку к теме и убрать её — один список и один маршрут.
+
+        Файл к этому моменту уже принят и проверен (/api/upload), а адреса
+        проверяются теми же сторожами (см. show.set_topic_attachments): из формы
+        приходит чужой текст, и по нему нельзя ни прочитать что попало, ни
+        приложить к теме что-нибудь со стороны.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            uploads = Path(folder) / "uploads"
+            with mock.patch.object(settings, "UPLOAD_DIR", uploads), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                picture, error = show.save_upload(
+                    "схема.png",
+                    "data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+                self.assertEqual(error, "", "картинка обязана приниматься")
+                taken = self.client.post(
+                    "/api/moderator/topic/attachments",
+                    json={"attachments": [picture, {"url": "/uploads/../secret.png"}]}
+                ).get_json()
+                self.assertTrue(taken["success"], taken.get("error"))
+                self.assertEqual([one["url"] for one in taken["topic_attachments"]],
+                                 [picture["url"]],
+                                 "чужой адрес не должен становиться приложенным к теме")
+                state = self.client.get("/api/status").get_json()
+                self.assertEqual([one["url"] for one in state["topic_attachments"]],
+                                 [picture["url"]],
+                                 "страница не узнает, что приложено к теме")
+                removed = self.client.post("/api/moderator/topic/attachments",
+                                           json={"attachments": []}).get_json()
+                self.assertEqual(removed["topic_attachments"], [],
+                                 "убрать приложенное к теме нечем")
+                self.assertEqual(self.session.topic_attachments, [])
+
+    def test_the_topic_route_starts_the_picture_show_again(self):
+        """Смена темы через пульт: приложенное к новой теме модели увидят заново.
+
+        Маршрут ходит туда же, куда и старт спектакля (см. show.set_topic):
+        иначе «Применить тему» меняло бы слова, а картинку к ним — нет, и новую
+        тему читали бы без неё.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(settings, "UPLOAD_DIR", Path(folder) / "uploads"), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                picture, error = show.save_upload(
+                    "схема.png",
+                    "data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+                self.assertEqual(error, "")
+                self.client.post("/api/moderator/topic", json={"topic": "Прежняя тема"})
+                self.client.post("/api/moderator/topic/attachments",
+                                 json={"attachments": [picture]})
+                person = [one for one in self.session.runtime_participants
+                          if one.get("model") and one.get("model") != "human"][0]
+                # Так это выглядит после первого акта: картинку модели уже показали
+                self.session.images_shown = {person["model"]: {picture["url"]}}
+
+                data = self.client.post("/api/moderator/topic",
+                                        json={"topic": "Совсем другая тема"}).get_json()
+
+        self.assertTrue(data["success"], data.get("error"))
+        self.assertNotIn(picture["url"],
+                         self.session.images_shown.get(person["model"], set()),
+                         "с новой темой картинка осталась показанной — не уедет никому")
+        self.assertEqual(self.session.topic_attachments[0]["since"],
+                         len(self.session.conversation_history),
+                         "отметка не помнит, на какой реплике сменили тему")
+
+    def test_the_start_route_starts_the_picture_show_again(self):
+        """«Доиграть» с новой темой: картинка к ней снова невиданная.
+
+        Тему меняют в пульте и сразу жмут продолжение (см. show.set_topic):
+        приложенное к теме считается невиданным у всех, кто говорил до смены,
+        и в первом же ходу новой темы картинка уезжает заново — иначе новую
+        тему читали бы без неё, а заплативший за неё режиссёр не понял бы, почему.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(settings, "UPLOAD_DIR", Path(folder) / "uploads"), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                picture, error = show.save_upload(
+                    "схема.png",
+                    "data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+                self.assertEqual(error, "")
+                self.client.post("/api/moderator/topic", json={"topic": "Прежняя тема"})
+                self.client.post("/api/moderator/topic/attachments",
+                                 json={"attachments": [picture]})
+                person = [one for one in self.session.runtime_participants
+                          if one.get("model") and one.get("model") != "human"][0]
+                # Спектакль вернулся из ДАМПа: лента есть, а истории хода ещё нет —
+                # её собирает «Доиграть» (см. load_play_from_dump, start_show)
+                self.session.add_post(person["display_name"], person["model"],
+                                      "Тему вижу.", 1, dump=False)
+                self.session.conversation_history = []
+                self.session.images_shown = {person["model"]: {picture["url"]}}
+
+                data = self.client.post("/api/start",
+                                        json={"continue": True,
+                                              "topic": "Совсем другая тема"}).get_json()
+
+        self.assertTrue(data["success"], data.get("error"))
+        self.assertNotIn(picture["url"],
+                         self.session.images_shown.get(person["model"], set()),
+                         "картинка к новой теме осталась показанной: никто её не увидит")
+
+    def test_a_picture_attached_before_resuming_waits_for_everyone(self):
+        """Спектакль вернулся из ДАМПа, к теме приложили картинку — её не видел никто.
+
+        Историю хода собирает «Доиграть», а лента есть уже сейчас (см.
+        load_play_from_dump): отметка берётся по большему из двух, иначе приложенное
+        перед продолжением считалось бы показанным всем, кто говорил в прежнем
+        спектакле, — и не уехало бы никому.
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.object(settings, "UPLOAD_DIR", Path(folder) / "uploads"), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                picture, error = show.save_upload(
+                    "схема.png",
+                    "data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+                self.assertEqual(error, "")
+                self.client.post("/api/moderator/topic", json={"topic": "Тема"})
+                # Лента прежнего спектакля есть, а истории хода ещё нет
+                person = [one for one in self.session.runtime_participants
+                          if one.get("model") and one.get("model") != "human"][0]
+                self.session.add_post(person["display_name"], person["model"],
+                                      "Сказано в прежнем спектакле.", 1, dump=False)
+                self.session.conversation_history = []
+                self.client.post("/api/moderator/topic/attachments",
+                                 json={"attachments": [picture]})
+                self.assertEqual(self.session.topic_attachments[0]["since"],
+                                 len(self.session.posts),
+                                 "отметка не помнит, сколько реплик уже сказано")
+
+                data = self.client.post("/api/start",
+                                        json={"continue": True}).get_json()
+
+        self.assertTrue(data["success"], data.get("error"))
+        self.assertNotIn(picture["url"],
+                         self.session.images_shown.get(person["model"], set()),
+                         "картинка перед «Доиграть» осталась показанной: никто её не увидит")
+
     def test_judge_rules_are_saved_from_the_editor(self):
         with mock.patch.object(show, "save_theatre_settings") as save:
             data = self.client.post("/api/moderator/instructions",
@@ -7597,6 +7736,298 @@ class TestThePictureIsShownOnce(PicturesTest):
         self.assertNotIn("уже показана", self.joined(seen))
 
 
+class TestThePictureOnTheTheme(PicturesTest):
+    """Картинка, приложенная к теме: уезжает тем, кто читает, и только один раз.
+
+    У темы нет реплики, к которой её можно было бы приложить, поэтому она едет
+    своим сообщением — перед историей, а не внутри неё (см.
+    show.topic_picture_message). Правила те же, что у приложенного к реплике:
+    каждой модели — один раз, слепой — не уезжает вовсе, а не успевшая ответить
+    получит её на своём следующем ходу. Дальше о ней не говорят: она показана,
+    и разговор идёт своим ходом — так же, как сказал бы сам системный промпт,
+    у которого картинка темы и живёт.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.person = non_judge_ai(self.session)
+        self.picture = self.attach()
+        # Кто читает картинки, у местной модели выясняется у Ollama, а её в прогоне
+        # нет (см. NO_NETWORK): отвечаем за неё сами, а проверка слепой модели
+        # ставит свою подмену поверх этой
+        patcher = mock.patch.object(ollama_api, "takes_images", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def attached(self) -> list:
+        return show.set_topic_attachments([dict(self.picture)])
+
+    @staticmethod
+    def topic_messages(messages: list) -> list:
+        return [m for m in messages if m.get("name") == "topic"]
+
+    def spoken(self, round_num: int = 1, person: dict = None) -> list:
+        """Ход этой модели так, как его увидит она сама."""
+        return self.session.build_messages_for_ai(person or self.person, round_num)
+
+    def answered(self) -> None:
+        """Ход дошёл до ответа: приложенное к теме считается показанным."""
+        with mock.patch.object(ollama_api, "takes_images", return_value=True):
+            self.session.commit_shown_pictures(self.person["model"])
+
+    def test_the_topic_picture_goes_before_the_history(self):
+        """Картинка темы — сразу после системного промпта и перед разговором.
+
+        Внутри истории ей места нет: она не про чью-то реплику, а про тему,
+        и модель должна прочитать её зачин, а не в середине спора.
+        """
+        self.session.add_post("Живой", "human", "Скажите про схему.", 1, dump=False)
+        self.attached()
+        messages = self.spoken()
+
+        self.assertEqual(messages[0]["role"], "system")
+        topic = self.topic_messages(messages)
+        self.assertEqual(len(topic), 1, "картинка темы не собралась")
+        self.assertEqual(messages[1].get("name"), "topic",
+                         "картинка темы должна идти перед историей, а не после")
+        said = [index for index, one in enumerate(messages)
+                if "Скажите про схему" in str(one.get("content") or "")]
+        self.assertTrue(said and said[0] > 1,
+                        "реплика разговора оказалась раньше картинки темы")
+        self.assertTrue(topic[0]["images"], "сама картинка не приложена")
+        self.assertEqual(topic[0]["images"][0], show.post_images([self.picture])[0],
+                         "модели уехало не то, что приложил режиссёр")
+        self.assertIn(self.picture["name"], topic[0]["content"],
+                      "без имени непонятно, какую картинку прислали")
+
+    def test_a_turn_that_answered_does_not_see_it_again(self):
+        """Ответила — значит видела: второй раз картинка не уезжает и о ней молчат."""
+        self.attached()
+        self.spoken()
+        self.answered()
+
+        later = self.spoken(2)
+        self.assertEqual(self.topic_messages(later), [],
+                         "показанную картинку темы отправили второй раз")
+        self.assertEqual([m for m in later if m.get("images")], [])
+
+    def test_a_model_that_did_not_answer_gets_it_again(self):
+        """Не успела ответить — картинка вернётся: показанной она так и не стала."""
+        self.attached()
+        self.spoken()
+
+        self.assertTrue(self.topic_messages(self.spoken(2)),
+                        "картинка пропала, хотя ход до ответа не дошёл")
+
+    def test_a_model_without_vision_gets_no_topic_picture(self):
+        """Слепой модели не едет ни картинка, ни строка о ней: тему она читает и так."""
+        self.attached()
+        with mock.patch.object(ollama_api, "takes_images", return_value=False):
+            messages = self.spoken()
+
+        self.assertEqual(self.topic_messages(messages), [])
+        self.assertEqual([m for m in messages if m.get("images")], [])
+
+    def test_the_second_place_of_the_same_model_gets_nothing(self):
+        """Одной моделью картинка показывается один раз — как и приложенное к реплике.
+
+        Мест с одной моделью бывает и два, а глаза у неё одни: показанное
+        помнится моделью, а не местом (см. commit_shown_pictures).
+        """
+        self.attached()
+        other = [one for one in ai_participants(self.session)
+                 if one["display_name"] != self.person["display_name"]][0]
+        other["model"] = self.person["model"]
+        self.spoken()
+        self.answered()
+
+        self.assertEqual(self.topic_messages(self.spoken(1, other)), [],
+                         "вторая сцена той же модели получила картинку заново")
+
+    def test_the_returned_play_remembers_who_saw_it(self):
+        """Возврат спектакля: кто говорил, тот картинку видел.
+
+        В начале спектакля картинку темы получают все, кто её читает, поэтому
+        после возврата из архива или из ДАМПа её видел каждый, кто вообще
+        говорил, — и второй раз ей она не уезжает (см. restore_shown_pictures).
+        """
+        self.attached()
+        self.session.add_post(self.person["display_name"], self.person["model"],
+                              "Тему вижу, отвечаю.", 1, dump=False)
+        self.session.restore_shown_pictures()
+
+        self.assertEqual(self.topic_messages(self.spoken(2)), [],
+                         "картинка темы уехала заново, хотя модель её уже видела")
+        other = [one for one in ai_participants(self.session)
+                 if one["display_name"] != self.person["display_name"]][0]
+        self.assertTrue(self.topic_messages(self.spoken(2, other)),
+                        "модель, не видавшая картинку, осталась без неё")
+
+    def test_a_picture_attached_mid_show_waits_for_those_who_did_not_see_it(self):
+        """Приложенное на ходу видели не все: успевшие сказать раньше её ещё увидят.
+
+        Отметка `since` — сколько реплик было в ленте, когда картинку приложили
+        (см. set_topic_attachments): тот, чьё слово прозвучало раньше, картинку
+        не застал, и после возврата спектакля она ему уедет. Иначе приложение
+        к теме на ходу пропало бы для половины состава.
+        """
+        self.session.add_post("Живой", "human", "Сказано раньше.", 1, dump=False)
+        self.session.add_post(self.person["display_name"], self.person["model"],
+                              "И я сказала раньше.", 1, dump=False)
+        taken = show.set_topic_attachments([dict(self.picture)])
+        self.assertEqual(taken[0]["since"], 2,
+                         "отметка должна помнить, сколько реплик было к тому моменту")
+        self.session.restore_shown_pictures()
+
+        self.assertTrue(self.topic_messages(self.spoken(2)),
+                        "картинка не вернулась тому, кто её не видел")
+        # А кто говорил уже после приложения — тот её видел
+        self.session.add_post(self.person["display_name"], self.person["model"],
+                              "Сказано после картинки.", 2, dump=False)
+        self.session.restore_shown_pictures()
+
+        self.assertEqual(self.topic_messages(self.spoken(3)), [],
+                         "картинка уехала тому, кто говорил после неё")
+
+    def test_a_new_show_shows_the_topic_picture_again(self):
+        """В новом спектакле модель картинку не помнит: показывать придётся заново."""
+        self.attached()
+        self.session.add_post(self.person["display_name"], self.person["model"],
+                              "Тему вижу.", 1, dump=False)
+        self.session.restore_shown_pictures()
+        self.session.start_show("Тема")
+
+        self.assertTrue(self.topic_messages(self.spoken()),
+                        "в новом спектакле картинка темы не уехала")
+
+    def test_a_new_theme_lets_everyone_see_the_picture_once_again(self):
+        """Сменили тему — модели её картинку ещё не видели: она уезжает каждой по разу.
+
+        Тема — это про что спектакль, а не подпись к нему (см. show.set_topic):
+        с новой темой приложенное к ней снова невиданное, и показ повторяется —
+        иначе картинку к новой теме не увидел бы никто, кроме того, кто её принёс.
+        """
+        self.attached()
+        self.spoken()
+        self.answered()
+        self.assertEqual(self.topic_messages(self.spoken(2)), [],
+                         "предусловие: показанную картинку дважды не шлют")
+
+        show.set_topic("Совсем другая тема")
+
+        self.assertTrue(self.topic_messages(self.spoken(2)),
+                        "с новой темой картинка к ней не уехала заново")
+        # И снова один раз: ответила — значит видела
+        self.answered()
+        self.assertEqual(self.topic_messages(self.spoken(3)), [],
+                         "картинку к новой теме отправили второй раз")
+
+    def test_the_same_theme_does_not_show_the_picture_again(self):
+        """Ту же тему применили второй раз — разговор с ней тот же, и показа не повторяем."""
+        self.attached()
+        self.session.topic = "Тема"
+        self.spoken()
+        self.answered()
+
+        show.set_topic("Тема")
+
+        self.assertEqual(self.topic_messages(self.spoken(2)), [],
+                         "«Применить тему» второй раз повторило показ картинки")
+
+    def test_a_new_theme_marks_the_picture_from_that_moment(self):
+        """Кто говорил до смены темы, тот картинку к новой не застал.
+
+        Отметка `since` становится той репликой, на которой тему сменили, —
+        и после возврата спектакля картинка вернётся тому, кто говорил раньше
+        (см. forget_topic_pictures).
+        """
+        self.attached()
+        self.session.add_post(self.person["display_name"], self.person["model"],
+                              "Сказано при прежней теме.", 1, dump=False)
+
+        show.set_topic("Другая тема")
+
+        self.assertEqual(self.session.topic_attachments[0]["since"], 1,
+                         "отметка не помнит, на какой реплике сменили тему")
+        self.session.restore_shown_pictures()
+        self.assertTrue(self.topic_messages(self.spoken(2)),
+                        "картинка к новой теме не вернулась тому, кто говорил раньше")
+
+    def test_a_new_theme_does_not_touch_the_pictures_of_replies(self):
+        """Приложенное к реплике смена темы не трогает: оно принадлежит своей реплике.
+
+        Свежим становится только приложенное к теме (см. forget_topic_pictures):
+        переписать чужие реплики смена темы не может — картинка к ним не про тему.
+        """
+        reply_picture = self.attach("схема реплики.png")
+        self.session.add_post("Живой", "human", "Смотрите, что нашёл.", 1,
+                              dump=False, attachments=[reply_picture])
+        self.attached()
+        self.spoken()
+        self.answered()
+
+        show.set_topic("Другая тема")
+
+        pictures = [m for m in self.spoken(2) if m.get("images")]
+        self.assertEqual([m.get("name") for m in pictures], ["topic"],
+                         "смена темы подняла и приложенное к реплике")
+
+    def test_the_topic_picture_is_loaded_with_the_theme(self):
+        """Картинка темы переживает перезапуск: лежит в файле пульта рядом с темой."""
+        self.attached()
+        with tempfile.TemporaryDirectory() as folder:
+            store = Path(folder) / "theatre.json"
+            with mock.patch.object(settings, "SETTINGS_FILE", store):
+                self.session.topic = "Тема со схемой"
+                show.save_theatre_settings("тест")
+                self.session.topic_attachments = []
+                show.load_theatre_settings()
+
+        self.assertEqual([one["url"] for one in self.session.topic_attachments],
+                         [self.picture["url"]],
+                         "картинка темы не вернулась из файла пульта")
+        self.assertEqual(self.session.topic_attachments[0]["since"], 0,
+                         "отметка о показе потерялась — картинку покажут дважды")
+
+    def test_the_full_reset_keeps_the_picture_of_the_theme(self):
+        """«Полный сброс» тему не трогает — и картинку к ней тоже: она часть темы."""
+        self.attached()
+        with tempfile.TemporaryDirectory() as folder:
+            store = Path(folder) / "theatre.json"
+            with mock.patch.object(settings, "SETTINGS_FILE", store):
+                show.forget_theatre_settings("тест")
+                written = json.loads(store.read_text(encoding="utf-8"))
+
+        self.assertEqual([one["url"] for one in written["topic_attachments"]],
+                         [self.picture["url"]])
+        self.assertFalse(written.get("cast"),
+                         "полный сброс обязан забыть состав, а не оставить его в файле")
+
+    def test_a_play_with_no_topic_picture_has_nothing_extra(self):
+        """Без приложенного к теме ничего лишнего не едет: ни сообщения, ни поля."""
+        self.assertEqual(self.topic_messages(self.spoken()), [])
+
+    def test_the_console_says_who_gets_the_topic_picture(self):
+        """Приложил картинку к теме — сразу видно, кому она уедет, а кому нет.
+
+        «Приложил, а реакции нет» иначе выглядит как поломка, а не как слепая
+        модель (см. show.report_topic_picture).
+        """
+        self.attached()
+        printed = mock.Mock()
+        with mock.patch.object(builtins, "print", printed), \
+             mock.patch.object(ollama_api, "takes_images",
+                               side_effect=lambda model: model == self.person["model"]):
+            show.report_topic_picture(self.session.runtime_participants)
+
+        text = _printed_text(printed)
+        self.assertIn(self.picture["name"], text, "не названо, какую картинку приложили")
+        self.assertIn(self.person["display_name"], text,
+                      "не назван тот, кому картинка уедет")
+
+
 class CloudVisionTest(unittest.TestCase):
     """Общее для проверок зрения у облачных моделей.
 
@@ -8615,6 +9046,25 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("ни одна модель состава", out[1])
         self.assertEqual(out[2], "", "про пустой состав говорит не эта строка")
 
+    def test_choosing_a_face_keeps_what_is_typed_in_the_card(self):
+        """Выбор значка в составе не стирает набранное: имя, ключевые слова, числа.
+
+        Карточки собираются заново из состава, а набранное в полях в состав ещё
+        не попало — его берут оттуда только при «Применить состав» (см.
+        collectCast). Без переноса выбор аватара стирал бы вписанное имя — ровно
+        так и выглядела жалоба «смена аватара сбрасывает имя».
+        """
+        source = page.HTML_TEMPLATE
+        # Место выбирается по имени, а не по месту в файле: проверяем именно
+        # карточку состава, а не ленту (там выбор уходит на сервер сразу)
+        branch = source[source.index("function chooseEmoji("):]
+        branch = branch[:branch.index("fetch('/api/participant/emoji'")]
+        self.assertIn("syncCastFromForm();", branch,
+                      "выбор значка перерисовывает карточки без переноса набранного")
+        self.assertLess(branch.index("syncCastFromForm();"),
+                        branch.index("renderCastEditor();"),
+                        "перенос набранного идёт после перерисовки — то есть уже поздно")
+
     def test_the_vision_check_runs_without_pressing_a_button(self):
         """Зрение проверяется само при загрузке состава — и только раз на модель.
 
@@ -8659,6 +9109,31 @@ class TestPageScript(unittest.TestCase):
         из одного списка имён было негде (см. page.renderModelSuggestions).
         """
         self.assertIn("reads ? ' + читает картинки' : ''", page.HTML_TEMPLATE)
+
+    def test_the_page_has_where_to_attach_a_picture_to_the_theme(self):
+        """Пульт выбирает файл, а рисует приложенное из списка сервера.
+
+        Владелец приложенного — сервер (см. show.set_topic_attachments): страница
+        его показывает, а не держит свою копию, иначе после возврата спектакля
+        из архива она показывала бы одно, а играл другой.
+        """
+        self.assertIn('onclick="pickTopicFiles()"', page.HTML_TEMPLATE)
+        self.assertIn('id="topicFileInput"', page.HTML_TEMPLATE)
+        self.assertIn("id=\"topicPictures\"", page.HTML_TEMPLATE)
+        self.assertIn("'/api/moderator/topic/attachments'", page.HTML_TEMPLATE)
+        self.assertIn("syncTopicPictures(data.topic_attachments)", page.HTML_TEMPLATE)
+
+    def test_the_theme_shows_with_a_picture_but_without_words(self):
+        """Тема из одной картинки видна: пустой рамки не будет ни у того, ни у другого.
+
+        Проверяется в node — тем же кодом, что уедет в браузер (см.
+        page.topicBoxVisible): в питоновском наборе разметку никто не исполняет.
+        """
+        out = self._run_page(("topicBoxVisible",),
+                             "topicBoxVisible('', [{url: '/uploads/x.png'}])",
+                             "topicBoxVisible('  ', [])",
+                             "topicBoxVisible('тема', [])")
+        self.assertEqual(out, [True, False, True])
 
     def test_the_page_script_parses(self):
         """Скрипт страницы разбирается настоящим интерпретатором JavaScript."""
@@ -9352,7 +9827,14 @@ class TestPageScript(unittest.TestCase):
         # В составе: у картинки — полный размер, у эмодзи — набор значков
         editor = self._function("openAvatarModal")
         self.assertIn("openEmojiPicker", editor)
-        self.assertIn("avatarModalImg", editor)
+        self.assertIn("showAvatarFull", editor,
+                      "у портрета в составе не открывается полный размер")
+        # Одна разметка и на портрет, и на приложенную картинку: кто из них
+        # чёрно-белый, а кто как есть — решает класс (см. .attachment-full)
+        full = self._function("showAvatarFull")
+        self.assertIn("avatarModalImg", full)
+        self.assertIn("attachment-full", full,
+                      "приложенная картинка уедет в окно чёрно-белой")
 
     def test_a_paused_rule_is_recognized_by_the_page(self):
         """Страница узнаёт паузу по той же пометке, что и театр (см. RULE_OFF_MARK).
