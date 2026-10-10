@@ -3391,11 +3391,11 @@ class TestPlayKeptInDump(unittest.TestCase):
     def test_the_attached_picture_comes_back_with_the_reply(self):
         """Приложенное к реплике возвращается вместе с прежним спектаклем.
 
-        В ДАМП едут имя файла и адрес, а не сама картинка: файл лежит в папке
-        экземпляра, а запись — текст, и base64 утопил бы в нём всю хронологию
-        (см. attachment_lines). По этим строкам приложенное и находится при
-        чтении — а пропавший файл просто не возвращается: рамка без картинки
-        хуже, чем её отсутствие.
+        По строкам «**Приложено:**» приложенное и находится при чтении
+        (см. attachment_lines), а переехать в другой театр ему помогает то,
+        что данные лежат в записи же (см. test_the_picture_of_the_reply_
+        comes_back_without_its_folder). Здесь же — обычный случай: файл
+        на месте, и запись его не подменяет.
         """
         picture = ("data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
         with tempfile.TemporaryDirectory() as folder:
@@ -3424,6 +3424,141 @@ class TestPlayKeptInDump(unittest.TestCase):
                          "вернувшаяся реплика осталась без своего приложения")
         self.assertEqual([p for p in gone["posts"] if p["id"] == 99][0]["attachments"], [],
                          "за пропавшим файлом тянется пустая рамка")
+
+    def test_the_picture_of_the_reply_comes_back_without_its_folder(self):
+        """Запись самодостаточна: пачка картинок — не её единственный дом.
+
+        Адрес без данных — это картинка, которая живёт только в папке того
+        экземпляра, где спектакль играли: пересланный ДАМП показывал бы рамку,
+        а почищенная папка теряла бы и собственные картинки. Поэтому данные
+        лежат тут же, за строкой «**Картинка:**» (см. picture_data_lines).
+        """
+        picture = ("data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+        with tempfile.TemporaryDirectory() as folder:
+            uploads = Path(folder) / "uploads"
+            with mock.patch.object(settings, "UPLOAD_DIR", uploads), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                attachment, error = show.save_upload("зелёный.png", picture)
+                self.assertEqual(error, "")
+                _written, dump = self._play(folder)
+                post = {"id": 99, "timestamp": "22:09", "display_name": "Жанна",
+                        "avatar_emoji": "🦸", "gender": "female", "model_used": "human",
+                        "role_name": "Участник", "round": 1, "content": "Вот картинка.",
+                        "attachments": [attachment]}
+                with mock.patch.object(settings, "DUMP_FILE", dump):
+                    show.save_dump_entry(post)
+                written = dump.read_text(encoding="utf-8")
+                self.assertIn("**Картинка:** " + attachment["url"], written,
+                              "данных картинки в записи нет — файл не самодостаточен")
+                # А теперь ни папки приложенных, ни файла в ней: читаем чужой ДАМП
+                shutil.rmtree(uploads)
+                play = show.parse_dump(written, store=True)
+                restored = [p for p in play["posts"] if p["id"] == 99][0]
+                back = restored["attachments"][0]["url"].rsplit("/", 1)[-1]
+
+                self.assertEqual([one["name"] for one in restored["attachments"]],
+                                 ["зелёный.png"], "картинка не вернулась из записи")
+                self.assertEqual(restored["content"], "Вот картинка.",
+                                 "данные картинки съели реплику рядом с ней")
+                self.assertTrue((uploads / back).is_file(),
+                                "картинка не легла в папку экземпляра")
+                self.assertEqual((uploads / back).read_bytes(), PNG_SIGN,
+                                 "вернулась не та картинка")
+
+    def test_the_same_picture_is_written_to_the_record_once(self):
+        """Одна картинка — одни данные: запись дописывается, а не растёт вдвое.
+
+        Спектакль — это десятки ходов, и та же картинка бывает приложена
+        к нескольким репликам: без пометки о уже записанном файл раздувался бы
+        копиями одного и того же base64 (см. picture_data_lines).
+        """
+        picture = ("data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+        with tempfile.TemporaryDirectory() as folder:
+            uploads = Path(folder) / "uploads"
+            with mock.patch.object(settings, "UPLOAD_DIR", uploads), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                attachment, _ = show.save_upload("зелёный.png", picture)
+                _written, dump = self._play(folder)
+                with mock.patch.object(settings, "DUMP_FILE", dump):
+                    for post_id in (98, 99):
+                        show.save_dump_entry(
+                            {"id": post_id, "timestamp": "22:0%d" % post_id,
+                             "display_name": "Жанна", "avatar_emoji": "🦸",
+                             "gender": "female", "model_used": "human",
+                             "role_name": "Участник", "round": 1,
+                             "content": "Вот картинка.", "attachments": [attachment]})
+                written = dump.read_text(encoding="utf-8")
+
+        self.assertEqual(written.count("**Картинка:** " + attachment["url"]), 1,
+                         "одна картинка записана в файл несколько раз")
+
+    def test_the_picture_of_the_theme_comes_back_from_the_record(self):
+        """Картинка к теме — часть записи, а не только пульта.
+
+        Тема и её картинка живут в файле пульта, а пульт — отдельный файл:
+        пересланный ДАМП без него приносил тему без картинки, а чужая картинка
+        из пульта — к чужой теме. Поэтому она пишется в запись вместе с отметкой,
+        сколько реплик было в ленте (см. dump_topic_pictures, topic_picture_lines):
+        по отметке видно, кто её уже видел (см. restore_shown_pictures).
+        """
+        picture = ("data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+        with tempfile.TemporaryDirectory() as folder:
+            uploads = Path(folder) / "uploads"
+            with mock.patch.object(settings, "UPLOAD_DIR", uploads), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                attachment, error = show.save_upload("схема темы.png", picture)
+                self.assertEqual(error, "")
+                _written, dump = self._play(folder)
+                with mock.patch.object(settings, "DUMP_FILE", dump):
+                    # Приложили на ходу — после двух реплик, что уже сказаны
+                    show.set_topic_attachments([dict(attachment)])
+                    self.assertEqual(self.session.topic_attachments[0]["since"],
+                                     len(self.session.posts))
+                    written = dump.read_text(encoding="utf-8")
+                    self.assertIn("**Картинка к теме:** схема темы.png → "
+                                  + attachment["url"], written,
+                                  "картинка к теме не попала в запись")
+                    # Пульт забыт вместе с папкой: остаётся только запись
+                    self.session.topic_attachments = []
+                    shutil.rmtree(uploads)
+                    play = show.parse_dump(written, store=True)
+                    show.session.topic_attachments = []
+                    # И папки снова нет: спектакль возвращается только из записи
+                    shutil.rmtree(uploads, ignore_errors=True)
+                    with mock.patch.object(settings, "DUMP_FILE", dump):
+                        count = show.load_play_from_dump("read")
+
+        self.assertEqual(count, 2, "спектакль не вернулся из записи")
+        self.assertEqual([one["name"] for one in self.session.topic_attachments],
+                         ["схема темы.png"],
+                         "картинка к теме не вернулась вместе со спектаклем")
+        self.assertEqual(self.session.topic_attachments[0]["since"], 2,
+                         "отметка о показе потерялась — картинку покажут дважды")
+        self.assertEqual([one["name"] for one in play["topic_pictures"]],
+                         ["схема темы.png"])
+
+    def test_a_picture_removed_from_the_theme_stays_removed(self):
+        """Убранную картинку запись помнит убранной: иначе она возвращается.
+
+        Файл дописывается, и без строки «убрана» возвращённый спектакль принёс бы
+        картинку, которую сняли до занавеса (см. dump_topic_pictures).
+        """
+        picture = ("data:image/png;base64," + base64.b64encode(PNG_SIGN).decode("ascii"))
+        with tempfile.TemporaryDirectory() as folder:
+            uploads = Path(folder) / "uploads"
+            with mock.patch.object(settings, "UPLOAD_DIR", uploads), \
+                 mock.patch.object(settings, "MAX_UPLOAD_BYTES", 4096):
+                attachment, _ = show.save_upload("схема темы.png", picture)
+                _written, dump = self._play(folder)
+                with mock.patch.object(settings, "DUMP_FILE", dump):
+                    show.set_topic_attachments([dict(attachment)])
+                    show.set_topic_attachments([])
+                    written = dump.read_text(encoding="utf-8")
+                    play = show.parse_dump(written, store=True)
+
+        self.assertIn("**Картинка к теме убрана:** " + attachment["url"], written)
+        self.assertEqual(play["topic_pictures"], [],
+                         "убранная картинка вернулась из записи")
 
     def test_the_portrait_comes_back_with_the_reply(self):
         """У вернувшейся реплики то же лицо: портрет назван в составе записи.

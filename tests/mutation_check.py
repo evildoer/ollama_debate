@@ -1046,7 +1046,10 @@ BUGS = {
     ],
     "ДАМП снова растёт от спектакля к спектаклю": [
         ("aitheatre/show.py",
-         '        settings.DUMP_FILE.write_text(header, encoding="utf-8")',
+         '        settings.DUMP_FILE.write_text(\n'
+         '            header + "".join(line + "\\n"\n'
+         '                             for line in picture_data_lines(session.topic_attachments)),\n'
+         '            encoding="utf-8")',
          '        open(settings.DUMP_FILE, "a", encoding="utf-8").write(header)'),
     ],
     "отчёты ходов снова забываются через несколько ходов": [
@@ -1157,7 +1160,7 @@ BUGS = {
     ],
     "под-версия записи снова стала нечитаемой": [
         ("aitheatre/show.py",
-         "DUMP_FORMATS_READABLE = (5, 4, 3)",
+         "DUMP_FORMATS_READABLE = (6, 5, 4, 3)",
          "DUMP_FORMATS_READABLE = (DUMP_FORMAT,)"),
     ],
     "о чужом формате снова не спрашивают, а догадываются": [
@@ -1314,9 +1317,14 @@ BUGS = {
          "\n            return;"),
     ],
     "приложенный файл снова принимают по расширению, а не по содержимому": [
+        # Именно у принятого из формы — у картинки из ДАМПа проверка та же,
+        # но своя (см. stored_picture), и место надо назвать точно
         ("aitheatre/show.py",
-         "    if kind not in settings.UPLOAD_TYPES:",
-         "    if False:"),
+         '    kind = image_kind(raw)\n'
+         '    if kind not in settings.UPLOAD_TYPES:\n'
+         '        return None, ("такое приложение не отправить: принимаются картинки "',
+         '    if False:\n'
+         '        return None, ("такое приложение не отправить: принимаются картинки "'),
     ],
     "имя присланного файла снова попадает в путь": [
         ("aitheatre/show.py",
@@ -1324,9 +1332,12 @@ BUGS = {
          '    filename = str(name or "file.png")'),
     ],
     "слишком тяжёлое приложение снова ложится на диск": [
+        # Тоже с оговоркой, какой именно сторож (см. stored_picture)
         ("aitheatre/show.py",
-         "    if len(raw) > settings.MAX_UPLOAD_BYTES:",
-         "    if False:"),
+         '    if len(raw) > settings.MAX_UPLOAD_BYTES:\n'
+         '        return None, ("картинка больше "',
+         '    if False:\n'
+         '        return None, ("картинка больше "'),
     ],
     "по адресу приложения снова читают любой файл на диске": [
         ("aitheatre/show.py",
@@ -1497,6 +1508,41 @@ BUGS = {
          "        return max(len(self.conversation_history), len(self.posts))",
          "        return len(self.conversation_history)"),
     ],
+    "картинки снова не пишутся в ДАМП данными": [
+        # Только у данных:
+        # без этого возврат спектакля зависит от папки экземпляра
+        ("aitheatre/show.py",
+         '    return [""] + pictures + picture_data_lines(post.get("attachments"))',
+         '    return [""] + pictures'),
+    ],
+    "одна картинка снова пишется в ДАМП столько раз, сколько приложена": [
+        ("aitheatre/show.py",
+         '        if not url or url in _DUMP["pictures"]:',
+         "        if not url:"),
+    ],
+    "картинка к теме снова не пишется в ДАМП": [
+        ("aitheatre/show.py",
+         '        if url not in _DUMP["topic_pictures"]:\n'
+         '            _DUMP["topic_pictures"].add(url)\n'
+         '            out.append(topic_picture_line(one))',
+         '        if url not in _DUMP["topic_pictures"]:\n'
+         '            _DUMP["topic_pictures"].add(url)'),
+    ],
+    "убранную картинку к теме снова забывают убрать в ДАМПе": [
+        ("aitheatre/show.py",
+         '        out.append(f"**Картинка к теме убрана:** {url}")',
+         '        continue'),
+    ],
+    "возврат спектакля снова не раскладывает картинки из ДАМПа": [
+        ("aitheatre/show.py",
+         "    play = parse_dump(written, tolerant=not readable, store=True)",
+         "    play = parse_dump(written, tolerant=not readable)"),
+    ],
+    "возврат спектакля снова берёт картинку к теме только из пульта": [
+        ("aitheatre/show.py",
+         '    if play.get("topic_pictures"):',
+         "    if False:"),
+    ],
     "остаток на ключе снова просят у шлюза без надобности": [
         ("aitheatre/web.py",
          "    if not any(cloud.is_cloud_model(p.get(\"model\", \"\")) for p in cast):",
@@ -1541,8 +1587,10 @@ BUGS = {
     ],
     "приложенное снова не едет в ДАМП": [
         ("aitheatre/show.py",
-         "    pictures = \"\".join(line + \"\\n\" for line in attachment_lines(post))",
-         "    pictures = \"\""),
+         '    pictures = attachment_lines(post)\n'
+         '    if not pictures:\n'
+         '        return []',
+         '    return []'),
     ],
     "приложенное возвращается из ДАМПа без проверки файла": [
         ("aitheatre/show.py",

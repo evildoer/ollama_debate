@@ -11,6 +11,7 @@
 
 import base64
 import copy
+import hashlib
 import json
 import random
 import re
@@ -532,8 +533,8 @@ SKETCH_HINT = "Так бывает, когда модель сначала от�
 # в списке ниже. Как только меняется сама запись — разделы, шапка, порядок, —
 # номер уходит из списка, и тогда о расхождении спрашивают вслух
 # (см. ask_about_dump): прочитать чужую запись можно, но обещать этого нельзя
-DUMP_FORMAT = 5
-DUMP_FORMATS_READABLE = (5, 4, 3)
+DUMP_FORMAT = 6
+DUMP_FORMATS_READABLE = (6, 5, 4, 3)
 
 # Что отвечают на тот вопрос: сцена пустая, прежний спектакль только на чтение
 # или он же — с продолжением (см. load_play_from_dump)
@@ -796,23 +797,35 @@ def dump_turn_tail(post: dict, turn: dict) -> str:
     # Приложенное к реплике — рядом с самой репликой, а не отдельным разделом:
     # оно и есть часть её, и по этим строкам картинка вернётся в ленту вместе
     # с прежним спектаклем (см. attachment_lines)
-    pictures = attachment_lines(post)
-    if pictures:
-        out.append("")
-        out.extend(pictures)
+    out.extend(attachment_section(post))
     out.append("\n" + TURN_SECTIONS["answer"] + "\n")
     out.append(quoted(post.get("content")))
     return "\n".join(out) + "\n"
 
 
+def attachment_section(post: dict) -> list:
+    """Приложенное к реплике строками ДАМПа: адреса — и сами картинки данными.
+
+    Одно место на оба хода, машинный и человеческий (см. dump_turn_tail,
+    dump_human_markdown): приложенное — часть реплики, чья бы она ни была.
+    Данные пишутся рядом с адресами, потому что файл дописывается по ходу,
+    и без них картинка жила бы только в папке того экземпляра, где спектакль
+    играли (см. picture_data_lines).
+    """
+    pictures = attachment_lines(post)
+    if not pictures:
+        return []
+    return [""] + pictures + picture_data_lines(post.get("attachments"))
+
+
 def attachment_lines(post: dict) -> list:
     """Приложенное к реплике — строками ДАМПа: имя файла и куда он лёг.
 
-    В ДАМП едут только имена и адреса, а не сами картинки: файл лежит в папке
-    экземпляра и никуда оттуда не денется, а ДАМП — текст, и мегабайты base64
-    в нём утопили бы всю хронологию. По этим строкам приложенное и возвращается
-    вместе с прежним спектаклем (см. parse_dump): адрес — тот же, что у реплики
-    в ленте, поэтому лицо картинки не теряется и после перезапуска театра.
+    По этим строкам приложенное и возвращается вместе с прежним спектаклем
+    (см. parse_dump): адрес — тот же, что у реплики в ленте, поэтому картинка
+    видна и после перезапуска театра. А сами данные лежат тут же, следующей
+    строкой (см. attachment_section, picture_data_lines): без них картинка
+    жила бы только в папке своего экземпляра.
     """
     out = []
     for one in post.get("attachments") or []:
@@ -824,6 +837,100 @@ def attachment_lines(post: dict) -> list:
     return out
 
 
+# ── КАРТИНКИ В ДАМПЕ ──────────────────────────────────────
+# Спектакль — это и его картинки: приложенные к репликам и к теме. Адреса в
+# записи есть всегда (см. attachment_lines), но адрес живёт только в папке того
+# экземпляра, где спектакль играли: ДАМП, перенесённый в другой театр, показывал
+# бы рамки без картинок, а после чистки папки и свои собственные терял бы.
+# Поэтому данные лежат тут же: за строкой «**Картинка:**» идёт блок «> »
+# в base64 — тем же приёмом, что и текст реплик (см. quoted), потому что фенсы
+# не годятся (см. quoted). Файл от этого тяжелее, зато он один и есть спектакль.
+
+
+def _upload_path(url: str):
+    """Файл приложенного по его адресу: имя, а не путь — адрес чужой текст."""
+    name = str(url or "").strip().rstrip("/").split("/")[-1]
+    if not name or name != Path(name).name:
+        return None
+    path = settings.UPLOAD_DIR / name
+    return path if path.is_file() else None
+
+
+def picture_data_lines(pictures: list) -> list:
+    """Данные картинок — строками ДАМПа: строка с именем и сам base64 рядом.
+
+    Уже записанная картинка второй раз не пишется: файл дописывается по ходу
+    спектакля, и та же картинка, приложенная к другой реплике, только раздула бы
+    запись. Помнит это _DUMP — по адресу, а не по содержимому (см. stored_picture:
+    возвращённая из ДАМПа картинка сохраняет прежний адрес).
+    """
+    out = []
+    for one in pictures or []:
+        url = str((one or {}).get("url") or "").strip()
+        if not url or url in _DUMP["pictures"]:
+            continue
+        path = _upload_path(url)
+        if path is None:
+            # Картинки больше нет: адрес в записи остался, а данных нет
+            continue
+        raw = path.read_bytes()
+        name = str((one or {}).get("name") or "").strip() or path.name
+        written = base64.b64encode(raw).decode("ascii")
+        _DUMP["pictures"].add(url)
+        out.append(f"**Картинка:** {url} · {name} · {image_kind(raw) or 'вид не опознан'} · "
+                   f"{len(written)} знаков")
+        for start in range(0, len(written), 76):
+            out.append("> " + written[start:start + 76])
+    return out
+
+
+def topic_picture_line(one: dict) -> str:
+    """Приложенное к теме одной строкой: имя, адрес и когда его приложили.
+
+    Отметка «сколько реплик было в ленте» нужна возврату спектакля: по ней видно,
+    кто картинку уже видел (см. restore_shown_pictures), и без неё доигранный
+    спектакль показал бы её заново тем, кто уже заплатил за неё.
+    """
+    url = str((one or {}).get("url") or "").strip()
+    name = str((one or {}).get("name") or "").strip() or url.rsplit("/", 1)[-1]
+    return (f"**Картинка к теме:** {name} → {url} · реплик в ленте "
+            f"к тому моменту: {_as_int((one or {}).get('since'))}")
+
+
+def topic_picture_lines() -> list:
+    """Приложенное к теме — строками ДАМПа, в порядке показа."""
+    return [topic_picture_line(one) for one in session.topic_attachments or []
+            if str((one or {}).get("url") or "").strip()]
+
+
+def dump_topic_pictures() -> None:
+    """Приложенное к теме — в ДАМП: что приложили, что убрали и сами данные.
+
+    Дописывается тогда, когда список и вправду изменился (см.
+    set_topic_attachments): приложить картинку к теме можно и на ходу, а ДАМП —
+    единственное место, где спектакль лежит целиком. Убранное тоже называется:
+    запись дописывается, и без такой строки возвращённый спектакль принёс бы
+    картинку, которую уже убрали.
+    """
+    if not settings.DUMP_FILE.is_file():
+        return                      # спектакля в записи ещё нет — и напоминать нечего
+    here = {str((one or {}).get("url") or ""): one
+            for one in session.topic_attachments or []
+            if str((one or {}).get("url") or "").strip()}
+    out = []
+    for url, one in here.items():
+        if url not in _DUMP["topic_pictures"]:
+            _DUMP["topic_pictures"].add(url)
+            out.append(topic_picture_line(one))
+    for url in sorted(_DUMP["topic_pictures"] - set(here)):
+        _DUMP["topic_pictures"].discard(url)
+        _DUMP["topic_removed"].add(url)
+        out.append(f"**Картинка к теме убрана:** {url}")
+    out += picture_data_lines(session.topic_attachments)
+    if out:
+        dump_write("\n" + "\n".join(out) + "\n")
+
+
 def dump_human_markdown(post: dict) -> str:
     """Ход живого участника: отправлять никуда нечего, но в хронологии он есть."""
     head = " · ".join([f"## {post.get('id')}", str(post.get("timestamp") or ""),
@@ -831,7 +938,9 @@ def dump_human_markdown(post: dict) -> str:
                                   post.get("gender")),
                        str(post.get("model_used") or ""),
                        str(post.get("role_name") or ""), f"Акт {post.get('round')}"])
-    pictures = "".join(line + "\n" for line in attachment_lines(post))
+    # Приложенное — до самого текста: реплика человека читается как последний
+    # «> »-блок записи (см. _last_quoted), и base64 после неё стал бы репликой
+    pictures = "".join(line + "\n" for line in attachment_section(post))
     return (f"\n{head}\n\n"
             + f"Реплика человека: никуда не отправлялась, ни токенов, ни поиска.\n\n"
             + pictures
@@ -842,7 +951,13 @@ def dump_human_markdown(post: dict) -> str:
 # вызовами, потому что ход пишется по частям — от запроса к запросу и от куска
 # размышлений к куску (см. dump_step_sink). line_start — стоим ли мы в начале
 # строки: по нему куски размышлений достраивают кавычки, не рвя строку
-_DUMP = {"handle": None, "thought": None, "line_start": True}
+# pictures — адреса картинок, уже записанных данными; topic_pictures — что
+# объявлено приложенным к теме, а topic_removed — что с тех пор убрали: файл
+# дописывается по ходу, и без этих трёх пометок одна и та же картинка уезжала бы
+# в запись по второму разу, а убранная возвращалась бы (см. picture_data_lines,
+# dump_topic_pictures)
+_DUMP = {"handle": None, "thought": None, "line_start": True,
+         "pictures": set(), "topic_pictures": set(), "topic_removed": set()}
 
 
 def dump_write(text: str, force: bool = True) -> None:
@@ -1051,6 +1166,10 @@ def _dump_reset() -> None:
     handle, _DUMP["handle"] = _DUMP.get("handle"), None
     _DUMP["thought"] = None
     _DUMP["line_start"] = True
+    # Файл больше не наш: то, что было в нём записано, писать заново не надо
+    _DUMP["pictures"] = set()
+    _DUMP["topic_pictures"] = set()
+    _DUMP["topic_removed"] = set()
     if handle is not None:
         try:
             handle.close()
@@ -1138,7 +1257,8 @@ def start_dump(topic: str, keep: bool = False) -> None:
         f"# ДАМП · {when} · порт {settings.PORT}\n\n"
         f"Формат записи: {DUMP_FORMAT}\n\n"
         f"**Тема:**\n{quoted((topic or '').strip())}\n\n"
-        f"**Состав:** {cast_line()}\n\n"
+        + "".join(line + "\n" for line in topic_picture_lines())
+        + f"\n**Состав:** {cast_line()}\n\n"
         f"Спектакль целиком, реплика за репликой: что вошло в каждый запрос\n"
         f"к модели, что она попросила, что ей принесли и что она сказала —\n"
         f"со временем и числами токенов. Лицо говорящего берётся из состава\n"
@@ -1154,10 +1274,20 @@ def start_dump(topic: str, keep: bool = False) -> None:
         f"(tiktoken — тот же счётчик, каким мерится история), а число рядом —\n"
         f"счёт вендора, и они расходятся, потому что токенизаторы разные;\n"
         f"**вес найденного** — сколько токенов принёс поиск (они едут сверх\n"
-        f"истории и оплачиваются тоже).\n"
+        f"истории и оплачиваются тоже).\n\n"
+        f"Приложенные картинки лежат в этом же файле, целиком: у каждой\n"
+        f"своя строка «**Картинка:**» с адресом, именем, видом и весом, а под\n"
+        f"ней — сами данные (base64, блоком «> »). Картинка к теме названа\n"
+        f"в шапке («**Картинка к теме:**») вместе с отметкой, сколько реплик\n"
+        f"было в ленте, когда её приложили. Так один этот файл возвращает\n"
+        f"спектакль целиком — с картинками, темой и составом, — даже в другом\n"
+        f"театре, где папки этого экземпляра нет.\n"
     )
     try:
-        settings.DUMP_FILE.write_text(header, encoding="utf-8")
+        settings.DUMP_FILE.write_text(
+            header + "".join(line + "\n"
+                             for line in picture_data_lines(session.topic_attachments)),
+            encoding="utf-8")
     except Exception as e:
         print(f"  ⚠️  Не открывается {settings.DUMP_FILE.name}: {e}")
 
@@ -1221,6 +1351,14 @@ _MESSAGE_RE = re.compile(
 _AVATAR_RE = re.compile(r"^\*\*Аватар:\*\* (?P<path>\S+)$")
 # Приложенное к реплике: имя файла и его адрес в папке экземпляра (см. attachment_lines)
 _ATTACH_RE = re.compile(r"^\*\*Приложено:\*\* (?P<name>.+?) → (?P<url>\S+)$")
+# Сама картинка, тут же в файле: адрес, имя, вид и вес; под этой строкой — base64
+_PICTURE_HEAD_RE = re.compile(r"^\*\*Картинка:\*\* (?P<url>\S+) · (?P<name>.*?) · "
+                              r"(?P<kind>[^·]+?) · (?P<signs>.+)$")
+# Картинка к теме — в шапке записи: имя, адрес и когда её приложили (см. topic_picture_lines)
+_TOPIC_PICTURE_RE = re.compile(
+    r"^\*\*Картинка к теме:\*\* (?P<name>.+?) → (?P<url>\S+) · реплик в ленте "
+    r"к тому моменту: (?P<since>.+)$")
+_TOPIC_GONE_RE = re.compile(r"^\*\*Картинка к теме убрана:\*\* (?P<url>\S+)$")
 
 
 def _as_int(raw) -> int:
@@ -1497,7 +1635,75 @@ def _avatar_from(lines: list) -> str:
     return ""
 
 
-def _attachments_from(lines: list) -> list:
+def _pictures_in_dump(lines: list, store: bool) -> dict:
+    """Картинки, записанные данными: адрес → байты. Возвращает словарь.
+
+    Данные лежат под своей строкой блоками «> » (см. picture_data_lines), и без
+    них картинка живёт только в папке экземпляра: перенесённый ДАМП показал бы
+    рамку вместо неё. store=False — не разбирать вовсе: так читается запись для
+    вопроса «а что в файле?» (см. dump_preview), и раскладывать картинки по диску
+    ради одного числа незачем.
+    """
+    if not store:
+        return {}
+    found = {}
+    for index, line in enumerate(lines or []):
+        head = _PICTURE_HEAD_RE.match(line)
+        if not head:
+            continue
+        written, _used = _quoted_block(lines[index + 1:])
+        # Берётся ровно столько знаков, сколько записано в строке: следом в том же
+        # блоке «> » стоит обычный текст — реплика человека или ответ модели,
+        # и без этой отсечки он приклеился бы к данным (см. picture_data_lines)
+        data = "".join(piece.strip() for piece in written)[: _as_int(head.group("signs"))]
+        try:
+            found[head.group("url")] = base64.b64decode(data, validate=True)
+        except Exception:
+            continue
+    return found
+
+
+def _topic_pictures_in_dump(lines: list, pictures: dict, store: bool) -> list:
+    """Приложенное к теме по записи — списком, как его хранит сессия.
+
+    Читаются все строки файла, а не одна шапка: картинку прикладывают и на ходу,
+    и тогда её строка стоит в хронологии (см. dump_topic_pictures). Убранное
+    вычитается — иначе возвращённый спектакль принёс бы её назад.
+    """
+    order, since, gone = [], {}, set()
+    for line in lines or []:
+        found = _TOPIC_PICTURE_RE.match(line)
+        if found:
+            url = found.group("url").strip()
+            if url not in since:
+                order.append(url)
+            since[url] = (found.group("name").strip(), _as_int(found.group("since")))
+            continue
+        found = _TOPIC_GONE_RE.match(line)
+        if found:
+            gone.add(found.group("url").strip())
+    out = []
+    for url in order:
+        if url in gone:
+            continue
+        name, when = since[url]
+        raw = (pictures or {}).get(url)
+        if raw:
+            picture, error = stored_picture(url, name, raw)
+            if picture is None:
+                print(f"  ⚠️  Картинка к теме из ДАМПа не вернулась: {error}")
+                continue
+            picture["since"] = when
+            out.append(picture)
+            continue
+        taken = upload_files([{"name": name, "url": url}])
+        if taken:
+            taken[0]["since"] = when
+            out.append(taken[0])
+    return out
+
+
+def _attachments_from(lines: list, pictures: dict = None, store: bool = False) -> list:
     """Приложенное к реплике из записи — обратно тому, что пишет attachment_lines.
 
     Ищется по всей записи, как и лицо: у реплики человека разделов нет вовсе,
@@ -1506,6 +1712,9 @@ def _attachments_from(lines: list) -> list:
     адрес в файле — такой же чужой текст, и по нему нельзя прочитать что попало.
     Пропавшие файлы отсеиваются молча: ДАМП живёт дольше картинок, и адрес в нём
     бывает уже никуда не ведёт — рамка без картинки хуже, чем её отсутствие.
+
+    Но если тут же лежат и сами данные — картинка возвращается из них, и запись
+    оказывается самодостаточной: чужая папка приложенных для неё не нужна.
     """
     found = []
     for line in lines or []:
@@ -1513,6 +1722,19 @@ def _attachments_from(lines: list) -> list:
         if match:
             found.append({"name": match.group("name").strip(),
                           "url": match.group("url").strip()})
+    if store:
+        restored = []
+        for one in found:
+            raw = (pictures or {}).get(one["url"])
+            if not raw:
+                restored.append(one)
+                continue
+            picture, error = stored_picture(one["url"], one["name"], raw)
+            if picture is None:
+                print(f"  ⚠️  Картинка из ДАМПа не вернулась: {error}")
+                continue
+            restored.append(picture)
+        found = restored
     return upload_files(found)
 
 
@@ -1649,7 +1871,8 @@ def _post_dict(post_id: int, who: dict, content: str, sketch: str, thinking: str
     }
 
 
-def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> dict:
+def _parse_record(post_id: int, rest: str, body: list, faces: dict = None,
+                  pictures: dict = None, store: bool = False) -> dict:
     """Одна запись ДАМПа → реплика ленты и, если ход был машинным, отчёт о нём."""
     who, seconds, spent = _parse_heading(rest)
     sections = _split_sections(body)
@@ -1659,7 +1882,7 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> di
                           else "male")
     who["role"] = ROLE_BY_NAME.get(who.get("role_name") or "", "participant")
     who["avatar"] = _avatar_from(body)
-    who["attachments"] = _attachments_from(body)
+    who["attachments"] = _attachments_from(body, pictures, store)
     who["topic"] = ""
     if not [key for key in sections if key]:
         # Ни одного знакомого раздела: либо реплика человека (у неё запросов
@@ -1711,10 +1934,10 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None) -> di
 
 
 def _add_record(current: tuple, body: list, posts: list, turns: dict,
-                faces: dict = None) -> None:
+                faces: dict = None, pictures: dict = None, store: bool = False) -> None:
     """Одна запись — в спектакль: реплика всегда, отчёт о ходе — если он был."""
     post_id, rest = current
-    record = _parse_record(post_id, rest, body, faces)
+    record = _parse_record(post_id, rest, body, faces, pictures, store)
     posts.append(record["post"])
     if record["turn"]:
         turns[int(post_id)] = record["turn"]
@@ -1747,7 +1970,7 @@ def parse_cast_line(text) -> dict:
     return faces
 
 
-def parse_dump(written: str, tolerant: bool = False) -> dict:
+def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dict:
     """Прочитать ДАМП обратно — прежний спектакль целиком.
 
     None — значит «файл не наш»: другой формат записи (см. DUMP_FORMAT), пусто
@@ -1758,6 +1981,11 @@ def parse_dump(written: str, tolerant: bool = False) -> dict:
     может получиться толк, но обещать нечего. Записи узнаются по своему началу
     («## номер · …»), поэтому даже файл без номера формата читается по строкам —
     а вот если записей в нём нет вовсе, читать и вправду нечего.
+
+    store=True — разложить картинки из записи по папке экземпляра и поставить
+    репликам их адреса (см. stored_picture): так спектакль возвращается целиком,
+    даже если папку приложенных успели почистить или ДАМП перенесли в другой
+    театр. store=False — только прочитать: так спрашивают «а что в файле?».
     """
     lines = str(written or "").splitlines()
     version = dump_version(written)
@@ -1774,19 +2002,22 @@ def parse_dump(written: str, tolerant: bool = False) -> dict:
     for line in lines:
         if line.startswith("**Состав:** "):
             faces = parse_cast_line(line[len("**Состав:** "):])
+    # Картинки разбираются до записей: реплика ссылается на адрес, а данные
+    # к нему лежат ниже в том же файле (см. _pictures_in_dump)
+    pictures = _pictures_in_dump(lines, store)
     posts, turns = [], {}
     current, body = None, []
     for line in lines:
         found = _RECORD_RE.match(line)
         if found:
             if current is not None:
-                _add_record(current, body, posts, turns, faces)
+                _add_record(current, body, posts, turns, faces, pictures, store)
             current, body = (int(found.group(1)), found.group(2)), []
             continue
         if current is not None:
             body.append(line)
     if current is not None:
-        _add_record(current, body, posts, turns, faces)
+        _add_record(current, body, posts, turns, faces, pictures, store)
     if not posts:
         return None
     return {
@@ -1795,6 +2026,9 @@ def parse_dump(written: str, tolerant: bool = False) -> dict:
         "cast": faces,
         "posts": posts,
         "turns": turns,
+        # Приложенное к теме — тоже часть спектакля, а не пульта: едет в записи
+        # и возвращается вместе с ней (см. _topic_pictures_in_dump)
+        "topic_pictures": _topic_pictures_in_dump(lines, pictures, store),
         "round": max(int(post.get("round") or 0) for post in posts),
         # Цена спектакля — сумма цен его ходов: другого источника у неё нет
         "spent": round(sum(float((t.get("summary") or {}).get("spent") or 0.0)
@@ -1908,7 +2142,9 @@ def load_play_from_dump(mode: str = None) -> int:
             print(f"  ⚠️  Прежний спектакль не возвращается: {settings.DUMP_FILE.name} "
                   f"остался как был, сцена пустая")
         return 0
-    play = parse_dump(written, tolerant=not readable)
+    # store=True: картинки раскладываются по папке экземпляра — запись
+    # самодостаточна, и спектакль возвращается вместе с ними
+    play = parse_dump(written, tolerant=not readable, store=True)
     if not play:
         # Файл нашего формата без единой записи — это не чужой формат, а спектакль,
         # убитый до первой реплики (например, посреди хода модератора): в шапке темы
@@ -1934,6 +2170,11 @@ def load_play_from_dump(mode: str = None) -> int:
     # а те, кто есть, берутся из пульта: имя то же — лицо то же (см. post_view)
     if not session.topic and play.get("topic"):
         session.topic = play["topic"]
+    # А приложенное к теме — из самой записи: оно про этот спектакль, а в пульте
+    # его может и не быть (или быть другим — пульт правят и после занавеса).
+    # Пусто в записи — значит остаётся то, что уже лежит в сессии
+    if play.get("topic_pictures"):
+        session.topic_attachments = play["topic_pictures"]
     # «Доиграть» — значит во время старта прежние реплики останутся в ленте,
     # а историей для моделей станет то же, что уже сказано (см. start_show)
     session.resume_ready = mode == "continue"
@@ -2659,6 +2900,38 @@ def save_upload(name: str, data_url: str) -> tuple:
     return {"name": str(name or filename), "url": f"/uploads/{filename}"}, ""
 
 
+def stored_picture(url: str, name: str, raw: bytes) -> tuple:
+    """Картинка из ДАМПа — в папку приложенных. Возвращает (приложение, ошибка).
+
+    Проверки те же, что у принятой из формы (см. save_upload): вид определяется
+    по содержимому, а не по объявленному, и слишком большая не принимается. Файл
+    в ДАМПе — такой же чужой текст: его читают и правят руками.
+
+    Имя берётся из адреса, если оно там есть и не занято другой картинкой:
+    так адреса внутри ДАМПа остаются теми же, и один и тот же спектакль
+    возвращается сколько угодно раз без новых копий. Занятое имя (или адрес
+    с путём) — своё, от содержимого: чужую картинку перезаписывать нельзя.
+    """
+    kind = image_kind(raw)
+    if kind not in settings.UPLOAD_TYPES:
+        return None, (f"«{name}» в ДАМПе не картинка: принимаются png, jpeg, webp, gif")
+    if len(raw) > settings.MAX_UPLOAD_BYTES:
+        return None, (f"«{name}» в ДАМПе больше "
+                      f"{settings.MAX_UPLOAD_BYTES // (1024 * 1024)} МБ — модель "
+                      "её всё равно не прочитает")
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    filename = str(url or "").rstrip("/").split("/")[-1]
+    target = settings.UPLOAD_DIR / filename if filename == Path(filename).name else None
+    if target is not None and target.is_file() and target.read_bytes() != raw:
+        target = None
+    if target is None:
+        filename = f"{hashlib.sha1(raw).hexdigest()[:12]}{settings.UPLOAD_TYPES[kind]}"
+        target = settings.UPLOAD_DIR / filename
+    if not target.is_file():
+        target.write_bytes(raw)
+    return {"name": str(name or filename), "url": f"/uploads/{filename}"}, ""
+
+
 def upload_files(urls: list) -> list:
     """Приложения страницы в том виде, в каком они пойдут в пост.
 
@@ -2701,6 +2974,9 @@ def set_topic_attachments(attachments: list) -> list:
         # и «показано с этой реплики» — про тот момент, а не про сейчас
         one["since"] = was.get(str(one.get("url") or ""), now)
     session.topic_attachments = taken
+    # И в ДАМП: запись — единственное место, где спектакль лежит целиком,
+    # а приложить картинку к теме можно и на ходу (см. dump_topic_pictures)
+    dump_topic_pictures()
     return taken
 
 
