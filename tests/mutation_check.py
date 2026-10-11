@@ -1431,6 +1431,43 @@ BUGS = {
          "    _IMAGE_READERS[name] = reads\n    save_image_readers()",
          "    _IMAGE_READERS[name] = reads"),
     ],
+    "на зрение снова спрашивают картинкой, которой вендор не разбирает": [
+        # Пиксель 1x1: шлюз отвечает «The image length and width do not meet
+        # the model restrictions», и такой отказ записывается в модель слепотой
+        ("aitheatre/cloud.py",
+         "PROBE_PICTURE = _solid_picture(PROBE_SIZE, (0, 0, 255))",
+         "PROBE_PICTURE = _solid_picture(1, (0, 0, 255))"),
+    ],
+    "в файле снова не видно, какой картинкой сняты ответы про зрение": [
+        ("aitheatre/cloud.py",
+         '        here = {"_probe": PROBE_MARK,',
+         '        here = {'),
+    ],
+    "ответы про зрение снова читаются без отметки о картинке": [
+        ("aitheatre/cloud.py",
+         '                if asked and data.get("_probe") != PROBE_MARK:',
+         '                if False:'),
+    ],
+    "отказ по нашему файлу снова записывается в модель слепотой": [
+        ("aitheatre/cloud.py",
+         "        if model_refused_pictures(text):",
+         "        if True:"),
+    ],
+    "ушедшая без приложения картинка снова считается показанной": [
+        ("aitheatre/show.py",
+         "        dropped = cloud.take_pictures_dropped(model)",
+         "        dropped = False"),
+    ],
+    "приложенное снова считается уехавшим в ходу, который ушёл без него": [
+        ("aitheatre/cloud.py",
+         "        mark_pictures_dropped(model)",
+         "        pass"),
+    ],
+    "отметка про ход без приложения снова живёт дольше своего хода": [
+        ("aitheatre/show.py",
+         "        cloud.forget_pictures_dropped(model)",
+         "        pass"),
+    ],
     "нечитаемая картинка снова уносит реплику с собой": [
         ("aitheatre/ollama_api.py",
          "        if carries_pictures(messages) and cloud.picture_refused(error_body):",
@@ -1694,8 +1731,8 @@ BUGS = {
     ],
     "незрячей модели снова рассказывают о показанной картинке": [
         ("aitheatre/show.py",
-         "        if sending and ollama_api.takes_images(model):",
-         "        if sending:"),
+         "        if sending and not dropped and ollama_api.takes_images(model):",
+         "        if sending and not dropped:"),
     ],
     "новый спектакль снова помнит, кому что было показано": [
         ("aitheatre/show.py",

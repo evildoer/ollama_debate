@@ -49,14 +49,18 @@ tool_calls с id, в ответе инструмента — tool_call_id. Бе�
 не применённая настройка — это потом часы поиска причины в шлюзе.
 """
 
+import base64
+import hashlib
 import http.client
 import json
 import os
 import re
+import struct
 import time
 import traceback
 import urllib.error
 import urllib.request
+import zlib
 
 from . import settings
 from . import text
@@ -458,15 +462,51 @@ VISION_NAME_MARKS = ("gpt-4o", "gpt-4.1", "gpt-4-turbo", "gpt-5", "o3", "o4",
 _IMAGE_READERS = {}
 _VISION_LOADED = False
 
-# Картинка для проверки: синий пиксель 1x1. Модели с глазами и этого хватает,
-# чтобы ответить «синий»; модель без зрения на такое сообщение отвечает отказом
-# (его и ловим). Размер тут ни при чём — важно, что картинка есть вовсе
-TINY_PICTURE = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
-                "AAAADElEQVR42mNgYPgPAAEDAQA2dBFAAAAAAElFTkSuQmCC")
+
+def _solid_picture(size: int, rgb: tuple) -> str:
+    """Картинка-данные: сплошной квадрат — про цвет такого у модели и спрашивают.
+
+    Собирается здесь же, без сторонних библиотек: половина дела проверки —
+    в том, чтобы картинка была самой обычной (см. PROBE_PICTURE).
+    """
+    def chunk(kind: bytes, body: bytes) -> bytes:
+        return (struct.pack(">I", len(body)) + kind + body
+                + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+    rows = b"".join(b"\x00" + bytes(rgb) * size for _ in range(size))
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(rows))
+           + chunk(b"IEND", b""))
+    return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+
+
+# Картинка для проверки: синий квадрат обычного размера. Модель со зрением
+# называет цвет, а слепая отвечает отказом — его и ловим.
+#
+# Пиксель 1x1 тут не годится, хотя соблазн есть: у шлюза он сам вызывает отказ
+# («не смог разобрать файл»), и отказ записывался как «модель картинок не читает»
+# — навсегда, вместе с файлом экземпляра. Так на живом шлюзе qwen3.8-flash
+# (модель со зрением, отвечает «Красный» на обычную картинку) оказалась слепой
+# и картинок не получала вовсе. Проверка обязана спрашивать тем же, чем модель
+# пользуется вправду, — иначе она проверяет не модель, а свою картинку
+PROBE_SIZE = 64
+PROBE_PICTURE = _solid_picture(PROBE_SIZE, (0, 0, 255))
+
+# Отпечаток проверочной картинки. Записан в файле рядом с ответами: по нему видно,
+# про какую картинку они сняты. Прежние ответы, снятые другой картинкой, не годятся
+# (см. load_image_readers): проверка тогда была про неё, а не про модель:
+# картинку поменяли — спрашиваем заново
+PROBE_MARK = hashlib.sha256(PROBE_PICTURE.encode("ascii")).hexdigest()[:12]
 
 
 def load_image_readers() -> None:
-    """Прочитать, что мы уже знаем о картинках у облачных моделей (один раз)."""
+    """Прочитать, что мы уже знаем о картинках у облачных моделей (один раз).
+
+    Ответы, снятые другой проверочной картинкой, не читаются вовсе: они говорят
+    не про модель (см. PROBE_MARK). Так исправляется и прежняя ошибка с пикселем
+    1x1: записанные им «слепые» переспрашиваются, а не остаются приговором.
+    """
     global _VISION_LOADED
     if _VISION_LOADED:
         return
@@ -475,15 +515,24 @@ def load_image_readers() -> None:
         if settings.VISION_FILE.exists():
             data = json.loads(settings.VISION_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                _IMAGE_READERS.update({str(k): bool(v) for k, v in data.items()})
+                asked = {str(k): bool(v) for k, v in data.items()
+                         if not str(k).startswith("_") and isinstance(v, bool)}
+                # Прежняя запись отметки не знает — и это ответ про прежнюю картинку
+                if asked and data.get("_probe") != PROBE_MARK:
+                    print(f"  🔎 Прежние ответы про картинки сняты другой картинкой "
+                          f"({len(asked)}) — спрошу заново")
+                    return
+                _IMAGE_READERS.update(asked)
     except Exception as e:
         print(f"  ⚠️  Не читается {settings.VISION_FILE.name}: {e}")
 
 
 def save_image_readers() -> None:
     try:
+        here = {"_probe": PROBE_MARK,
+                **{str(k): bool(v) for k, v in _IMAGE_READERS.items()}}
         settings.VISION_FILE.write_text(
-            json.dumps(_IMAGE_READERS, ensure_ascii=False, indent=1), encoding="utf-8")
+            json.dumps(here, ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception as e:
         print(f"  ⚠️  Не сохраняется {settings.VISION_FILE.name}: {e}")
 
@@ -503,7 +552,7 @@ def images_known(model: str) -> bool:
 def probe_images(model: str):
     """Спросить у шлюза, читает ли эта модель картинки: True/False, иначе None.
 
-    Так проверка идёт до отправки, а не после: узнанное запоминается навсегда
+    Так проверка идёт до отправки, а не после: узнанное запоминается надолго
     (в памяти и в файле экземпляра, см. settings.VISION_FILE), поэтому за неё
     платят один раз на модель — это и есть «не получать ошибку каждый раз».
     Ошибка тут читается по-разному: отказ по самой картинке (шлюз называет её
@@ -511,6 +560,11 @@ def probe_images(model: str):
     «не знаем»: запомнить такое значило бы навсегда связать модель по рукам.
     Заканчивается всё равно ответом: и то, что модель сказала, и то, что
     шлюз отказал, — уже правда (см. ollama_api.takes_images).
+
+    Спрашиваем обычной картинкой (см. PROBE_PICTURE): отказ на выдумку вроде
+    пикселя 1x1 — это ответ про картинку, а не про модель. Запомненный ответ
+    хранится вместе с отпечатком этой картинки, поэтому смену проверочной
+    картинки ответы не переживают и спрашиваются заново (см. PROBE_MARK).
     """
     load_image_readers()
     name = bare_model_name(model)
@@ -524,7 +578,7 @@ def probe_images(model: str):
         "messages": openai_messages([{
             "role": "user",
             "content": "Ответь одним словом: какого цвета эта картинка?",
-            "images": [TINY_PICTURE]}])})
+            "images": [PROBE_PICTURE]}])})
     if error:
         code = getattr(error, "code", None)
         if code not in _PICTURE_REFUSAL_CODES:
@@ -873,19 +927,75 @@ def named_field(text: str) -> str:
     return found.group(1) if found else ""
 
 
-# Слова, которыми шлюз говорит, что дело в самой картинке: разобрать её он не смог
-# или модель её не принимает. Разбирать тут нечего — приложенное убирается
-# (см. _eased_body), а модель запоминается слепой
-_PICTURE_MARKS = ("load image", "load the image", "invalid image", "image too",
-                  "failed to load image", "does not support image",
-                  "doesn't support image", "images are not supported",
-                  "unsupported image", "cannot read image", "image_url")
+# Слова, которыми шлюз говорит, что приложенную картинку он не принял. Причина
+# бывает двух родов, и путать их нельзя:
+#
+#   * картинки не принимает сама модель («does not support image») — это про
+#     модель, и такой отказ запоминается: больше ей картинок не шлют
+#     (см. _eased_body, probe_images);
+#   * картинку не разобрал шлюз или вендор («Failed to load image»; «image length
+#     and width do not meet the model restrictions» — так вендор отвечает
+#     на пиксель 1x1). Это про файл, а не про модель: ход повторяется без
+#     приложения, но приговором модели такой отказ не становится — иначе один
+#     неудачный файл навсегда лишал бы модель картинок (см. _eased_body)
+_MODEL_REFUSED_PICTURES = ("does not support image", "doesn't support image",
+                           "images are not supported", "unsupported image",
+                           "cannot read image", "model does not support image")
+_FILE_REFUSED_PICTURES = ("load image", "load the image", "invalid image",
+                          "image too", "failed to load image", "image length",
+                          "image width", "image size", "must be larger than",
+                          "image_url")
+_PICTURE_MARKS = _MODEL_REFUSED_PICTURES + _FILE_REFUSED_PICTURES
 
 
 def picture_refused(text: str) -> bool:
     """Похоже ли, что шлюз отказал из-за приложенной картинки."""
     asked = (text or "").lower()
     return any(mark in asked for mark in _PICTURE_MARKS)
+
+
+def model_refused_pictures(text: str) -> bool:
+    """Отказ про саму модель — а не про то, что вендор не разобрал наш файл.
+
+    Разница дорогая в обе стороны: записать файл за модель — это навсегда
+    лишить зрячую модель картинок, а записать модель за файл — оставить слепую
+    разбираться с каждой приложенной репликой по второму разу (см. _eased_body).
+    """
+    asked = (text or "").lower()
+    return any(mark in asked for mark in _MODEL_REFUSED_PICTURES)
+
+
+# Каким моделям ход ушёл без приложения: картинка в запросе была, а шлюз её
+# не принял, и та же реплика уехала без неё (см. _eased_body). Помнить это надо
+# затем, что такое приложение не показано: назвать его показанным — значит
+# написать модели «эта картинка уже показана тебе» про картинку, которой она
+# не видела, и больше никогда ей её не приложить (см. show.commit_shown_pictures)
+_PICTURES_DROPPED = set()
+
+
+def mark_pictures_dropped(model: str) -> None:
+    """Запомнить, что ход этой модели ушёл без приложения (см. _PICTURES_DROPPED)."""
+    name = bare_model_name(model)
+    if name:
+        _PICTURES_DROPPED.add(name)
+
+
+def take_pictures_dropped(model: str) -> bool:
+    """Ушёл ли последний ход этой модели без приложения — один раз и начисто."""
+    name = bare_model_name(model)
+    if name in _PICTURES_DROPPED:
+        _PICTURES_DROPPED.discard(name)
+        return True
+    return False
+
+
+def forget_pictures_dropped(model: str) -> None:
+    """Новый ход — прежняя запись про ушедшее без приложения не в счёт.
+
+    Ход мог и не дойти до конца (ошибка шлюза после повтора): тогда отметка
+    осталась бы, и следующий ход записал бы показанным то, чего не отправлял.
+    """
+    _PICTURES_DROPPED.discard(bare_model_name(model))
 
 
 def pictures_in(body: dict) -> bool:
@@ -932,10 +1042,11 @@ def _eased_body(model: str, body: dict, error):
     И еще одна причина — приложенная к реплике картинка: шлюз отвечает
     «Failed to load image» (не разобрал файл) или «does not support image»
     (модель её не принимает). Ход из-за приложенного пропадать не должен:
-    тот же запрос уходит без картинок, а модель запоминается слепой — в
-    следующий раз они ей не поедут вовсе (см. probe_images). Иначе редко
-    встречающийся файл или модель-обманщик убивали бы каждый ход, где есть
-    приложение
+    тот же запрос уходит без картинок. А вот помнит ли приложение про такой
+    отказ — зависит от того, кто виноват: отказ модели запоминается слепотой
+    (в следующий раз картинки ей не поедут вовсе, см. probe_images), а отказ
+    по нашему файлу — только поводом повторить без него: приговор тут был бы
+    про вендора, а доставался модели (см. model_refused_pictures)
 
     Третья. Если запрос с инструментом поиска не проходит, а такой же без него
     проходит — модель его не принимает. Признаком этого делится вызывающий:
@@ -954,10 +1065,16 @@ def _eased_body(model: str, body: dict, error):
     # Приложенная картинка: убираем её и повторяем — реплика важнее приложения
     if pictures_in(body) and picture_refused(text):
         name = bare_model_name(model)
-        _IMAGE_READERS[name] = False
-        save_image_readers()
-        print(f"  🖼  Облако: {name} не открыла приложенную картинку — "
-              f"повторяю реплику без неё, и больше этой модели картинок не шлю")
+        # Ушедшее без приложения показанным не считается (см. _PICTURES_DROPPED)
+        mark_pictures_dropped(model)
+        if model_refused_pictures(text):
+            _IMAGE_READERS[name] = False
+            save_image_readers()
+            print(f"  🖼  Облако: {name} не открыла приложенную картинку — "
+                  f"повторяю реплику без неё, и больше этой модели картинок не шлю")
+        else:
+            print(f"  🖼  Облако: {name} споткнулась о саму картинку — "
+                  f"повторяю реплику без неё (про зрение это ничего не говорит)")
         return without_pictures(body)
 
     # max_tokens — не лишнее поле, а другое его имя, и шлюз прямо это пишет
@@ -1931,6 +2048,16 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
         eased = _eased_body(model, body, error)
         if eased is None:
             break
+        if pictures_in(body) and not pictures_in(eased):
+            # Ход ушёл без приложения — и это часть хода: без строки в хронологии
+            # в отчёте видна была бы реплика без картинки и ни слова о том,
+            # почему её там нет (см. _eased_body). Шаг кладём здесь же, а не
+            # через ollama_api.journal_note: тот сам смотрит сюда (см. шапку
+            # модуля), и звать его отсюда — это колесо
+            journal_push(report, {"kind": "images", "t": time.time(),
+                                  "text": (f"{bare_model_name(model)} не приняла "
+                                           f"приложенную картинку — реплика "
+                                           f"продолжена без неё")})
         if "tools" in body and "tools" not in eased:
             tools_stripped = True
         body = eased

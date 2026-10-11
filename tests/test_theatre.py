@@ -7842,6 +7842,47 @@ class TestThePictureIsShownOnce(PicturesTest):
                         "модель, не видавшая картинку, осталась без неё")
         self.assertNotIn("уже показана", self.joined(seen_again))
 
+    def test_a_picture_the_gateway_did_not_take_is_not_called_shown(self):
+        """Ход, ушедший без приложения, показом картинки не считается.
+
+        Шлюз бывает не согласен с приложенным, и та же реплика уходит без него
+        (см. cloud._eased_body). Отметить после этого картинку показанной —
+        значит сказать модели «эта картинка уже показана тебе» про то, чего она
+        не видела, и больше никогда её не приложить (см. commit_shown_pictures).
+        """
+        self.addCleanup(cloud._PICTURES_DROPPED.clear)
+        self.with_picture()
+        self.assertTrue([m for m in self.spoken() if m.get("images")])
+
+        cloud.mark_pictures_dropped(self.person["model"])
+        self.turn()
+
+        again = self.spoken()
+        self.assertTrue([m for m in again if m.get("images")],
+                        "модель осталась без картинки, которую так и не увидела")
+        self.assertNotIn("уже показана", self.joined(again),
+                         "о невиданной картинке модели сказали, что она её видела")
+
+    def test_the_mark_of_a_turn_that_did_not_finish_does_not_live_on(self):
+        """Отметка про ход без приложения не переживает следующий сбор запроса.
+
+        Ход мог и не дойти до конца (ошибка шлюза после повтора): тогда отметка
+        осталась бы, и следующий — удачный — ход записал бы показанным то, чего
+        в нём не отправлял, а картинка поехала бы снова и снова
+        (см. remember_pictures_to_send).
+        """
+        self.addCleanup(cloud._PICTURES_DROPPED.clear)
+        self.with_picture()
+        # Прежний ход упал уже после того, как шлюз отказал: отметка осталась
+        cloud.mark_pictures_dropped(self.person["model"])
+        self.spoken()      # сбор нового запроса — прежняя отметка прочь
+        self.turn()        # и в этом ходу картинка правда уехала
+
+        last = self.spoken()
+        self.assertEqual([m for m in last if m.get("images")], [],
+                         "картинка поехала второй раз: уехавшую не сочли показанной")
+        self.assertIn("уже показана", self.joined(last))
+
     def test_a_model_without_vision_is_never_told_it_was_shown(self):
         """Слепой модели приложенное не уезжает вовсе — и строки о нём ей не кладут.
 
@@ -8294,6 +8335,9 @@ class CloudVisionTest(unittest.TestCase):
         self.addCleanup(self.forget, kept)
         cloud._IMAGE_READERS.clear()
         cloud._VISION_LOADED = False
+        # Отметки про ходы, ушедшие без приложения, — то же общее знание:
+        # оставленная одним тестом, она решала бы за следующий (см. _PICTURES_DROPPED)
+        self.addCleanup(cloud._PICTURES_DROPPED.clear)
 
     @staticmethod
     def forget(kept: dict):
@@ -8343,7 +8387,7 @@ class TestWhoReadsPictures(CloudVisionTest):
         """Проверка и есть то, из-за чего картинка уезжает: по имени тут — «не читает».
 
         По приметам в имени «qwen/qwen3.8-flash» выходит слепым, а шлюз на
-        крошечную картинку отвечает. Значит, дело не в приметах: решила
+        пробную картинку отвечает. Значит, дело не в приметах: решила
         проверка (см. cloud.probe_images), и картинка уехала.
         """
         answer = ({"choices": [{"message": {"content": "синий"}}]}, None)
@@ -8384,8 +8428,8 @@ class TestWhoReadsPictures(CloudVisionTest):
 
         Спрашивать на каждом ходу значило бы платить за один и тот же ответ,
         а узнавать его после ошибки — «получать ошибку каждый раз», от чего
-        режиссёр и просил избавиться. Проверка — запрос с крошечной картинкой
-        (см. cloud.TINY_PICTURE), и она же нужна затем, чтобы знак «+» у модели
+        режиссёр и просил избавиться. Проверка — запрос с обычной картинкой
+        (см. cloud.PROBE_PICTURE), и она же нужна затем, чтобы знак «+» у модели
         не был догадкой (см. web.get_models).
         """
         asked = []
@@ -8421,6 +8465,78 @@ class TestWhoReadsPictures(CloudVisionTest):
         self.assertFalse(told)
         self.assertTrue(cloud.images_known("cloud:some/text-model"),
                         "отказ запоминается: иначе он повторялся бы каждый раз")
+
+    def test_the_probe_asks_with_an_ordinary_picture(self):
+        """Проверяем не выдумкой, а обычной картинкой — иначе проверяем не модель.
+
+        Пиксель 1x1 вендор разбирать отказывается («The image length and width
+        do not meet the model restrictions… must be larger than 10»), и этот
+        отказ — про пиксель, а не про модели: так на живом шлюзе зрячая
+        qwen3.8-flash (отвечает «Красный» на обычную картинку) записалась слепой
+        и картинок не получала вовсе. Спрашивать надо тем же, чем модель
+        пользуется вправду (см. cloud.PROBE_PICTURE).
+        """
+        head = "data:image/png;base64,"
+        self.assertTrue(cloud.PROBE_PICTURE.startswith(head),
+                        "картинка едет шлюзу адресом-данными, как и настоящая")
+        png = base64.b64decode(cloud.PROBE_PICTURE[len(head):])
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n", "это не PNG")
+        width, height = struct.unpack(">II", png[16:24])
+        self.assertEqual((width, height), (cloud.PROBE_SIZE, cloud.PROBE_SIZE),
+                         "размер картинки не тот, что заявлен")
+        self.assertGreater(min(width, height), 10,
+                           "вендор не разбирает картинку меньше 10 точек — "
+                           "отказ по ней записался бы в модель")
+        self.assertTrue(png.endswith(b"IEND\xaeB`\x82"), "PNG не дописан")
+        self.assertLess(len(png), 4096,
+                        "проверочная картинка весит как настоящая: в каждом запросе "
+                        "к шлюзу она не нужна такой")
+
+    def test_answers_of_an_older_picture_are_asked_again(self):
+        """Ответы, снятые прежней картинкой, про модель не говорят — и не запомнятся.
+
+        Так исправляется прежняя ошибка с пикселем 1x1: записанная им слепота
+        не остаётся приговором, а переспрашивается.        Спрошенное той же картинкой
+        читается как прежде — иначе проверка стоила бы на каждом запуске.
+        """
+        settings.VISION_FILE.write_text(
+            json.dumps({"qwen/qwen3.8-flash": False}, ensure_ascii=False),
+            encoding="utf-8")
+        cloud._VISION_LOADED = False
+        self.assertFalse(cloud.images_known("cloud:qwen/qwen3.8-flash"),
+                         "ответ прежней картинки сошёл за нынешний")
+
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", return_value=(
+                 {"choices": [{"message": {"content": "синий"}}]}, None)):
+            told = cloud.probe_images("cloud:qwen/qwen3.8-flash")
+        self.assertTrue(told, "модель со зрением осталась без картинок")
+
+        # В файле теперь видно, какой картинкой снят ответ, — и он же читается
+        # обратно без второго запроса
+        written = json.loads(settings.VISION_FILE.read_text(encoding="utf-8"))
+        self.assertEqual(written.get("_probe"), cloud.PROBE_MARK,
+                         "в файле не сказано, про какую картинку ответы")
+        cloud._IMAGE_READERS.clear()
+        cloud._VISION_LOADED = False
+        self.assertTrue(cloud.images_known("cloud:qwen/qwen3.8-flash"),
+                        "ответ нынешней картинки не прочитался")
+        self.assertTrue(cloud.model_reads_images("cloud:qwen/qwen3.8-flash"))
+
+    def test_answers_of_an_older_picture_are_not_read_as_the_model_s_own(self):
+        """Чужой картинкой снятый ответ не переживает даже своего файла.
+
+        Отметка в файле — не украшение: без неё записанное прежним пикселем
+        читалось бы как ответ про модель (см. load_image_readers).
+        """
+        settings.VISION_FILE.write_text(
+            json.dumps({"_probe": "другая-картинка",
+                        "qwen/qwen3.8-flash": True}, ensure_ascii=False),
+            encoding="utf-8")
+        cloud._VISION_LOADED = False
+
+        self.assertFalse(cloud.images_known("cloud:qwen/qwen3.8-flash"),
+                         "ответ чужой картинки прочитан как ответ про модель")
 
     def test_a_probe_that_could_not_be_asked_is_not_remembered(self):
         """Нет ключа или связи — это «не знаем»: связывать модель по рукам нельзя.
@@ -8485,7 +8601,7 @@ class TestWhoReadsPictures(CloudVisionTest):
         """Спрошенное важнее догадки — в обе стороны.
 
         Так проверка и работает: у «qwen3.8-flash» по имени выходило «не читает»,
-        а шлюз на крошечную картинку отвечает как ни в чём не бывало.
+        а шлюз на пробную картинку отвечает как ни в чём не бывало.
         """
         cloud._IMAGE_READERS.update({"qwen/qwen3.8-flash": True,
                                      "google/gemini-2.0-flash": False,
@@ -8658,8 +8774,10 @@ class TestAPictureNobodyCanOpen(CloudVisionTest):
     отказом уже на самом запросе — и раньше это значило «ход пропал»: в ленте
     оставалась строка [ОШИБКА: HTTP 400] вместо реплики (такое случилось на
     живом спектакле с приложенным значком). Теперь тот же запрос уходит без
-    приложенного, а модель запоминается слепой — то есть ошибка бывает один
-    раз, а не на каждом ходу.
+    приложенного, а помнит ли приложение про отказ — зависит от того, кто
+    виноват: отказ самой модели запоминается (ошибка бывает один раз, а не
+    на каждом ходу), а отказ по нашему файлу — нет: он про вендора, а не про
+    модель (см. model_refused_pictures).
     """
 
     def test_the_local_replica_survives_a_picture_that_was_not_opened(self):
@@ -8688,14 +8806,19 @@ class TestAPictureNobodyCanOpen(CloudVisionTest):
         self.assertTrue([step for step in report["steps"] if step.get("kind") == "images"],
                         "в хронологии хода должно быть сказано, что с картинкой вышло")
 
-    def test_the_gateway_picture_refusal_drops_the_picture_and_is_remembered(self):
-        """Шлюз отказал из-за картинки — убираем её из тела и помним отказ."""
-        body = {"messages": [{"role": "user", "content": [
+    @staticmethod
+    def _gateway_body() -> dict:
+        return {"messages": [{"role": "user", "content": [
             {"type": "text", "text": "вот схема"},
             {"type": "image_url",
              "image_url": {"url": "data:image/png;base64,AAAA"}}]}]}
+
+    def test_the_gateway_picture_refusal_drops_the_picture_and_is_remembered(self):
+        """Модель картинок не принимает — убираем её из тела и помним отказ."""
+        body = self._gateway_body()
         refusal = cloud.GatewayError(
-            'шлюз ответил HTTP 400 Bad Request: {"message":"Failed to load image"}', 400)
+            'шлюз ответил HTTP 400 Bad Request: {"message":"This model does not '
+            'support image input"}', 400)
 
         eased = cloud._eased_body("cloud:some/text-model", body, refusal)
 
@@ -8707,6 +8830,75 @@ class TestAPictureNobodyCanOpen(CloudVisionTest):
                          "такой модели картинки больше не поедут")
         self.assertEqual(body["messages"][0]["content"][1]["type"], "image_url",
                          "исходное тело править нельзя: его ещё будет чем сравнить")
+
+    def test_a_file_the_vendor_could_not_read_does_not_blind_the_model(self):
+        """Отказ по нашему файлу — не приговор модели: картинка поедет и впредь.
+
+        Вендор пишет прямо, что ему не по размеру пришлась сама картинка («The
+        image length and width do not meet the model restrictions… must be larger
+        than 10»), — и раньше такой отказ и терял ход, и записывался в модель.
+        Зрячая модель, которой однажды приложили слишком мелкое изображение,
+        оставалась без картинок навсегда — а ход без повтора вообще пропадал.
+        """
+        body = self._gateway_body()
+        refusal = cloud.GatewayError(
+            'шлюз ответил HTTP 400 Bad Request: {"message":"The image length and '
+            'width do not meet the model restrictions. [height:1 or width:1 must be '
+            'larger than 10]"}', 400)
+
+        eased = cloud._eased_body("cloud:qwen/qwen3.8-flash", body, refusal)
+
+        self.assertTrue(eased, "ход пропал вместо повтора без приложения")
+        self.assertEqual(eased["messages"][0]["content"], "вот схема")
+        self.assertFalse(cloud.images_known("cloud:qwen/qwen3.8-flash"),
+                         "отказ по нашему файлу записан в модель как её слепота")
+        self.assertIsNone(cloud._IMAGE_READERS.get("qwen/qwen3.8-flash"),
+                          "про зрение тут не решено: спрашивать будут снова, как в первый раз")
+
+    def test_the_two_kinds_of_refusal_are_not_confused(self):
+        """«Модель не принимает картинки» и «файл не разобран» — разные беды.
+
+        Обе лечатся повтором без приложения (ход дороже картинки), но приговором
+        модели становится только первая: иначе один неудобный файл навсегда
+        лишал бы зрячую модель приложенных картинок (см. model_refused_pictures).
+        """
+        self.assertTrue(cloud.picture_refused(
+            '{"message":"The image size is too large"}'),
+            "отказ по картинке не узнан — и ход пропадёт вместо повтора")
+        self.assertFalse(cloud.model_refused_pictures(
+            '{"message":"The image size is too large"}'),
+            "отказ по размеру нашего файла записали в модель")
+        self.assertTrue(cloud.model_refused_pictures("does not support image input"),
+                        "отказ самой модели потерялся")
+        self.assertFalse(cloud.picture_refused("Unknown parameter: 'min_p'"),
+                         "чужой отказ принят за отказ по картинке")
+
+    def test_the_dropped_picture_is_remembered_for_the_turn(self):
+        """Убранное приложение помечено как не уехавшее — про это спросят потом.
+
+        Один и тот же шлюзной запрос повторяется с убранной картинкой, а в конце
+        хода видно: показом это не считается (см. show.commit_shown_pictures).
+        Самому шлюзу тут не верим на слово — только тому, что он назвал картинку.
+        """
+        refusal = cloud.GatewayError('{"message":"does not support image input"}', 400)
+
+        cloud._eased_body("cloud:some/text-model", self._gateway_body(), refusal)
+
+        self.assertTrue(cloud.take_pictures_dropped("cloud:some/text-model"),
+                        "ход ушёл без приложения, а об этом не помнит никто")
+        self.assertFalse(cloud.take_pictures_dropped("cloud:some/text-model"),
+                         "об одном ходу спросили дважды")
+
+    def test_a_turn_without_pictures_marks_nothing(self):
+        """Отказ в ходу без картинок про них ничего не говорит."""
+        body = {"messages": [{"role": "user", "content": "вот словами"}]}
+        refusal = cloud.GatewayError(
+            "шлюз ответил HTTP 400 — Unknown parameter: 'min_p'", 400)
+
+        self.assertIsNone(cloud._eased_body("cloud:some/model", body, refusal),
+                          "лечить тут нечего")
+        self.assertEqual(cloud._PICTURES_DROPPED, set(),
+                         "отметка про ушедшее приложение появилась из ниоткуда")
 
     def test_another_refusal_leaves_the_picture_alone(self):
         """Отказ не про картинку — не повод терять приложение."""

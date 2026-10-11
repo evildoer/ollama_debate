@@ -4799,6 +4799,9 @@ class DebateSession:
         # Прежняя запись стирается всегда: она про другой ход, и удачный ход
         # этого мог бы отметить показанным то, что в нём не уехало вовсе
         self.images_pending.pop(model, None)
+        # И прежняя запись про ход без приложения — тоже: она осталась бы,
+        # если тот ход кончился ошибкой (см. cloud.forget_pictures_dropped)
+        cloud.forget_pictures_dropped(model)
         sending = {url for message in messages
                    for url in (image_keys or {}).get(id(message), [])}
         if sending:
@@ -4810,9 +4813,15 @@ class DebateSession:
         И только той, кто их правда читает: незрячей модели приложенное
         не уезжает вовсе (см. ollama_api.messages_for), и строка «уже показана»
         была бы в ней враньём.
+
+        И только если они вправду уехали: шлюз бывает не согласен с приложенным,
+        и реплика уходит без него (см. cloud.take_pictures_dropped). Отметить
+        такую картинку показанной — значит больше никогда её не послать,
+        а модели сказать «ты её видела» про то, чего она не видала.
         """
         sending = self.images_pending.pop(model, None)
-        if sending and ollama_api.takes_images(model):
+        dropped = cloud.take_pictures_dropped(model)
+        if sending and not dropped and ollama_api.takes_images(model):
             self.images_shown.setdefault(model, set()).update(sending)
 
     def forget_shown_pictures(self) -> None:

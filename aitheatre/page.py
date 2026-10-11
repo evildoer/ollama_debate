@@ -485,7 +485,7 @@ HTML_TEMPLATE = """
                         <div class="panel-heading"><span class="num">00</span><span class="name">Готовность</span><span class="ready-badge" id="readyBadge"></span></div>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
                             <button class="btn btn-secondary" onclick="checkReadiness()" style="padding:6px 15px;font-size:13px;margin:0;">🔄 Проверить сейчас</button>
-                            <button class="btn btn-secondary" id="visionBtn" onclick="checkVision()" style="padding:6px 15px;font-size:13px;margin:0;" title="Спросить у всех моделей состава, читают ли они картинки. У облачных это настоящий запрос с крошечной картинкой — потому и по кнопке">👁 Проверить зрение</button>
+                            <button class="btn btn-secondary" id="visionBtn" onclick="checkVision()" style="padding:6px 15px;font-size:13px;margin:0;" title="Спросить у всех моделей состава, читают ли они картинки. У облачных это настоящий запрос с пробной картинкой — потому и по кнопке">👁 Проверить зрение</button>
                             <span style="font-size:12px;color:#666;">Проверка идёт при загрузке страницы и при правках состава</span>
                         </div>
                         <div id="visionNote" style="font-size:13px;color:#666;font-style:italic;margin-bottom:10px;"></div>
@@ -2170,7 +2170,7 @@ HTML_TEMPLATE = """
 
         // «Проверить зрение»: спрашиваем про картинки у всех моделей состава сразу.
         // У местных это способность vision из /api/show, а у облачных — пробный
-        // запрос к шлюзу с крошечной картинкой (см. cloud.probe_images). Это
+        // запрос к шлюзу с обычной картинкой (см. cloud.probe_images). Это
         // единственный способ узнать правду: по имени модель читать картинки
         // может и не всегда (на живом шлюзе gemma-4, glm-5.3 и qwen3.8 их
         // читали, а по приметам выходили слепыми). Ответ запоминается навсегда
