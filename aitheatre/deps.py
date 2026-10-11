@@ -55,3 +55,14 @@ try:
     MARKDOWN_AVAILABLE = True
 except ImportError:
     MARKDOWN_AVAILABLE = False
+
+# Pillow — картинки: без него из приложенного уменьшается только png (своими
+# руками, см. pictures), а jpeg, webp и gif уезжают как есть. Это не поломка:
+# приложение работает и без него, поэтому и не предупреждаем — о такой картинке
+# скажет тот, кто её отправляет (см. pictures._foreign_note)
+try:
+    from PIL import Image
+    PILLOW_AVAILABLE = True
+except ImportError:
+    Image = None
+    PILLOW_AVAILABLE = False

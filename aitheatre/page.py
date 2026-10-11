@@ -485,7 +485,7 @@ HTML_TEMPLATE = """
                         <div class="panel-heading"><span class="num">00</span><span class="name">Готовность</span><span class="ready-badge" id="readyBadge"></span></div>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
                             <button class="btn btn-secondary" onclick="checkReadiness()" style="padding:6px 15px;font-size:13px;margin:0;">🔄 Проверить сейчас</button>
-                            <button class="btn btn-secondary" id="visionBtn" onclick="checkVision()" style="padding:6px 15px;font-size:13px;margin:0;" title="Спросить у всех моделей состава, читают ли они картинки. У облачных это настоящий запрос с пробной картинкой — потому и по кнопке">👁 Проверить зрение</button>
+                            <button class="btn btn-secondary" id="visionBtn" onclick="checkVision()" style="padding:6px 15px;font-size:13px;margin:0;" title="Спросить у всех моделей состава, читают ли они картинки — и спрашивать заново, а не показывать прежний ответ. У облачных это настоящий запрос с пробной картинкой; у местных — метаданные файла модели">👁 Проверить зрение</button>
                             <span style="font-size:12px;color:#666;">Проверка идёт при загрузке страницы и при правках состава</span>
                         </div>
                         <div id="visionNote" style="font-size:13px;color:#666;font-style:italic;margin-bottom:10px;"></div>
@@ -2169,20 +2169,29 @@ HTML_TEMPLATE = """
         }
 
         // «Проверить зрение»: спрашиваем про картинки у всех моделей состава сразу.
-        // У местных это способность vision из /api/show, а у облачных — пробный
-        // запрос к шлюзу с обычной картинкой (см. cloud.probe_images). Это
-        // единственный способ узнать правду: по имени модель читать картинки
-        // может и не всегда (на живом шлюзе gemma-4, glm-5.3 и qwen3.8 их
-        // читали, а по приметам выходили слепыми). Ответ запоминается навсегда
-        // (см. cloud._IMAGE_READERS), поэтому спрашивают один раз на модель —
-        // при запуске автоматически (см. autoVision), а кнопкой — когда хочется
-        // переспросить про весь состав сразу
-        function checkVision() {
+        // У местных это метаданные их файла из /api/show (способность, проектор
+        // картинок, приметы вида clip.* — примет несколько, см. vision_signs),
+        // а у облачных — пробный запрос к шлюзу с обычной картинкой (см.
+        // cloud.probe_images). Это единственный способ узнать правду: по имени
+        // модель читать картинки может и не всегда (на живом шлюзе gemma-4,
+        // glm-5.3 и qwen3.8 их читали, а по приметам выходили слепыми).
+        //
+        // again=true — кнопка: она спрашивает заново про всех (за старым ответом
+        // и нажимать было бы незачем). again=false — досказать про новых в составе,
+        // ничего не забывая: проверка — это запрос, и лишним он не нужен
+        // (см. autoVision, ollama_api.cast_vision)
+        function checkVision(again = true) {
             const btn = document.getElementById('visionBtn');
             if (btn) { btn.disabled = true; btn.textContent = '⏳ Спрашиваю...'; }
             const note = document.getElementById('visionNote');
-            if (note) note.textContent = 'Спрашиваю у моделей состава...';
-            fetch('/api/vision/check', {method: 'POST'})
+            if (note) note.textContent = again
+                ? 'Спрашиваю у моделей состава заново...'
+                : 'Спрашиваю про тех, о ком ещё не знаю...';
+            fetch('/api/vision/check', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({again: again})
+            })
                 .then(r => r.json())
                 .then(data => {
                     const checked = data.checked || [];
@@ -2207,23 +2216,23 @@ HTML_TEMPLATE = """
                 });
         }
 
-        // Проверка зрения при запуске: про кого в этом составе ещё не известно,
-        // про того спрашиваем сами — иначе режиссёр узнавал бы, кому уедет
-        // приложенное, только нажав кнопку. Денег это стоит один раз на модель
-        // (ответ лежит в файле, см. cloud.probe_images), а про кого спрашивали
-        // в этой вкладке, помним — иначе отказ шлюза гонял бы проверку по кругу
-        // с каждой перерисовкой состава
+        // Проверка зрения при правке состава: про кого в этом составе ещё
+        // не известно, про того спрашиваем сами — иначе режиссёр узнавал бы,
+        // кому уедет приложенное, только нажав кнопку. Денег это стоит один раз
+        // на модель, и спрашивают тут **только про новых** (again=false):
+        // про тех, кого уже проверяли, не переспрашивают — зрячей модели важно
+        // получить картинки, а не отвечать на один и тот же вопрос на каждой
+        // перерисовке состава (см. ollama_api.cast_vision). Про кого страница
+        // спрашивала, помним — иначе отказ шлюза (нет ключа, нет связи) гонял бы
+        // проверку по кругу
         let visionAsked = new Set();
         function autoVision() {
             const unknown = cast.filter(p => p.model && p.model !== 'human'
                                             && p.vision_checked === false
                                             && !visionAsked.has(p.model));
             if (!unknown.length) return;
-            // Спрошено — помним об этом до перезагрузки страницы: иначе отказ
-            // шлюза (нет ключа, нет связи) крутился бы запросом на каждой
-            // перерисовке состава
             unknown.forEach(p => visionAsked.add(p.model));
-            checkVision();
+            checkVision(false);
         }
 
         // Что ответили — словами, а не только значком «+» у имени: режиссёру
@@ -2250,7 +2259,7 @@ HTML_TEMPLATE = """
                     : 'Картинок не читает ни одна модель состава: приложенное уехало '
                         + 'бы им текстом, поэтому не отправляется вовсе.'));
             if (readers.length && blind.length) parts.push('Не читают: ' + blind.map(who).join(', ') + '.');
-            if (unknown.length) parts.push('Про этих спросить не удалось (шлюз не ответил): '
+            if (unknown.length) parts.push('Про этих спросить не удалось (ответа нет): '
                 + unknown.map(who).join(', ') + ' — картинки им, скорее всего, не уедут.');
             return parts.join(' ');
         }
@@ -2263,8 +2272,9 @@ HTML_TEMPLATE = """
         }
 
         // То же словами, но из одного состава — без запроса к шлюзу: про местные
-        // модели всё и так известно (capabilities Ollama), а про облачные —
-        // настолько, насколько их уже спросили (см. vision_answer_known)
+        // модели всё и так известно (метаданные их файла, см. vision_facts),
+        // а про облачные — настолько, насколько их уже спросили
+        // (см. vision_answer_known)
         function sayCastVision() {
             const note = document.getElementById('visionNote');
             if (!note) return;

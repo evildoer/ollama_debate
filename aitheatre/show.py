@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import cloud
 from . import ollama_api
+from . import pictures
 from . import settings
 from . import text
 from . import tooltext
@@ -3060,25 +3061,14 @@ _UPLOAD_IMAGES = {}
 # спектакля (см. _format_history)
 _IMAGES_NOT_RESENT = set()
 
-# Вид картинки по её содержимому, а не по имени файла: браузер называет тип
-# по расширению, и «photo.txt», переименованный в .png, выдавал бы себя за
-# картинку. Ollama же разбирает именно содержимое
-_IMAGE_SIGNS = ((b"\x89PNG\r\n\x1a\n", "image/png"),
-                (b"\xff\xd8\xff", "image/jpeg"),
-                (b"GIF87a", "image/gif"), (b"GIF89a", "image/gif"))
-
-
 def image_kind(data: bytes) -> str:
     """Что это за картинка на самом деле — по её первым байтам.
 
-    Пустая строка — не картинка (или такая, которой мы не знаем).
+    Пустая строка — не картинка (или такая, которой мы не знаем). Разбор
+    живёт рядом с остальными делами приложенного (см. pictures.picture_kind):
+    вид нужен и здесь, и при отправке модели, и раздваивать его незачем
     """
-    for sign, kind in _IMAGE_SIGNS:
-        if data.startswith(sign):
-            return kind
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return ""
+    return pictures.picture_kind(data)
 
 
 def save_upload(name: str, data_url: str) -> tuple:
@@ -3110,8 +3100,11 @@ def save_upload(name: str, data_url: str) -> tuple:
     # и «../../», и что угодно ещё. Оригинальное имя хранится рядом для показа
     filename = f"{uuid.uuid4().hex[:12]}{settings.UPLOAD_TYPES[kind]}"
     (settings.UPLOAD_DIR / filename).write_bytes(raw)
+    # Вес — по значащей единице (см. pictures.human_bytes): целые килобайты
+    # вниз показывали приложенный значок в 761 байт как «0 Кб», то есть как
+    # «ничего не приложено»
     print(f"  🖼  Приложено к реплике: {name or filename} "
-          f"({len(raw) // 1024} Кб, {kind})")
+          f"({pictures.human_bytes(len(raw))}, {kind})")
     return {"name": str(name or filename), "url": f"/uploads/{filename}"}, ""
 
 
@@ -3237,8 +3230,19 @@ def post_image_pairs(attachments: list) -> list:
             kind = image_kind(path.read_bytes())
             if not kind:
                 continue
-            _UPLOAD_IMAGES[key] = (f"data:{kind};base64,"
-                                   + base64.b64encode(path.read_bytes()).decode("ascii"))
+            payload = (f"data:{kind};base64,"
+                       + base64.b64encode(path.read_bytes()).decode("ascii"))
+            # Приведение к обычному размеру — здесь, на отправке, а не при
+            # приёме: файл на диске и в ДАМПе остаётся таким, каким его принёс
+            # режиссёр, а модели уезжает то, что она точно примет (см.
+            # pictures.prepare). Помнится это по имени файла и весу (см. выше),
+            # поэтому говорится тут ровно один раз — что именно сделано
+            # с картинкой и сколько весило прежнее
+            payload, note = pictures.prepare(payload)
+            if note:
+                name = str((item or {}).get("name") or file)
+                print(f"  🖼  «{name}»: {note}")
+            _UPLOAD_IMAGES[key] = payload
         images.append((url, _UPLOAD_IMAGES[key]))
     return images
 
@@ -6122,12 +6126,22 @@ def report_cast_vision(participants: list) -> list:
     на сцене: слепая модель получила бы отказом посреди хода. Спрашивают
     и в пульте, при загрузке состава (см. page.autoVision), — но спектакль
     может играть и с закрытой страницей, поэтому тот же вопрос задаётся
-    ещё раз здесь, в самом начале потока. Ответ помнится, так что платят
-    за него один раз на модель (см. cloud.probe_images).
+    ещё раз здесь, в самом начале потока, и здесь он задаётся **заново**:
+    прежние ответы забываются (см. cast_vision, again=True). Модели меняются
+    между запусками, а ошибка в этом стоит весь спектакль: зрячая модель,
+    записанная слепой, не получила бы ни одной картинки.
     """
-    checked = ollama_api.cast_vision(participants)
+    checked = ollama_api.cast_vision(participants, again=True)
     if checked:
         print(f"  👁  {ollama_api.vision_words(checked)}")
+        # И почему решено именно так — одной строкой: у местной модели это
+        # приметы в метаданных, у облачной — пробный запрос, а бывает и догадка
+        # по имени, когда спросить не вышло (см. vision_reasons). Без этой
+        # строки «картинки не читает» не разобрать на «так и есть» и «мы
+        # не спросили»
+        reasons = ollama_api.vision_reasons(checked)
+        if reasons:
+            print(f"  👁  почему: {reasons}")
     return checked
 
 
@@ -6215,8 +6229,11 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
         return {p.get("model", "") for p in session.runtime_participants
                 if p.get("model") and p.get("model") != "human"}
 
-    # Кому уедет приложенное — выясняется до первого хода: об этом говорят
-    # и пульт, и эта строка, а моделей без зрения больше не застают врасплох
+    # Кому уедет приложенное — выясняется до первого хода, и заново: прежние
+    # ответы про зрение при этом забываются (см. report_cast_vision, cast_vision).
+    # Об этом говорят и пульт, и эта строка, а моделей без зрения больше не
+    # застают врасплох. Больше нигде этот вопрос сам не задаётся: при правке
+    # состава страница спрашивает только про новых (см. page.autoVision)
     report_cast_vision(runtime_participants)
     # И про картинку темы — тем же порядком: приложил режиссёр — сразу видно,
     # кому она уедет, а кому нет (см. report_topic_picture)

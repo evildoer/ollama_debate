@@ -1475,8 +1475,37 @@ BUGS = {
     ],
     "кнопка зрения снова называет читающими всех": [
         ("aitheatre/ollama_api.py",
-         '            "reads_images": bool(takes_images(model)),',
-         '            "reads_images": True,'),
+         '        reads = bool(takes_images(model))',
+         '        reads = True'),
+    ],
+    "отказ по файлу снова записывают приговором модели": [
+        ("aitheatre/ollama_api.py",
+         '            cloud.mark_pictures_dropped(model)',
+         '            _VISION_FACTS[model] = {"reads": False, "known": True,\n'
+         '                                    "why": "не открыла картинку"}'),
+    ],
+    "приложенное снова уезжает как есть, без приведения к обычному размеру": [
+        ("aitheatre/show.py",
+         '            payload, note = pictures.prepare(payload)',
+         '            payload, note = payload, ""'),
+    ],
+    "вес файла снова считается целыми килобайтами вниз": [
+        ("aitheatre/show.py",
+         '          f"({pictures.human_bytes(len(raw))}, {kind})")',
+         '          f"({len(raw) // 1024} Кб, {kind})")'),
+    ],
+    "зрение снова видно только по одному полю capabilities": [
+        ("aitheatre/ollama_api.py",
+         '    signs = vision_signs(show)',
+         '    signs = (["vision"] if "vision" in (show.get("capabilities") or [])\n'
+         '              else [])'),
+    ],
+    "прежние ответы про зрение снова переживают запуск спектакля": [
+        ("aitheatre/ollama_api.py",
+         '    if again:\n'
+         '        forgotten = forget_vision_knowledge()',
+         '    if again:\n'
+         '        forgotten = {"cloud": 0, "local": 0}'),
     ],
     "живого участника снова спрашивают про зрение": [
         ("aitheatre/ollama_api.py",
@@ -1488,8 +1517,13 @@ BUGS = {
     ],
     "о зрении состава снова молчат при старте спектакля": [
         ("aitheatre/show.py",
-         '    checked = ollama_api.cast_vision(participants)',
+         '    checked = ollama_api.cast_vision(participants, again=True)',
          '    checked = []'),
+    ],
+    "при правке состава снова проверяют заново про всех": [
+        ("aitheatre/ollama_api.py",
+         'def cast_vision(participants: list, again: bool = False) -> list:',
+         'def cast_vision(participants: list, again: bool = True) -> list:'),
     ],
     "о том, кому уедет картинка темы, снова молчат": [
         ("aitheatre/show.py",
@@ -1775,8 +1809,8 @@ BUGS = {
     ],
     "догадка по имени снова выдана за проверенный ответ": [
         ("aitheatre/ollama_api.py",
-         "        return cloud.images_known(model)",
-         "        return True"),
+         '    return bool(vision_facts(model)["known"])',
+         "    return True"),
     ],
     "зрение снова проверяют только по нажатию кнопки": [
         ("aitheatre/page.py",

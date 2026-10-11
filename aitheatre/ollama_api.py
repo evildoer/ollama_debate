@@ -68,12 +68,35 @@ def takes_tools_now(model: str) -> bool:
 # у llama-моделей там только completion, у gemma4/qwen35 есть "thinking".
 MODELS_THINKING_SUPPORT = {}
 
-# Кэш «модель читает картинки»: {"model_name": True/False}. Ollama называет это
-# способностью vision в том же /api/show: у llava, qwen-vl и gemma3 там стоит
-# "vision", а у обычной текстовой модели её нет вовсе. Спрашивать надо заранее:
+# Когда модель в последний раз не ответила про свои возможности (monotonic).
+# За это время спрашивать её снова бессмысленно: у пульта опрос идёт каждые
+# несколько секунд, и каждая проба — это десять секунд ожидания за ответом,
+# которого нет. Через минуту спросим снова: Ollama могла подняться
+_VISION_RETRY_AFTER = 60.0
+_VISION_ASKED_AT = {}
+
+# Кэш «что известно про картинки у этой модели»: {имя: {"reads", "known", "why"}}.
+# Собирается из метаданных самой модели (см. vision_facts): Ollama называет
+# зрение по-разному — где-то способностью в capabilities, где-то проектором
+# или приметами вида clip.*, и одной приметы мало. Спрашивать надо заранее:
 # модель без зрения на приложенную картинку либо отвечает ошибкой, либо (хуже)
-# считает сообщение пустым (см. messages_for)
-MODELS_VISION_SUPPORT = {}
+# считает сообщение пустым (см. messages_for). Кэш живёт до конца спектакля:
+# на каждом запуске его забывают и спрашивают заново (см. forget_vision_knowledge)
+_VISION_FACTS = {}
+
+# Приметы зрения в ответе /api/show — по ним и решается, читает ли модель
+# картинки. Список длинный не из запаса, а из опыта: сборки Ollama разные,
+# и одна и та же способность называется по-разному. Способность vision есть
+# не во всех версиях, а у моделей без неё зрение видно в метаданных файла:
+# проектор картинок, семейство clip, ключи вида clip.vision.* и имена тензоров
+# (у llava это v.blk.* и mm.0.*). Пропустить примету — значит не показать
+# картинку зрячей модели, а лишняя примета — отправить её слепой
+VISION_CAPABILITY = "vision"
+VISION_INFO_MARKS = ("clip.", "vision", "mllama", "visual", "projector",
+                     "v.blk", "vision_tower", "image_encoder", "vit.",
+                     "mm.0", "mm.2", "resampler")
+VISION_TENSOR_MARKS = VISION_INFO_MARKS
+VISION_FAMILIES = ("clip", "vision")
 
 # О ком уже сказали, что картинки ему не уезжают: иначе одно и то же
 # предупреждение печаталось бы на каждом ходу
@@ -117,39 +140,26 @@ def model_supports_thinking(model: str) -> bool:
         return False
     if model in MODELS_THINKING_SUPPORT:
         return MODELS_THINKING_SUPPORT[model]
-    
-    try:
-        req = urllib.request.Request(
-            settings.OLLAMA_SHOW_URL,
-            data=json.dumps({"model": model}).encode('utf-8'),
-            headers={'Content-Type': 'application/json'}
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            capabilities = json.loads(response.read().decode('utf-8')).get("capabilities") or []
-        supported = "thinking" in capabilities
-    except Exception as e:
-        # Ошибку сети не запоминаем: иначе мигающая Ollama «научила» бы модель не думать
-        print(f"  ⚠️  Не удалось узнать возможности модели {model}: {e}")
+
+    show = _model_show(model)
+    if show is None:
+        # Ошибку сети не запоминаем: иначе мигающая Ollama «научила» бы модель
+        # не думать (см. _model_show)
         return False
-    
+    supported = "thinking" in (show.get("capabilities") or [])
+
     MODELS_THINKING_SUPPORT[model] = supported
     return supported
 
 
-def model_supports_vision(model: str) -> bool:
-    """Читает ли модель картинки.
+def _model_show(model: str):
+    """Ответ /api/show по модели — или None, если спросить не вышло.
 
-    У местной это спрашивают у Ollama (/api/show → capabilities, там есть
-    способность vision), у облачной — по имени (см. cloud.model_reads_images):
-    у шлюза в списке моделей одни имена, и способностей там нет.
+    Одного места хватает и зрению, и размышлениям (см. model_supports_thinking):
+    оба спрашивают одно и то же, и одна сетевая ошибка должна выглядеть
+    одинаково. Ошибку не запоминаем: иначе мигающая Ollama «научила» бы модель
+    не видеть картинки и не думать
     """
-    if not model or model == "human":
-        return False
-    if cloud.is_cloud_model(model):
-        return cloud.model_reads_images(model)
-    if model in MODELS_VISION_SUPPORT:
-        return MODELS_VISION_SUPPORT[model]
-
     try:
         request = urllib.request.Request(
             settings.OLLAMA_SHOW_URL,
@@ -157,39 +167,161 @@ def model_supports_vision(model: str) -> bool:
             headers={'Content-Type': 'application/json'}
         )
         with urllib.request.urlopen(request, timeout=10) as response:
-            capabilities = json.loads(response.read().decode('utf-8')).get("capabilities") or []
-        supported = "vision" in capabilities
+            return json.loads(response.read().decode('utf-8'))
     except Exception as e:
-        # Ошибку сети не запоминаем: иначе мигающая Ollama «научила» бы модель
-        # не видеть картинки (та же причина, что у model_supports_thinking)
-        print(f"  ⚠️  Не удалось узнать, читает ли {model} картинки: {e}")
-        return False
+        print(f"  ⚠️  Не удалось узнать возможности модели {model}: {e}")
+        return None
 
-    MODELS_VISION_SUPPORT[model] = supported
-    return supported
+
+def vision_signs(show: dict) -> list:
+    """Приметы зрения в ответе /api/show — списком: что именно нашлось.
+
+    Список нужен не для красоты: по нему видно, почему модель сочтена зрячей
+    или слепой (см. vision_reasons), а при разборе чужой сборки Ollama — какие
+    приметы у неё есть вовсе. Все приметы здесь — про файл модели, а не про её
+    имя: имя о зрении не говорит ничего, а файл говорит
+    """
+    if not isinstance(show, dict):
+        return []
+    signs = []
+    capabilities = [str(one).lower() for one in (show.get("capabilities") or [])]
+    if VISION_CAPABILITY in capabilities:
+        signs.append("способность vision")
+    if show.get("projector_info"):
+        signs.append("проектор картинок")
+    families = [str(one).lower() for one in
+                ((show.get("details") or {}).get("families") or [])]
+    for family in families:
+        if family in VISION_FAMILIES:
+            signs.append(f"семейство {family}")
+    metadata = ",".join(str(key).lower() for key in (show.get("model_info") or {}))
+    for mark in VISION_INFO_MARKS:
+        if mark in metadata:
+            signs.append(f"«{mark}» в метаданных")
+    for tensor in show.get("tensors") or []:
+        name = str((tensor or {}).get("name") or "").lower()
+        if any(mark in name for mark in VISION_TENSOR_MARKS):
+            signs.append(f"тензор «{name}»")
+            break
+    return signs
+
+
+def vision_facts(model: str) -> dict:
+    """Что известно про картинки у этой модели: {"reads", "known", "why"}.
+
+    У местной модели спрашивают у неё самой — /api/show: там и способности
+    (capabilities), и метаданные файла (model_info, projector_info, details,
+    tensors). Примет зрения несколько, и проверяются они все (см. vision_signs):
+    узнать точно, что модель читает картинки, важнее, чем сэкономить на этом
+    один запрос. Если Ollama не ответила — честный ответ «не знаем» (known
+    False), а картинок такой модели не отправляют: это решает отдельно
+    (см. takes_images), и догадка по имени тут только для этого.
+
+    У облачной правду знает только опыт (см. cloud.probe_images) — но это
+    правда про модель, а не про имя, и в этом она с местной сходится
+    """
+    if not model or model == "human":
+        return {"reads": False, "known": True,
+                "why": "живому участнику читать картинки нечем"}
+    if cloud.is_cloud_model(model):
+        answered = cloud.images_known(model)
+        return {"reads": cloud.model_reads_images(model), "known": answered,
+                "why": ("ответ шлюза на пробную картинку" if answered
+                        else "догадка по имени: шлюза ещё не спрашивали")}
+    if model in _VISION_FACTS:
+        return dict(_VISION_FACTS[model])
+    # Недавно не ответившую модель не спрашивают на каждом опросе пульта:
+    # ответ всё равно неизвестен, а ожидание с ним — десять секунд за раз
+    # (см. _VISION_RETRY_AFTER)
+    asked_at = _VISION_ASKED_AT.get(model, 0.0)
+    if asked_at and time.monotonic() - asked_at < _VISION_RETRY_AFTER:
+        return {"reads": cloud.model_reads_images(model), "known": False,
+                "why": "Ollama не ответила недавно — спрошу ещё раз через минуту"}
+
+    show = _model_show(model)
+    if show is None:
+        _VISION_ASKED_AT[model] = time.monotonic()
+        # И в памяти ответа не остаётся: иначе мигающая Ollama «научила» бы
+        # модель не видеть картинки до конца спектакля (та же причина, что
+        # у model_supports_thinking)
+        return {"reads": cloud.model_reads_images(model), "known": False,
+                "why": "Ollama не ответила: и способностей, и метаданных нет"}
+
+    signs = vision_signs(show)
+    facts = {"reads": bool(signs), "known": True,
+             "why": (", ".join(signs) if signs
+                     else "в метаданных модели примет зрения нет")}
+    _VISION_FACTS[model] = dict(facts)
+    return facts
+
+
+def model_supports_vision(model: str) -> bool:
+    """Читает ли модель картинки.
+
+    У местной это видно по её метаданным (см. vision_facts), у облачной —
+    по имени (см. cloud.model_reads_images): у шлюза в списке моделей одни
+    имена, и способностей там нет.
+    """
+    return bool(vision_facts(model)["reads"])
 
 
 def vision_answer_known(model: str) -> bool:
     """Знаем ли про эту модель правду о картинках — а не догадку по имени.
 
-    Местная модель отвечает сама (capabilities в /api/show) — там и догадок
-    нет. А у облачной правду знает только проверка (см. cloud.probe_images),
+    У местной модели правда в её метаданных — но только если Ollama ответила.
+    А у облачной правду знает только проверка (см. cloud.probe_images),
     и до неё остаётся подсказка по имени: странице этого хватает, чтобы
     показывать «+» серым и понять, что проверять есть что (см. cast_payload)
     """
     if not model or model == "human":
         return True
-    if cloud.is_cloud_model(model):
-        return cloud.images_known(model)
-    return True
+    return bool(vision_facts(model)["known"])
+
+
+def forget_vision_knowledge() -> dict:
+    """Забыть всё, что мы знали про картинки, — чтобы спросить заново.
+
+    Так начинается каждый спектакль (см. show.start_debate_loop): знание
+    про картинки снимается с моделей, а модели меняются — под тем же именем
+    у вендора может стоять вчерашняя линейка, а местный файл модели мог быть
+    скачан заново. Цена ошибки — картинки, которые уехали не тем или не уехали
+    вовсе, и это дороже повторного вопроса (не жалеем на это копеек).
+
+    Возвращает, сколько прежних ответов забыто: облачных и местных — по ним
+    видно, стоило ли вообще спрашивать
+    """
+    forgotten = {"cloud": cloud.forget_image_readers(),
+                 "local": len(_VISION_FACTS)}
+    _VISION_FACTS.clear()
+    _VISION_ASKED_AT.clear()
+    _IMAGES_REFUSED_WARNED.clear()
+    return forgotten
+
+
+def vision_reasons(checked: list) -> str:
+    """Почему про модель решено так, а не иначе — словами, для консоли.
+
+    Одного «не читает» тому, кто разбирается, мало: у местной модели это
+    приметы в метаданных файла (см. vision_signs), у облачной — пробный запрос,
+    а бывает и догадка по имени, когда спросить не вышло. Разница дорогая:
+    по первой видно, что крутить в настройках, по второй — что проверку ещё
+    предстоит сделать
+    """
+    lines = []
+    for one in checked or []:
+        if (one or {}).get("reads_images"):
+            continue
+        lines.append(f"{one.get('name')} ({one.get('model')}) — "
+                     f"{one.get('why') or 'причина не записана'}")
+    return "; ".join(lines)
 
 
 def takes_images(model: str, report: dict = None) -> bool:
     """Брать ли картинки этой модели — то же, что model_supports_vision, но
     у облачной оно узнаётся у шлюза.
 
-    У своей Ollama спрашивают её саму (capabilities в /api/show, см.
-    model_supports_vision), и это правда — там и спрашивать больше нечего.
+    У своей Ollama спрашивают её саму (метаданные в /api/show, см.
+    vision_facts), и это правда — там и спрашивать больше нечего.
     А у облачной в имени одни догадки (у одного вендора «flash» картинки читает,
     у другого нет: проверил имена — прочитал картинку с одинаковым успехом
     у gemma-4, glm-5.3, qwen3.8 и gpt-4o, а по приметам четыре из пяти выходили
@@ -213,30 +345,55 @@ def takes_images(model: str, report: dict = None) -> bool:
     return told
 
 
-def cast_vision(participants: list) -> list:
+def cast_vision(participants: list, again: bool = False) -> list:
     """Кто из состава читает картинки — по строке на место.
 
     Общее место для всех, кому это нужно: и кнопка в пульте, и старт спектакля
     спрашивают одним и тем же кодом (см. web.check_vision, show.report_cast_vision) —
     иначе «+» в пульте и слова в консоли разошлись бы, а вопрос один и тот же.
-    Спрашиваем только про тех, про кого ответа ещё нет (см. takes_images):
-    у местной модели это capabilities Ollama, у облачной — проба картинкой,
-    и она стоит денег, поэтому второй раз за неё не платят.
+
+    ``again=True`` — проверить заново: прежние ответы забываются (см.
+    forget_vision_knowledge) и спрашивают про всех. Так делают там, где проверка
+    и есть событие: старт спектакля и кнопка «👁 Проверить зрение». Модели ведь
+    меняются — под тем же именем у вендора может стоять вчерашняя линейка,
+    а местный файл модели мог быть скачан заново; ошибка же живёт до конца
+    спектакля, и ошибиться в ней дороже, чем спросить ещё раз.
+
+    А по умолчанию (``again=False``) досказывают только то, чего про состав
+    ещё не знают: спрашивают про тех, про кого ответа нет вовсе (см.
+    takes_images). Так страница добирает знание о модели, которую только что
+    поставили в состав (см. page.autoVision), а про остальных не переспрашивает:
+    каждая проверка — это запрос, а зрячей модели важно получить картинки,
+    а не отвечать на один и тот же вопрос про всех на каждой перерисовке состава.
     """
+    if again:
+        forgotten = forget_vision_knowledge()
+        if forgotten["cloud"] or forgotten["local"]:
+            print(f"  👁  Прежние ответы про зрение забыты (облачных: "
+                  f"{forgotten['cloud']}, местных: {forgotten['local']}) — спрашиваю заново")
     checked = []
     for participant in participants or []:
         model = str((participant or {}).get("model") or "")
         if not model or model == "human":
             # Живому участнику читать картинки нечем: он их и прикладывает
             continue
+        # Спрашивается не про знание, а про саму модель: у облачной это пробный
+        # запрос, и он здесь единственный (см. takes_images). А факты берутся
+        # после него — иначе в причине стояла бы «догадка по имени» про только
+        # что спрошенное
+        reads = bool(takes_images(model))
+        facts = vision_facts(model)
         checked.append({
             "name": (participant or {}).get("display_name") or model,
             "model": model,
-            "reads_images": bool(takes_images(model)),
-            # Ответ на «не читает» бывает и догадкой по имени, когда шлюз
-            # не ответил: сказать про такую модель «слепая» значило бы соврать
+            "reads_images": reads,
+            # Ответ на «не читает» бывает и догадкой по имени, когда спросить
+            # не вышло: сказать про такую модель «слепая» значило бы соврать
             # (см. vision_answer_known)
-            "known": vision_answer_known(model),
+            "known": bool(facts["known"]),
+            # И почему решено именно так: приметы метаданных, ответ шлюза или
+            # догадка по имени (см. vision_reasons)
+            "why": facts["why"],
         })
     return checked
 
@@ -1126,12 +1283,21 @@ def ask_model_with_tools(model: str, messages: list, supports_tools: bool = True
         # Приложенная картинка: само письмо от Ollama это называет («Failed to
         # load image or audio file»), а ход из-за приложения пропадать не должен
         # — режиссёр ждёт реплики, а не разбора чужого файла. Повторяем ту же
-        # реплику без картинок и запоминаем модель слепой: в следующий раз они
-        # ей не поедут вовсе (см. messages_for)
+        # реплику без картинок, и помним, что она ушла без приложения: иначе
+        # модель получила бы строку «эта картинка уже показана тебе» про ту,
+        # которой не видела (см. cloud.mark_pictures_dropped,
+        # show.commit_shown_pictures).
+        #
+        # А приговором модели этот отказ не становится: он про наш файл, а не про
+        # её способности — тем же текстом отвечает и модель без зрения. Записать
+        # его в «картинок не читает» значило бы лишить картинок зрячую модель
+        # из-за одного неудачного файла — и не до конца спектакля, а навсегда,
+        # если запись уехала бы в файл экземпляра. Что модель умеет, видно
+        # в её метаданных (см. vision_facts), и вопросы туда — отдельно
         if carries_pictures(messages) and cloud.picture_refused(error_body):
-            MODELS_VISION_SUPPORT[model] = False
-            note = (f"{model} не открыла приложенную картинку — "
-                    "реплика продолжена без неё")
+            cloud.mark_pictures_dropped(model)
+            note = (f"{model} не открыла приложенную картинку — реплика "
+                    "продолжена без неё (отказ по файлу, а не по способностям модели)")
             print(f"  🖼  {note}")
             journal_note(report, note, kind="images")
             return ask_model_with_tools(

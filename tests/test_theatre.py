@@ -58,21 +58,22 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 from unittest import mock
 
 import aitheatre
 
-from aitheatre import (avatars, cloud, deps, ollama_api, page, search, settings, show,
-                       text, tooltext)
+from aitheatre import (avatars, cloud, deps, ollama_api, page, pictures, search, settings,
+                       show, text, tooltext)
 from aitheatre import web as web_app
 
 # Приложение разбито на модули, и подменять функцию нужно там, где она живёт:
 # модули вызывают друг друга по полному адресу (ollama_api.check_models_available),
 # поэтому правка в «своём» модуле видна всем. app_module_of находит нужный модуль
 # по имени — так подмена бьёт в цель, а не в копию имени в другом файле.
-APP_MODULES = (settings, deps, text, tooltext, search, avatars, cloud, ollama_api, show,
-               page, web_app)
+APP_MODULES = (settings, deps, text, tooltext, search, avatars, pictures, cloud, ollama_api,
+               show, page, web_app)
 
 # Набор не ходит в сеть — и это надо держать, а не надеяться на это. Пробы
 # способностей модели (takes_tools_now → check_model_tools_support,
@@ -238,8 +239,8 @@ class TestModuleLayout(unittest.TestCase):
 
     def app_modules(self):
         """Модули приложения в порядке знакомства (константы -> зависимости)."""
-        order = ("settings", "deps", "text", "tooltext", "search", "avatars", "cloud",
-                 "ollama_api", "show", "page")
+        order = ("settings", "deps", "text", "tooltext", "search", "avatars", "pictures",
+                 "cloud", "ollama_api", "show", "page")
         return [(name, getattr(aitheatre, name)) for name in order] + [("web", web_app)]
 
     def test_every_module_imports(self):
@@ -8335,6 +8336,11 @@ class CloudVisionTest(unittest.TestCase):
         self.addCleanup(self.forget, kept)
         cloud._IMAGE_READERS.clear()
         cloud._VISION_LOADED = False
+        # То же и про то, что известно о местных моделях: ответ, оставленный
+        # одним тестом, решал бы за следующий (см. vision_facts)
+        kept_facts = dict(ollama_api._VISION_FACTS)
+        self.addCleanup(self.forget_facts, kept_facts)
+        ollama_api._VISION_FACTS.clear()
         # Отметки про ходы, ушедшие без приложения, — то же общее знание:
         # оставленная одним тестом, она решала бы за следующий (см. _PICTURES_DROPPED)
         self.addCleanup(cloud._PICTURES_DROPPED.clear)
@@ -8344,6 +8350,157 @@ class CloudVisionTest(unittest.TestCase):
         cloud._IMAGE_READERS.clear()
         cloud._IMAGE_READERS.update(kept)
         cloud._VISION_LOADED = False
+
+    @staticmethod
+    def forget_facts(kept: dict):
+        ollama_api._VISION_FACTS.clear()
+        ollama_api._VISION_FACTS.update(kept)
+
+
+class TestTheOrdinaryPictureSize(PicturesTest):
+    """Приложенная картинка приводится к размеру, который модель точно примет.
+
+    Причина — живой отказ: вендор не разбирает картинку, у которой сторона
+    меньше десятка точек («The image length and width do not meet the model
+    restrictions»), а картинка в тысячи пикселей уезжает модели целиком в каждом
+    запросе хода и оплачивается входными токенами. Приводится она на отправке
+    (см. pictures.prepare): файл на диске и в ДАМПе остаётся режиссёрским
+    """
+
+    @staticmethod
+    def png(width: int, height: int, rgb=(200, 30, 30)) -> bytes:
+        """Настоящий png нужных сторон — тем же приёмом, что и у театра.
+
+        Не через cloud._solid_picture: та делает квадрат (она и нужна квадратной
+        проверочной картинкой), а здесь важно, чтобы стороны были разными
+        """
+        rows = b"".join(b"\x00" + bytes(rgb) * width for _ in range(height))
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            return (struct.pack(">I", len(body)) + kind + body
+                    + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+        return (PNG_SIGN[:8]
+                + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+    @staticmethod
+    def marks(data_url: str) -> dict:
+        """Вид и стороны адреса-данных — то, что уехало бы модели."""
+        return pictures.picture_marks(base64.b64decode(data_url.split(";base64,")[1]))
+
+    def test_the_weight_is_read_in_significant_units(self):
+        """Вес показывается байтами или Кб — но не нулём килобайт."""
+        self.assertEqual(pictures.human_bytes(761), "761 Б",
+                         "мелкий файл показан как «0 Кб», то есть как отсутствие файла")
+        self.assertEqual(pictures.human_bytes(1536), "1,5 Кб")
+        self.assertEqual(pictures.human_bytes(2 * 1024), "2 Кб")
+        self.assertEqual(pictures.human_bytes(5 * 1024 * 1024), "5 Мб")
+        self.assertEqual(pictures.human_bytes(None), "0 Б")
+
+    def test_a_tiny_picture_is_grown_to_the_ordinary_size(self):
+        """Мелкую картинку вендор не берёт вовсе — её увеличивают перед отправкой."""
+        url = self.data_url(self.png(8, 8))
+
+        ready, note = pictures.prepare(url)
+
+        self.assertNotEqual(ready, url, "мелкая картинка уехала как есть")
+        marks = self.marks(ready)
+        self.assertGreaterEqual(min(marks["width"], marks["height"]),
+                                settings.PICTURE_MIN_SIDE,
+                                "сторона осталась мельче той, что вендор принимает")
+        self.assertIn("8×8", note, "в консоли не сказано, что с картинкой сделали")
+        # И это та же картинка, а не пустой квадрат: цвет не потерялся
+        decoded = pictures.decode_png(base64.b64decode(ready.split(";base64,")[1]))
+        self.assertEqual(list(decoded["rows"][0][:3]), [200, 30, 30])
+
+    def test_the_picture_the_model_takes_is_not_touched(self):
+        """Обычную картинку не пересобирают: ни пикселя лишнего, ни потери качества."""
+        url = self.data_url(self.png(400, 300))
+
+        ready, note = pictures.prepare(url)
+
+        self.assertEqual(ready, url, "обычную картинку пересобрали ни за чем")
+        self.assertEqual(note, "", "сказано о работе, которой не было")
+
+    def test_a_big_side_is_made_smaller(self):
+        """Крупную по сторонам картинку уменьшают перед отправкой."""
+        url = self.data_url(self.png(2600, 1000))
+
+        ready, note = pictures.prepare(url)
+
+        self.assertNotEqual(ready, url)
+        marks = self.marks(ready)
+        self.assertLessEqual(max(marks["width"], marks["height"]),
+                             settings.PICTURE_MAX_SIDE)
+        self.assertIn("2600×1000", note)
+
+    def test_a_very_long_picture_is_decided_by_its_small_side(self):
+        """Очень вытянутую картинку решает мелкая сторона.
+
+        Сразу и «мельче обычного», и «крупнее обычного» бывает только у очень
+        вытянутых: вендор отказывает именно по мелкой стороне (см. target_size).
+        """
+        ready, note = pictures.prepare(self.data_url(self.png(2600, 40)))
+
+        marks = self.marks(ready)
+        self.assertEqual(marks["height"], settings.PICTURE_MIN_SIDE,
+                         "мелкая сторона так и осталась непроходимой для вендора")
+        self.assertIn("2600×40", note)
+
+    def test_a_foreign_picture_without_a_library_says_what_is_wrong(self):
+        """jpeg, webp и gif без Pillow не уменьшить — и молчать об этом нельзя."""
+        gif = b"GIF89a" + struct.pack("<HH", 4, 4) + b"\x00" * 40
+        with mock.patch.object(deps, "PILLOW_AVAILABLE", False):
+            ready, note = pictures.prepare(self.data_url(gif, "image/gif"))
+            quiet = pictures.prepare(self.data_url(b"\xff\xd8\xff" + b"\x00" * 60,
+                                                  "image/jpeg"))[1]
+
+        self.assertEqual(ready, self.data_url(gif, "image/gif"),
+                         "gif всё-таки поменяли, а уменьшить его нечем")
+        self.assertIn("Pillow", note)
+        self.assertIn("мельче обычного", note)
+        self.assertEqual(quiet, "", "обычная по размеру картинка уехала с выговором")
+
+    def test_the_console_shows_the_weight_of_what_was_attached(self):
+        """Про приложенное говорят его настоящим весом, а не нулём килобайт."""
+        raw = self.png(60, 60)
+        with mock.patch("builtins.print") as told:
+            self.attach("значок.png", raw)
+
+        words = _printed_text(told)
+
+        self.assertIn(f"({pictures.human_bytes(len(raw))},", words,
+                      "про приложенное сказано не его весом")
+        self.assertNotIn("0 Кб", words, "мелкий файл показан как «ничего не приложено»")
+
+    def test_a_tiny_picture_goes_to_the_model_already_enlarged(self):
+        """К обычному размеру картинку приводят именно на отправке модели.
+
+        Файл на диске остаётся режиссёрским: переписывать приложенное ради
+        модели незачем — в ленте и в ДАМПе должно лежать то, что приложили
+        (см. post_image_pairs)
+        """
+        attachment = self.attach("значок.png", self.png(8, 8))
+        on_disk = (settings.UPLOAD_DIR
+                   / attachment["url"].rsplit("/", 1)[-1]).read_bytes()
+
+        payloads = show.post_images([attachment])
+
+        self.assertEqual(on_disk, self.png(8, 8), "файл приложенного переписали на диске")
+        marks = self.marks(payloads[0])
+        self.assertGreaterEqual(min(marks["width"], marks["height"]),
+                                settings.PICTURE_MIN_SIDE,
+                                "модели уехала картинка, которую вендор не примет")
+
+    def test_a_picture_that_cannot_be_read_travels_as_it_is(self):
+        """Битый png не уносит с собой реплику: он уезжает как есть, и об этом сказано."""
+        broken = self.data_url(b"\x89PNG\r\n\x1a\n" + b"0" * 40)
+
+        ready, note = pictures.prepare(broken)
+
+        self.assertEqual(ready, broken)
+        self.assertIn("не разобрать", note)
 
 
 class TestWhoReadsPictures(CloudVisionTest):
@@ -8616,7 +8773,7 @@ class TestWhoReadsPictures(CloudVisionTest):
     def test_the_capability_is_asked_of_ollama_and_remembered(self):
         """У местной модели про зрение спрашивают /api/show — один раз на модель."""
         answer = {"capabilities": ["completion", "vision"]}
-        self.addCleanup(ollama_api.MODELS_VISION_SUPPORT.pop, "fake-vision-model", None)
+        self.addCleanup(ollama_api._VISION_FACTS.pop, "fake-vision-model", None)
         with mock.patch.object(ollama_api.urllib.request, "urlopen",
                               mock.Mock(return_value=FakeShow(answer))) as called:
             first = ollama_api.model_supports_vision("fake-vision-model")
@@ -8637,8 +8794,13 @@ class TestWhoReadsPictures(CloudVisionTest):
         self.assertFalse(ollama_api.vision_answer_known("cloud:qwen/qwen3.8-flash"))
         cloud._IMAGE_READERS["qwen/qwen3.8-flash"] = True
         self.assertTrue(ollama_api.vision_answer_known("cloud:qwen/qwen3.8-flash"))
-        self.assertTrue(ollama_api.vision_answer_known("llava"),
-                        "у местной модели догадок нет: её способность знает Ollama")
+        # А у местной модели правда — это метаданные её файла: Ollama ответила,
+        # значит и ответ есть (а не ответила — нет, см. соседнюю проверку)
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(return_value=FakeShow(
+                                  {"capabilities": ["completion", "vision"]}))):
+            self.assertTrue(ollama_api.vision_answer_known("llava"),
+                            "ответ Ollama не признан ответом")
         self.assertTrue(ollama_api.vision_answer_known("human"))
 
     def test_a_model_that_cannot_be_asked_is_not_remembered(self):
@@ -8646,7 +8808,9 @@ class TestWhoReadsPictures(CloudVisionTest):
         with mock.patch.object(ollama_api.urllib.request, "urlopen",
                               mock.Mock(side_effect=OSError("Ollama спит"))):
             self.assertFalse(ollama_api.model_supports_vision("fake-awake-model"))
-        self.assertNotIn("fake-awake-model", ollama_api.MODELS_VISION_SUPPORT)
+            self.assertFalse(ollama_api.vision_answer_known("fake-awake-model"),
+                             "неудавшийся спрос выдан за ответ: модель сочли слепой")
+        self.assertNotIn("fake-awake-model", ollama_api._VISION_FACTS)
 
 
 class TestVisionCheckedAtTheStart(CloudVisionTest):
@@ -8747,8 +8911,16 @@ class TestVisionCheckedAtTheStart(CloudVisionTest):
         self.assertIn("Алексей", words, "читающая модель не названа")
         self.assertIn("Нелли", words, "слепая модель не названа по имени")
 
-    def test_the_check_remembers_the_answer_it_got(self):
-        """Ответ шлюза запоминается: со следующего раза спрашивать некого."""
+    def test_the_check_asks_again_because_that_is_why_it_is_pressed(self):
+        """Кнопка спрашивает заново, а не показывает прежний ответ.
+
+        Её нажимают затем, что хотят знать правду сейчас: у вендора могли
+        сменить модель под тем же именем, а ключ — на другой тариф. Показать
+        вчерашний ответ как проверку значило бы соврать режиссёру (см.
+        web.check_vision, ollama_api.forget_vision_knowledge). А в самом
+        спектакле ответ помнится: там за него больше не платят
+        (см. takes_images).
+        """
         self._one_cloud_model()
         asked = []
 
@@ -8758,13 +8930,168 @@ class TestVisionCheckedAtTheStart(CloudVisionTest):
 
         with mock.patch.object(cloud, "is_configured", return_value=True), \
              mock.patch.object(cloud, "_request", side_effect=answer):
-            first = self.client.post("/api/vision/check").get_json()["checked"]
-            second = self.client.post("/api/vision/check").get_json()["checked"]
+            first = self.client.post("/api/vision/check",
+                                     json={"again": True}).get_json()["checked"]
+            second = self.client.post("/api/vision/check",
+                                      json={"again": True}).get_json()["checked"]
+            # А это — та проверка, которой страница добирает знание о новых
+            # в составе: спрашивать заново про всех ей незачем
+            third = self.client.post("/api/vision/check",
+                                     json={"again": False}).get_json()["checked"]
 
         self.assertTrue(first[0]["reads_images"], "шлюз ответил, а картинка не уехала бы")
         self.assertTrue(first[0]["known"])
         self.assertTrue(second[0]["reads_images"])
-        self.assertEqual(len(asked), 1, "второй раз спрашивать некого: ответ запомнен")
+        self.assertTrue(third[0]["reads_images"])
+        self.assertEqual(len(asked), 2, "вопрос задан больше двух раз: не про всех "
+                                       "переспрашивают заново, и не все переспрашиваются зря")
+
+
+class TestVisionIsCheckedEveryRun(CloudVisionTest):
+    """Зрение перепроверяется на каждом запуске, и решается по приметам файла.
+
+    Модели меняются: под тем же именем у вендора может стоять другая линейка,
+    а местный файл модели мог быть скачан заново. Поэтому прежние ответы
+    не переживают старт спектакля (см. forget_vision_knowledge), а у местной
+    модели зрение ищется по всем приметам, а не по одному полю: одной
+    способности vision мало (см. vision_signs)
+    """
+
+    def test_a_new_model_in_the_cast_is_asked_about_alone(self):
+        """Новую в составе спрашивают одну, а не переспрашивают про всех.
+
+        Так добирает знание страница, когда состав правят (см. page.autoVision):
+        проверка — это запрос, и адресовать его тем, про кого и так известно,
+        значило бы платить за один и тот же ответ на каждой правке.
+        """
+        cloud._IMAGE_READERS["qwen/qwen3.8-flash"] = True
+        cast = [{"display_name": "Кузя", "model": "llava"},
+                {"display_name": "Нелли", "model": "cloud:qwen/qwen3.8-flash"}]
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(return_value=FakeShow(
+                                  {"capabilities": ["completion", "vision"]}))) as asked, \
+             mock.patch.object(cloud, "_request", side_effect=AssertionError(
+                 "переспросили про того, о ком уже знали")):
+            checked = ollama_api.cast_vision(cast)
+
+        self.assertTrue(all(one["reads_images"] for one in checked))
+        self.assertEqual(asked.call_count, 1, "местную модель не спросили")
+
+    def test_every_check_forgets_what_was_known_before(self):
+        """Проверка зрения начинается с забывания прежних ответов.
+
+        И облачных, и местных: под тем же именем у вендора может стоять другая
+        линейка, а местный файл модели — скачаться заново. Так начинается
+        и старт спектакля, и нажатие кнопки: спрашивают там и там одним кодом
+        (см. cast_vision)
+        """
+        cloud._IMAGE_READERS["qwen/qwen3.8-flash"] = True
+        cloud.save_image_readers()
+        ollama_api._VISION_FACTS["llava"] = {"reads": False, "known": True,
+                                             "why": "в метаданных не нашлось"}
+        cast = [{"display_name": "Кузя", "model": "llava"},
+                {"display_name": "Алексей", "model": "cloud:qwen/qwen3.8-flash"}]
+
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(return_value=FakeShow(
+                                  {"capabilities": ["completion", "vision"]}))) as asked, \
+             mock.patch.object(cloud, "is_configured", return_value=False):
+            checked = ollama_api.cast_vision(cast, again=True)
+
+        self.assertTrue(checked[0]["reads_images"],
+                        "ответ про местную модель взяли из памяти, а не из неё самой")
+        self.assertEqual(asked.call_count, 1, "местную модель заново не спросили")
+        self.assertFalse(cloud.images_known("cloud:qwen/qwen3.8-flash"),
+                         "вчерашний ответ выдан за сегодняшний")
+        self.assertFalse(checked[1]["known"],
+                         "непереспрошенный ответ назван проверенным")
+        # И в файле ответов не осталось: там только отметка о том, чем сняты ответы
+        saved = json.loads(settings.VISION_FILE.read_text(encoding="utf-8"))
+        self.assertNotIn("qwen/qwen3.8-flash", saved)
+        self.assertIn("_probe", saved)
+
+    def test_vision_is_seen_by_the_marks_of_the_model_file(self):
+        """Одной способности vision мало: у иных сборок зрение видно по файлу.
+
+        Приметы разные — проектор картинок, семейство clip, ключи вида clip.*
+        и имена тензоров вроде v.blk.*: у моделей без списка способностей
+        (он появился не сразу) другого признака нет (см. vision_signs).
+        """
+        marks = ({"capabilities": ["completion", "vision"]},
+                 {"model_info": {"clip.has_vision_encoder": True}},
+                 {"details": {"families": ["llava", "clip"]}},
+                 {"projector_info": {"clip.vision.image_size": 336}},
+                 {"tensors": [{"name": "v.blk.0.attn_q.weight"}]})
+        for payload in marks:
+            with self.subTest(примета=list(payload)):
+                ollama_api._VISION_FACTS.clear()
+                with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                                      mock.Mock(return_value=FakeShow(payload))):
+                    facts = ollama_api.vision_facts("модель-с-приметой")
+                self.assertTrue(facts["reads"], "примета не замечена")
+                self.assertTrue(facts["known"], "примета выдана за догадку")
+                self.assertTrue(facts["why"], "не сказано, по чему решено")
+
+    def test_a_text_model_is_not_called_blind_by_its_name(self):
+        """Метнуть «слепая» по имени нельзя: имя о зрении не говорит ничего."""
+        payload = {"capabilities": ["completion"],
+                   "model_info": {"llama.attention.head_count": 32}}
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(return_value=FakeShow(payload))):
+            facts = ollama_api.vision_facts("обычная-модель")
+
+        self.assertFalse(facts["reads"])
+        self.assertTrue(facts["known"], "ответ про метаданные выдан за догадку")
+        self.assertIn("примет зрения нет", facts["why"])
+
+    def test_a_silent_ollama_is_not_asked_every_poll(self):
+        """Не ответившую Ollama не спрашивают на каждом опросе пульта.
+
+        Каждая проба — это десять секунд ожидания за ответом, которого нет,
+        а опрос идёт каждые несколько секунд. При этом сам ответ в памяти
+        не остаётся: мигающая Ollama иначе «научила» бы модель не видеть
+        картинки до конца спектакля (см. vision_facts, _VISION_RETRY_AFTER)
+        """
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(side_effect=OSError("Ollama спит"))) as asked:
+            first = ollama_api.vision_facts("спящая-модель")
+            second = ollama_api.vision_facts("спящая-модель")
+
+        self.assertFalse(first["known"], "неудавшийся спрос выдан за ответ")
+        self.assertFalse(first["reads"])
+        self.assertFalse(second["known"])
+        self.assertEqual(asked.call_count, 1, "спящую Ollama спросили второй раз")
+        self.assertNotIn("спящая-модель", ollama_api._VISION_FACTS)
+
+    def test_the_reason_is_told_in_words(self):
+        """«Не читает» без причины нечего и проверить: в консоль идёт и она."""
+        checked = [{"name": "Кузя", "model": "llava", "reads_images": True,
+                    "why": "проектор картинок"},
+                   {"name": "Диана", "model": "gemma4", "reads_images": False,
+                    "why": "в метаданных модели примет зрения нет"}]
+
+        words = ollama_api.vision_reasons(checked)
+
+        self.assertIn("Диана", words)
+        self.assertIn("примет зрения нет", words)
+        self.assertNotIn("Кузя", words, "о читающих говорить нечего")
+
+    def test_the_cast_speaks_about_the_reason_too(self):
+        """Старт спектакля говорит и причину — иначе «не читает» не разобрать.
+
+        У местной модели это приметы файла, у облачной — пробный запрос: по
+        причине видно, что это ответ, а не догадка (см. report_cast_vision)
+        """
+        cast = [{"display_name": "Диана", "model": "gemma4"}]
+        payload = {"capabilities": ["completion"]}
+        with mock.patch.object(ollama_api.urllib.request, "urlopen",
+                              mock.Mock(return_value=FakeShow(payload))), \
+             mock.patch("builtins.print") as told:
+            show.report_cast_vision(cast)
+
+        words = _printed_text(told)
+        self.assertIn("Диана", words)
+        self.assertIn("почему", words, "причина не сказана: ответ не отличить от догадки")
 
 
 class TestAPictureNobodyCanOpen(CloudVisionTest):
@@ -8787,7 +9114,7 @@ class TestAPictureNobodyCanOpen(CloudVisionTest):
             io.BytesIO(json.dumps({"error": {"message":
                 "Failed to load image or audio file"}}).encode("utf-8")))
         answer = FakeShow({"message": {"content": "Зелёный"}})
-        self.addCleanup(ollama_api.MODELS_VISION_SUPPORT.pop, "fake-eyes", None)
+        self.addCleanup(ollama_api._VISION_FACTS.pop, "fake-eyes", None)
         report = {"steps": []}
         with mock.patch.object(ollama_api, "model_supports_vision", return_value=True), \
              mock.patch.object(ollama_api, "check_model_tools_support", return_value=False), \
@@ -8801,8 +9128,12 @@ class TestAPictureNobodyCanOpen(CloudVisionTest):
         asked = json.loads(called.call_args_list[1][0][0].data.decode("utf-8"))
         self.assertNotIn("images", asked["messages"][0],
                          "во втором запросе картинка осталась на месте")
-        self.assertFalse(ollama_api.MODELS_VISION_SUPPORT["fake-eyes"],
-                         "модель не запомнили слепой — ошибка повторится")
+        self.assertNotIn("fake-eyes", ollama_api._VISION_FACTS,
+                         "отказ по файлу записали приговором модели: зрячую модель "
+                         "лишили бы картинок из-за одного неудачного файла")
+        self.assertTrue(cloud.take_pictures_dropped("fake-eyes"),
+                        "ушедшее без приложения не помнят: ход запишет показанным "
+                        "то, чего модель не видела")
         self.assertTrue([step for step in report["steps"] if step.get("kind") == "images"],
                         "в хронологии хода должно быть сказано, что с картинкой вышло")
 
@@ -9465,7 +9796,9 @@ class TestPageScript(unittest.TestCase):
         «Остальным — только текст (1 из 2)» говорило «кто-то», и по числу было
         не понять, кто именно: список состава сличался вручную. А про кого
         спросить не вышло — это не «слепая»: так сказать было бы враньём
-        (см. page.visionWords).
+        (см. page.visionWords). И про неответившую модель не сказано, кто именно
+        не ответил: за ответом ходят и в шлюз, и в метаданные её файла
+        (см. vision_facts).
         """
         out = self._run_page(
             ("visionWords",),
@@ -9478,7 +9811,9 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("Картинки читают (1 из 3)", out[0])
         self.assertIn("Алексей (cloud:a)", out[0])
         self.assertIn("Не читают: Борис (cloud:b)", out[0])
-        self.assertIn("не удалось (шлюз не ответил): Вера (cloud:c)", out[0])
+        # «Шлюз не ответил» тут было бы неправдой: у местной модели за ответом
+        # ходят в её же метаданные, и не ответить может и Ollama
+        self.assertIn("не удалось (ответа нет): Вера (cloud:c)", out[0])
         self.assertIn("ни одна модель состава", out[1])
         self.assertEqual(out[2], "", "про пустой состав говорит не эта строка")
 
