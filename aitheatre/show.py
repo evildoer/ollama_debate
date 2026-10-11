@@ -533,8 +533,12 @@ SKETCH_HINT = "Так бывает, когда модель сначала от�
 # в списке ниже. Как только меняется сама запись — разделы, шапка, порядок, —
 # номер уходит из списка, и тогда о расхождении спрашивают вслух
 # (см. ask_about_dump): прочитать чужую запись можно, но обещать этого нельзя
-DUMP_FORMAT = 6
-DUMP_FORMATS_READABLE = (6, 5, 4, 3)
+# А седьмой номер — про переигровку: в хронологии появилась строка
+# «**Переиграны реплики:** N», и без неё читающий увидел бы в спектакле и прежний
+# ответ, и новый (см. dump_replayed). Прежние номера читаются как есть: строки
+# такой в них просто нет, и спектакль в них один-единственный
+DUMP_FORMAT = 7
+DUMP_FORMATS_READABLE = (7, 6, 5, 4, 3)
 
 # Что отвечают на тот вопрос: сцена пустая, прежний спектакль только на чтение
 # или он же — с продолжением (см. load_play_from_dump)
@@ -929,6 +933,28 @@ def dump_topic_pictures() -> None:
     out += picture_data_lines(session.topic_attachments)
     if out:
         dump_write("\n" + "\n".join(out) + "\n")
+
+
+def dump_replayed(ids: list) -> None:
+    """Сказанное заново — отметкой в ДАМПе: прежние записи этих реплик больше не реплики.
+
+    Файл дописывается, а не переписывается (см. start_dump), поэтому переигранная
+    реплика остаётся в нём такой, какой была сказана: рядом с ней ложится отметка,
+    что её переиграли, а ниже — новая запись с тем же номером (см. replay_post,
+    restate_post). Читается последнее (см. parse_dump), поэтому запись остаётся
+    и летописью правок, и текущим спектаклем, а тема с картинками не теряется
+    вовсе: она лежит в тех же строках файла.
+    """
+    numbers = []
+    for one in ids or []:
+        try:
+            numbers.append(int(one))
+        except (TypeError, ValueError):
+            continue
+    if not numbers:
+        return
+    dump_write("\n**Переиграны реплики:** "
+               + ", ".join(str(one) for one in numbers) + "\n")
 
 
 def dump_human_markdown(post: dict) -> str:
@@ -1359,6 +1385,8 @@ _TOPIC_PICTURE_RE = re.compile(
     r"^\*\*Картинка к теме:\*\* (?P<name>.+?) → (?P<url>\S+) · реплик в ленте "
     r"к тому моменту: (?P<since>.+)$")
 _TOPIC_GONE_RE = re.compile(r"^\*\*Картинка к теме убрана:\*\* (?P<url>\S+)$")
+# Переигранное: всё, что записано этими номерами выше этой строки, — уже не лента
+_REPLAYED_RE = re.compile(r"^\*\*Переиграны реплики:\*\* (?P<ids>[\d,\s]+)$")
 
 
 def _as_int(raw) -> int:
@@ -1934,11 +1962,20 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None,
 
 
 def _add_record(current: tuple, body: list, posts: list, turns: dict,
-                faces: dict = None, pictures: dict = None, store: bool = False) -> None:
-    """Одна запись — в спектакль: реплика всегда, отчёт о ходе — если он был."""
+                faces: dict = None, pictures: dict = None, store: bool = False,
+                slot: int = None) -> None:
+    """Одна запись — в спектакль: реплика всегда, отчёт о ходе — если он был.
+
+    slot — место, с которого эта запись была убрана как переигранная: сказанное
+    заново встаёт ровно на своё место, а не в конец ленты (см. dump_replayed,
+    parse_dump). Без него запись дописывается в конец — как и раньше.
+    """
     post_id, rest = current
     record = _parse_record(post_id, rest, body, faces, pictures, store)
-    posts.append(record["post"])
+    if slot is None:
+        posts.append(record["post"])
+    else:
+        posts.insert(min(slot, len(posts)), record["post"])
     if record["turn"]:
         turns[int(post_id)] = record["turn"]
 
@@ -2005,19 +2042,51 @@ def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dic
     # Картинки разбираются до записей: реплика ссылается на адрес, а данные
     # к нему лежат ниже в том же файле (см. _pictures_in_dump)
     pictures = _pictures_in_dump(lines, store)
-    posts, turns = [], {}
+    posts, turns, slots = [], {}, {}
     current, body = None, []
     for line in lines:
         found = _RECORD_RE.match(line)
         if found:
             if current is not None:
-                _add_record(current, body, posts, turns, faces, pictures, store)
+                _add_record(current, body, posts, turns, faces, pictures, store,
+                            slot=slots.pop(current[0], None))
             current, body = (int(found.group(1)), found.group(2)), []
+            continue
+        gone = _REPLAYED_RE.match(line)
+        if gone:
+            # Незакрытая запись сначала становится репликой, а уж потом убирается:
+            # отметка стоит сразу под ней, и без этого убирать было бы нечего —
+            # прежний ответ остался бы в спектакле рядом с новым
+            if current is not None:
+                _add_record(current, body, posts, turns, faces, pictures, store,
+                            slot=slots.pop(current[0], None))
+                current, body = None, []
+            # Переигранные: прежние записи этих номеров убираются из спектакля,
+            # а новые стоят ниже и остаются (см. dump_replayed). Место каждой
+            # запоминается: переигранная ляжет тем же номером — то есть на своё
+            # место, а не в конец ленты
+            drop = {int(one) for one in re.findall(r"\d+", gone.group("ids"))}
+            for post in [one for one in posts if int(one.get("id") or 0) in drop]:
+                slots[int(post.get("id") or 0)] = posts.index(post)
+                posts.remove(post)
+                turns.pop(int(post.get("id") or 0), None)
+            continue
+        if line.startswith("**Продолжение"):
+            # Шапка продолжения — не текст записи, а граница: она дописывается
+            # в конец файла, а до неё не всегда успевает лечь новая запись
+            # (см. start_dump). Без этой границы она — и всё, что после неё, —
+            # стала бы хвостом последней записи, а реплика человека снова
+            # читалась бы последним «> »-блоком записи — то есть картинкой
+            if current is not None:
+                _add_record(current, body, posts, turns, faces, pictures, store,
+                            slot=slots.pop(current[0], None))
+                current, body = None, []
             continue
         if current is not None:
             body.append(line)
     if current is not None:
-        _add_record(current, body, posts, turns, faces, pictures, store)
+        _add_record(current, body, posts, turns, faces, pictures, store,
+                    slot=slots.pop(current[0], None))
     if not posts:
         return None
     return {
@@ -3442,21 +3511,7 @@ class DebateSession:
             # Прежние реплики — это и есть история для моделей: продолжение
             # не начинается с чистого листа, иначе модель отвечала бы не на то,
             # что говорилось на сцене, а в пустоту
-            self.conversation_history = [
-                {"display_name": post.get("display_name", ""),
-                 "content": post.get("content", ""),
-                 "is_moderator": post.get("role") == "moderator",
-                 "is_judge": post.get("role") == "judge",
-                 "public_judge": post.get("public_judge"),
-                 "round": int(post.get("round") or 0),
-                 # Приложенное едет вместе с репликой и в продолжение: в ДАМПе
-                 # лежат адреса картинок (см. attachment_lines), а без них
-                 # прежнее приложенное пропало бы из истории целиком — и модель,
-                 # которой картинка не досталась, не увидела бы её вовсе
-                 "attachments": list(post.get("attachments") or [])}
-                for post in self.posts
-                if str(post.get("content") or "").strip() or post.get("attachments")
-            ]
+            self.conversation_history = self.history_from_posts()
             # Цена продолжения — вся цена спектакля: он всё ещё тот же
             self.money_told = bool(self.spent)
             # А ход, оборванный смертью процесса, переспрашивается: реплики
@@ -3467,6 +3522,31 @@ class DebateSession:
             # после которой модель уже говорила, она видела (см. restore_shown_pictures)
             self.restore_shown_pictures()
         self.sync_cast_media()
+
+    def history_from_posts(self) -> list:
+        """История для моделей — из ленты: это одно и то же, только словами.
+
+        Отдельным заведением, потому что спрашивают её в двух случаях: когда
+        спектакль продолжается (см. start_show) и когда сказанное переигрывают
+        или правят (см. replay_plan_for, restate_post). Строки у них одни и те же,
+        а разойтись эти два места не должны.
+
+        Приложенное едет вместе с репликой: в ДАМПе лежат адреса картинок
+        (см. attachment_lines), а без них прежнее приложенное пропало бы
+        из истории целиком — и модель, которой картинка не досталась, не увидела
+        бы её вовсе.
+        """
+        return [
+            {"display_name": post.get("display_name", ""),
+             "content": post.get("content", ""),
+             "is_moderator": post.get("role") == "moderator",
+             "is_judge": post.get("role") == "judge",
+             "public_judge": post.get("public_judge"),
+             "round": int(post.get("round") or 0),
+             "attachments": list(post.get("attachments") or [])}
+            for post in self.posts
+            if str(post.get("content") or "").strip() or post.get("attachments")
+        ]
 
     def plan_replay(self) -> dict:
         """Кого переспросить из-за хода, оборванного смертью процесса.
@@ -3547,6 +3627,177 @@ class DebateSession:
         self.current_action = None
         return self.posts[-1] if self.posts else None
 
+    # ------------------------------------------------------------
+    # Переигровка и правка сказанного
+    # ------------------------------------------------------------
+    # Спектакль можно сыграть заново — не весь, а от любого места: реплику,
+    # акт целиком или весь спектакль. Правила, тема и состав берутся нынешние:
+    # ради этого и переигрывают — чтобы ответили по тому, что настроено сейчас.
+
+    def index_of(self, post_id) -> int:
+        """Место реплики в ленте по её номеру. None — такой реплики в ленте нет."""
+        try:
+            post_id = int(post_id)
+        except (TypeError, ValueError):
+            return None
+        for index, post in enumerate(self.posts):
+            if int(post.get("id") or 0) == post_id:
+                return index
+        return None
+
+    def hold_from(self, index: int) -> dict:
+        """Отложить ленту с этого места: переигранное встанет ровно на её место.
+
+        Лента обрывается на том, с чего играют заново: модель не должна видеть
+        то, что было сказано после переигранной реплики, — иначе её ответ был бы
+        о будущем. Отложенное не пропадает: отыгранное занимает свои номера,
+        а всё, чего переигровка не коснулась, возвращается в ленту тем же порядком
+        (см. return_held).
+
+        Возвращает отложенное: реплики вместе с отчётами их ходов.
+        """
+        index = max(0, min(int(index), len(self.posts)))
+        kept = self.posts[:index]
+        held = {"posts": list(self.posts[index:]), "turns": {}}
+        for post in held["posts"]:
+            key = int(post.get("id") or 0)
+            if key in self.turn_log:
+                held["turns"][key] = self.turn_log.pop(key)
+        self.posts = kept
+        self.conversation_history = self.history_from_posts()
+        # Акт — по оставшемуся: переигранное продолжает спектакль с этого места,
+        # а не начинает новый
+        self.current_round = int(kept[-1].get("round") or 0) if kept else 0
+        self.restore_shown_pictures()
+        return held
+
+    def return_held(self, held: dict) -> int:
+        """Вернуть в ленту отложенное, чего переигранное не коснулось.
+
+        Переигранное занимает свои номера заново (номер — это место в ленте,
+        см. add_post), поэтому не тронутым считается всё, что нумеровано дальше
+        отыгранного — и оно возвращается на своё место вместе с отчётами ходов:
+        реплика без отчёта читалась бы как ход без следов.
+
+        Возвращает, сколько реплик вернулось.
+        """
+        held = held or {}
+        last = int(self.posts[-1].get("id") or 0) if self.posts else 0
+        back = [one for one in held.get("posts") or []
+                if int(one.get("id") or 0) > last]
+        self.posts.extend(back)
+        for one in back:
+            key = int(one.get("id") or 0)
+            if key in (held.get("turns") or {}):
+                self.turn_log[key] = held["turns"][key]
+        if back:
+            self.conversation_history = self.history_from_posts()
+            self.restore_shown_pictures()
+        return len(back)
+
+    def replay_plan_for(self, post_id, scope: str = "post") -> tuple:
+        """Что переигрывается: с какого места лента обрывается и сколько играть заново.
+
+        Реплика — одна (та же, тем же участником, в том же акте), акт — весь акт
+        целиком, с его первой реплики, спектакль — всё, с самого начала. Число
+        реплик берётся из ленты, а не из состава: переигрывается ровно то, что было
+        сказано, — и если место из состава убрали, акт от этого короче не станет
+        (участник просто пропустит свой ход, см. run_debate_thread).
+
+        План — то, чем играют заново (см. run_debate_thread); вместе с планом
+        возвращается отложенное, потому что лента уже оборвана и вернуть её
+        без переигровки нечем.
+
+        Возвращает (план, отложенное, беда): беда не пустая — переигрывать нечего.
+        """
+        scope = str(scope or "post").strip().lower()
+        index = self.index_of(post_id)
+        if index is None:
+            return None, None, f"реплики №{post_id} в ленте нет"
+        if scope == "show":
+            index, count = 0, len(self.posts)
+        elif scope in ("round", "act"):
+            act = int(self.posts[index].get("round") or 0)
+            index = next((place for place, one in enumerate(self.posts)
+                          if int(one.get("round") or 0) == act), index)
+            count = sum(1 for one in self.posts
+                        if int(one.get("round") or 0) == act)
+        elif scope == "post":
+            count = 1
+        else:
+            return None, None, f"неизвестно, что переигрывать: «{scope}»"
+        first = self.posts[index]
+        name = first.get("display_name") or ""
+        # С того, с кого играть, нужно начать — и он обязан быть на сцене. Место,
+        # ушедшее из состава (или переименованное), начало бы переигровку
+        # с чужого хода, а прежняя реплика пропала бы: отложенное возвращается
+        # только тем, что нумеровано дальше отыгранного (см. return_held)
+        if not any(one.get("display_name") == name
+                   for one in self.runtime_participants):
+            return None, None, (f"места «{name}» больше нет в составе: "
+                                f"переигрывать некому")
+        plan = {"posts": count,
+                "round": int(first.get("round") or 0) or 1,
+                "name": name}
+        held = self.hold_from(index)
+        plan["held"] = held
+        return plan, held, ""
+
+    def replay_show(self, plan: dict) -> None:
+        """Поднять занавес ради переигровки: тот же спектакль, но сказанное заново.
+
+        Спектакль при этом идёт, как обычно, и ДАМП не переписывается: прежние
+        записи остаются в файле, а переигранное ложится ниже, с отметкой
+        (см. dump_replayed). Память о показанном у моделей тоже остаётся прежней —
+        её возвращает сама лента (см. restore_shown_pictures).
+        """
+        self.running = True
+        self.finished = False
+        self.moderator_finished = False
+        self.waiting_for_human = False
+        self.current_action = None
+        self.current_participant = None
+        self.search_query = None
+        self.moderator_message = None
+        self.pending_attachments = []
+        # ДАМП дописывается, а не начинается заново (см. start_dump)
+        self.resumed = True
+        self.resume_ready = False
+        self.restored = False
+        self.restored_phase = ""
+        # Оборванный ход тут не при чём: ленту переигрывают, а не возвращают
+        self.replay_plan = None
+
+    def restate_post(self, post_id, content) -> tuple:
+        """Пересказать реплику человека: слова другие, а место — то же.
+
+        Ответы, которые шли после неё, отвечали на прежние слова: чтобы модель
+        ответила на новые, её реплику переигрывают (см. replay_plan_for). Сама
+        же правка делает ленту и разговор честными: в них стоят новые слова.
+
+        В ДАМПе реплика остаётся и прежней, и новой: файл дописывается, а
+        читается последняя (см. dump_replayed).
+
+        Возвращает (реплика, беда): беда не пустая — править нечего.
+        """
+        index = self.index_of(post_id)
+        if index is None:
+            return None, f"реплики №{post_id} в ленте нет"
+        post = self.posts[index]
+        if post.get("model_used") != "human":
+            return None, "править можно реплику человека: у модели её переигрывают"
+        said = str(content or "").strip()
+        if not said and not post.get("attachments"):
+            return None, "пустая реплика: сказать нечего"
+        post["content"] = said
+        post["content_html"] = text.markdown_to_html(said)
+        self.conversation_history = self.history_from_posts()
+        dump_replayed([int(post.get("id") or 0)])
+        save_dump_entry(post)
+        print(f"✍️  Реплика человека №{post['id']} пересказана: "
+              f"{len(said)} знаков")
+        return post, ""
+
     def new_show(self):
         """«Новый спектакль»: новые имена и характеры, настройки, сцена и тема — те же."""
         guidelines = list(self.moderator_guidelines)
@@ -3583,11 +3834,15 @@ class DebateSession:
                  search_count=0, search_queries=None,
                  is_moderator=False, is_judge=False, gender="male", thinking="",
                  sketch="", turn=None, dump=True, attachments=None,
-                 public_judge=None):
+                 public_judge=None, replay=False):
         """Создать пост.
 
         dump=False — ход уже писался в ДАМП по ходу дела (см. open_dump_turn):
         дописывать его целиком второй раз — значит удвоить ход в файле.
+
+        replay=True — эта реплика переиграна: в ДАМПе она встаёт тем же номером,
+        что и прежняя, и отметка об этом ложится до неё (см. dump_replayed).
+        Нужно реплике человека: у модели отметку пишет сам ход.
         """
         avatar_url = self.avatars.get(display_name)
         avatar_emoji = self.avatar_emojis.get(display_name, "📣")
@@ -3624,6 +3879,8 @@ class DebateSession:
         # бы чужой черновик мыслей как сказанное вслух), а в ДАМП — идут: там
         # хронология спектакля, и её читают после занавеса, а не посреди разговора
         if dump:
+            if replay:
+                dump_replayed([post["id"]])
             save_dump_entry(post, turn)
         return post
 
@@ -4429,7 +4686,8 @@ class DebateSession:
     # Ход AI
     # ------------------------------------------------------------
 
-    def handle_ai_turn(self, participant: dict, round_num: int, on_draft=None) -> tuple:
+    def handle_ai_turn(self, participant: dict, round_num: int, on_draft=None,
+                       replay: bool = False) -> tuple:
         self.current_action = "thinking"
         # По этой метке реплика назовёт, сколько длилась её генерация: время —
         # такая же плата за ход, как токены и поиски, и морочить им голову
@@ -4462,6 +4720,11 @@ class DebateSession:
         # зациклившегося на две минуты, в файле не осталось бы вообще ничего
         turn = build_turn_report(participant, round_num, sent, [], trim_report,
                                  topic=self.topic, steps=journal["steps"])
+        # Переигранная реплика встаёт тем же номером, что и прежняя: номер — это
+        # место в ленте. Прежняя запись о ней остаётся в ДАМПе летописью, а
+        # читается последняя (см. dump_replayed)
+        if replay:
+            dump_replayed([len(self.posts) + 1])
         open_dump_turn(len(self.posts) + 1, turn, journal)
 
         # Черновик реплики: если спектакль умеет показывать её по кускам, текст
@@ -5302,7 +5565,7 @@ def report_topic_picture(participants: list) -> None:
               f"картинок не читает ни одна модель состава")
 
 
-def run_debate_thread(topic: str, on_post=None, on_draft=None):
+def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = None):
     """
     Играет спектакль акт за актом, пока режиссёр не опустит занавес.
 
@@ -5311,6 +5574,11 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     облачная модель говорит, в ленте растёт черновик (см. _StreamingReply).
     Здесь про Flask не знают: спектакль просто отдаёт готовый пост тому, кто
     его позвал.
+
+    replay — переигровка сказанного (см. session.replay_plan_for): с какого
+    места лента уже оборвана, сколько реплик играется заново и что ждёт
+    возвращения в ленту. Спектакль отвечает на те же слова заново — по теме
+    и правилам, которые действуют сейчас.
     """
     print(f"🎬 Поток дебатов запущен для темы: {topic}")
     # Хронология ходов уйдёт в ДАМП: после занавеса ленты уже не будет,
@@ -5355,17 +5623,37 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
     # Ход, оборванный смертью процесса, переспрашивается первым делом: прежние
     # реплики целы, а в этом ходу говорящий не сказал ничего (см. plan_replay),
     # и дальше разговор идёт уже с его репликой — так цепочка и восстанавливается
-    replay = session.replay_broken_turn(on_draft=on_draft)
-    if replay and on_post:
-        on_post(replay)
+    asked_again = session.replay_broken_turn(on_draft=on_draft)
+    if asked_again and on_post:
+        on_post(asked_again)
 
     # Продолжение спектакля идёт дальше с того же акта, а не с первого: прежние
     # реплики уже в ленте и уже прочитаны моделями, и акт 1 на свежую голову
     # в середине разговора — это не нумерация, а путаница (см. session.resumed)
     round_num = session.current_round if session.resumed else 0
+    # А переигровка начинается с того акта, в котором стоит переигранная реплика:
+    # акт 1 посреди разговора значил бы то же самое (см. replay_plan_for)
+    if replay:
+        round_num = max(0, int(replay.get("round") or 1) - 1)
+    # Сколько реплик осталось переиграть и от чего считать: переигровка кончается
+    # сама, на том же числе реплик, что было, — играется сказанное заново,
+    # а не продолжение спектакля (см. session.replay_plan_for)
+    again_left = int(replay.get("posts") or 0) if replay else 0
+    again_base = len(session.posts)
+    again_done = False
+
+    def enough() -> bool:
+        """Сказано ли уже всё переигранное: по числу реплик, а не по акту."""
+        return bool(replay) and len(session.posts) - again_base >= again_left
     
     try:
         while True:
+            # Переигранное сказано — занавес: следующей была бы уже вторая
+            # половина спектакля, а её никто не просил (см. replay_plan_for)
+            if enough():
+                print("  ⏹  Переигранное сказано — опускаю занавес")
+                again_done = True
+                break
             round_num += 1
             session.current_round = round_num
             print(f"\n🎭 Акт {round_num}")
@@ -5375,7 +5663,20 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
             act_cast = list(session.runtime_participants)
             print(f"  🎭 Персонажи: {[p.get('display_name', '') + ' (' + p.get('model', '') + ')' for p in act_cast]}")
             
-            for participant in act_cast:
+            # С какого места состава начинается акт: у переигровки это тот, чья
+            # реплика переигрывается, а не первый в очереди
+            first = 0
+            if replay and round_num == int(replay.get("round") or 0):
+                first = next((place for place, one in enumerate(act_cast)
+                              if one.get("display_name") == replay.get("name")), 0)
+            
+            for participant in act_cast[first:]:
+                # И посреди акта — тем же счётом: переигранное могло кончиться
+                # на любом месте очереди
+                if enough():
+                    print("  ⏹  Переигранное сказано — опускаю занавес")
+                    again_done = True
+                    break
                 # Убранный участник на сцену не выходит: слепок act_cast его ещё
                 # держит, а в составе его уже нет
                 if not still_in_cast(participant, session.runtime_participants):
@@ -5436,7 +5737,11 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
                                     is_moderator=participant.get("is_moderator", False),
                                     is_judge=participant.get("is_judge", False),
                                     gender=participant.get("gender", "male"),
-                                    attachments=attachments
+                                    attachments=attachments,
+                                    # Своё слово в переигранном спектакле человек
+                                    # говорит заново: в ДАМПе оно встаёт тем же
+                                    # номером, и отметка идёт до него
+                                    replay=bool(replay),
                                 )
                                 print(f"🎬 {participant.get('display_name', '')}: {current_message[:50]}")
                                 if on_post:
@@ -5457,7 +5762,8 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
                     
                     session.current_action = "thinking"
                     
-                    session.handle_ai_turn(participant, round_num, on_draft=on_draft)
+                    session.handle_ai_turn(participant, round_num, on_draft=on_draft,
+                                           replay=bool(replay))
                     
                     post = session.posts[-1] if session.posts else None
                     if post and on_post:
@@ -5466,7 +5772,7 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
                     session.current_action = None
                     time.sleep(0.5)
             
-            if session.moderator_finished:
+            if session.moderator_finished or again_done:
                 break
     except Exception as e:
         # Не даём потоку умереть тихо: иначе интерфейс навсегда остаётся
@@ -5474,6 +5780,12 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None):
         print(f"❌ Спектакль прерван из-за ошибки: {e}")
         traceback.print_exc()
     finally:
+        # Отложенное возвращается в ленту — и при ошибке тоже: переигранное уже
+        # заняло свои номера, а всё, чего переигровка не коснулась, спектаклю
+        # терять незачем (см. return_held)
+        if replay:
+            back = session.return_held(replay.get("held") or {})
+            print(f"  ↩️  Переигровка кончена, прежних реплик вернулось: {back}")
         # Всегда завершаем спектакль явно, при любом выходе из цикла - в том
         # числе при ошибке, чтобы клиент разблокировал кнопки.
         session.finished = True

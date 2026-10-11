@@ -1160,7 +1160,7 @@ BUGS = {
     ],
     "под-версия записи снова стала нечитаемой": [
         ("aitheatre/show.py",
-         "DUMP_FORMATS_READABLE = (6, 5, 4, 3)",
+         "DUMP_FORMATS_READABLE = (7, 6, 5, 4, 3)",
          "DUMP_FORMATS_READABLE = (DUMP_FORMAT,)"),
     ],
     "о чужом формате снова не спрашивают, а догадываются": [
@@ -1790,8 +1790,52 @@ BUGS = {
     ],
     "переспрошенный ход снова не играется": [
         ("aitheatre/show.py",
-         "    replay = session.replay_broken_turn(on_draft=on_draft)",
-         "    replay = None"),
+         "    asked_again = session.replay_broken_turn(on_draft=on_draft)",
+         "    asked_again = None"),
+    ],
+    "переигранная реплика снова встаёт в конец ленты": [
+        ("aitheatre/show.py",
+         '        posts.insert(min(slot, len(posts)), record["post"])',
+         '        posts.append(record["post"])'),
+    ],
+    "отметка о переигранном снова не убирает прежнюю запись": [
+        ("aitheatre/show.py",
+         "                posts.remove(post)\n",
+         "                posts.append(post)\n"),
+    ],
+    "шапка продолжения снова становится концом записи": [
+        ("aitheatre/show.py",
+         '        if line.startswith("**Продолжение"):',
+         "        if False:"),
+    ],
+    "переигровка снова начинается с чужого хода": [
+        ("aitheatre/show.py",
+         '        if not any(one.get("display_name") == name\n'
+         "                   for one in self.runtime_participants):\n"
+         '            return None, None, (f"места «{name}» больше нет в составе: "\n'
+         '                                f"переигрывать некому")\n',
+         ""),
+    ],
+    "переигранная реплика человека снова ложится в ДАМП без отметки": [
+        ("aitheatre/show.py",
+         '            if replay:\n                dump_replayed([post["id"]])',
+         '            if False:\n                dump_replayed([post["id"]])'),
+    ],
+    "переигранная реплика снова ложится в ДАМП без отметки": [
+        ("aitheatre/show.py",
+         "            dump_replayed([len(self.posts) + 1])",
+         "            dump_replayed([])"),
+    ],
+    "пересказанная реплика снова ложится в ДАМП без отметки": [
+        ("aitheatre/show.py",
+         '        dump_replayed([int(post.get("id") or 0)])',
+         "        dump_replayed([])"),
+    ],
+    "отложенное снова не возвращается в ленту": [
+        ("aitheatre/show.py",
+         '        back = [one for one in held.get("posts") or []\n'
+         '                if int(one.get("id") or 0) > last]',
+         "        back = []"),
     ],
     "в ДАМПе снова остаётся незаконченная запись и новая рядом": [
         ("aitheatre/show.py",

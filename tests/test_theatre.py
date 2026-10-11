@@ -3241,8 +3241,12 @@ class TestPlayKeptInDump(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as folder:
             _, dump = self._play(folder)
+            # Номер берётся следующим, а не названный по имени: чужая запись —
+            # это запись не нашего номера, а какой именно — меняется от формата
+            # к формату (см. DUMP_FORMAT)
             stranger = dump.read_text(encoding="utf-8").replace(
-                f"Формат записи: {show.DUMP_FORMAT}", "Формат записи: 7")
+                f"Формат записи: {show.DUMP_FORMAT}",
+                f"Формат записи: {show.DUMP_FORMAT + 1}")
             dump.write_text(stranger, encoding="utf-8")
             self.session.posts = []
             shown = io.StringIO()
@@ -3411,6 +3415,11 @@ class TestPlayKeptInDump(unittest.TestCase):
                         "attachments": [attachment]}
                 with mock.patch.object(settings, "DUMP_FILE", dump):
                     show.save_dump_entry(post)
+                    # Шапка продолжения дописывается сразу после записи (так
+                    # идёт доигрывание, см. start_dump) — и она граница записи,
+                    # а не её хвост: иначе в тело реплики попало бы всё, что
+                    # написано после неё, и реплику читали бы последним блоком
+                    show.start_dump("Тема", keep=True)
                 written = dump.read_text(encoding="utf-8")
                 play = show.parse_dump(written)
                 # Файл картинки пропал (папку экземпляра когда-то почистили)
@@ -3420,6 +3429,8 @@ class TestPlayKeptInDump(unittest.TestCase):
         self.assertIn("**Приложено:** зелёный.png → " + attachment["url"], written,
                       "приложенное не попало в запись — и не вернётся с репликой")
         restored = [p for p in play["posts"] if p["id"] == 99][0]
+        self.assertEqual(restored["content"], "Вот картинка.",
+                         "репликой стала картинка: данные приклеились к словам")
         self.assertEqual(restored["attachments"], [attachment],
                          "вернувшаяся реплика осталась без своего приложения")
         self.assertEqual([p for p in gone["posts"] if p["id"] == 99][0]["attachments"], [],
@@ -10113,6 +10124,396 @@ class TestRulesOnPause(unittest.TestCase):
             with self.subTest(editor=editor):
                 self.assertIn(f"collectRuleRows('{editor}')", self.page,
                               f"{editor}: отключённое правило уехало бы рабочим")
+
+
+# ------------------------------------------- переигровка и правка сказанного
+
+class TestSayingItAgain(unittest.TestCase):
+    """Сказанное переигрывают: реплику, акт целиком или весь спектакль.
+
+    Переигрывают под занавесом и отвечают заново по нынешним теме, правилам
+    и составу: ради этого и переигрывают — чтобы ответили по тому, что настроено
+    сейчас (см. show.replay_plan_for). Прежние ответы остаются в ДАМПе летописью:
+    файл дописывается, а читается последняя запись (см. dump_replayed).
+    """
+
+    def setUp(self):
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+        self.session.topic = "Тема переигровки"
+        # Состав свой и с местными моделями: спектаклю в тесте никуда ходить
+        # нельзя, а три места — это три реплики в акте
+        self.session.runtime_participants = [
+            {"display_name": "Первый", "model": "local-one", "gender": "female",
+             "avatar_emoji": "🦊", "is_judge": False, "is_moderator": False},
+            {"display_name": "Второй", "model": "local-two", "gender": "male",
+             "avatar_emoji": "🐺", "is_judge": False, "is_moderator": False},
+            {"display_name": "Третий", "model": "local-three", "gender": "female",
+             "avatar_emoji": "🦉", "is_judge": False, "is_moderator": False},
+        ]
+        self.session.sync_cast_media()
+        # Ответы нумеруются: по ним видно, какая реплика переиграна, а какая нет
+        self.said = []
+
+        def answer(model, messages, participant_name, **kwargs):
+            self.said.append(f"Реплика {len(self.said) + 1} от {participant_name}.")
+            return self.said[-1], 0, []
+
+        self.answer = answer
+        for name, value in (
+            ("check_models_available",
+             mock.Mock(return_value={"ok": True, "missing": [], "error": None})),
+            ("unload_model", mock.Mock()),
+            ("unload_other_show_models", mock.Mock()),
+            # Про зрение моделей спектакль спрашивает сам, до первого хода:
+            # в тесте это значило бы настоящий запрос к шлюзу (см. report_cast_vision)
+            ("cast_vision", mock.Mock(return_value={})),
+        ):
+            patcher = mock.patch.object(app_module_of(name), name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.dump = Path(folder.name) / "damp.md"
+        patcher = mock.patch.object(settings, "DUMP_FILE", self.dump)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Открытый ДАМП держит временную папку — в тесте его закрываем сами
+        self.addCleanup(show._dump_reset)
+        self.client = web_app.app.test_client()
+
+    def _play(self, acts: int = 1) -> list:
+        """Сыграть спектакль: каждое место по разу в каждом акте."""
+        show.start_dump(self.session.topic)
+        self.session.start_show(self.session.topic)
+        with mock.patch.object(ollama_api, "ask_model",
+                               mock.Mock(side_effect=self.answer)):
+            for round_num in range(1, acts + 1):
+                for participant in list(self.session.runtime_participants):
+                    self.session.handle_ai_turn(participant, round_num)
+        self.session.running = False
+        self.session.finished = True
+        return list(self.session.posts)
+
+    def _again(self, plan: dict) -> None:
+        """Переиграть — так же, как это делает поток спектакля (см. run_debate_thread)."""
+        self.session.replay_show(plan)
+        with mock.patch.object(ollama_api, "ask_model",
+                               mock.Mock(side_effect=self.answer)):
+            with mock.patch("time.sleep"):
+                show.run_debate_thread(self.session.topic, replay=plan)
+
+    def _written(self) -> str:
+        return self.dump.read_text(encoding="utf-8")
+
+    def _dump(self) -> dict:
+        return show.parse_dump(self._written())
+
+    def _human(self, text, round_num=1, attachments=None, replay=False) -> dict:
+        """Живая реплика — та, которую правит режиссёр."""
+        who = self.session.runtime_participants[0]
+        return self.session.add_post(display_name=who["display_name"],
+                                     model_used="human", content=text,
+                                     round_num=round_num,
+                                     is_moderator=bool(who.get("is_moderator")),
+                                     is_judge=bool(who.get("is_judge")),
+                                     gender=who.get("gender", "male"),
+                                     attachments=attachments, replay=replay)
+
+    def test_a_replayed_reply_comes_back_to_its_own_place(self):
+        """Переигранная реплика встаёт на своё место, а не в конец ленты.
+
+        Переигрывают под занавесом одну реплику: модель не видит того, что было
+        сказано после неё (лента обрывается, см. hold_from), и отвечает заново.
+        Всё, чего переигровка не коснулась, возвращается как было — и на своё
+        место: номер реплики — это место в ленте (см. return_held).
+        """
+        self._play(1)
+        old = [p["content"] for p in self.session.posts]
+        plan, _held, problem = self.session.replay_plan_for(2, "post")
+
+        self.assertEqual(problem, "")
+        self.assertEqual(plan["posts"], 1, "переигрывается не одна реплика")
+        self.assertEqual(plan["round"], 1, "переигранная реплика сыграется в чужом акте")
+        self.assertEqual(plan["name"], "Второй", "переигрывает не тот, кто говорил")
+        self.assertEqual([p["id"] for p in self.session.posts], [1],
+                         "лента не оборвана: модель увидела бы будущее")
+
+        self._again(plan)
+
+        self.assertEqual([p["id"] for p in self.session.posts], [1, 2, 3])
+        self.assertEqual(self.session.posts[0]["content"], old[0])
+        self.assertEqual(self.session.posts[2]["content"], old[2],
+                         "переигранное унесло за собой чужие реплики")
+        self.assertNotEqual(self.session.posts[1]["content"], old[1],
+                            "реплика не переиграна — ответ прежний")
+        self.assertIn("Второй", self.session.posts[1]["content"])
+        play = self._dump()
+        self.assertEqual([p["id"] for p in play["posts"]], [1, 2, 3],
+                         "ДАМП после переигровки читается не по порядку")
+        self.assertEqual([p["content"] for p in play["posts"]],
+                         [p["content"] for p in self.session.posts],
+                         "в ДАМПе не то, что в ленте")
+
+    def test_the_dump_keeps_both_sayings_of_the_same_reply(self):
+        """В ДАМПе — и прежний ответ, и новый: летопись правится отметкой.
+
+        Файл дописывается, а не переписывается: прежняя запись остаётся, рядом
+        с ней ложится отметка «Переиграны реплики», а ниже — новая запись тем же
+        номером. Читается последняя, поэтому спектакль в ДАМПе один, а обе
+        версии ответа — целы.
+        """
+        self._play(1)
+        old = self.session.posts[1]["content"]
+        plan, _held, _problem = self.session.replay_plan_for(2, "post")
+
+        self._again(plan)
+
+        written = self._written()
+        self.assertIn("**Переиграны реплики:** 2", written,
+                      "отметки о переигровке в записи нет — читается прежний ответ")
+        self.assertEqual(len(re.findall(r"^## 2 · ", written, re.M)), 2,
+                         "прежняя запись ушла из файла: летописи больше нет")
+        self.assertIn(old, written, "прежний ответ потерялся")
+        self.assertEqual(len(self._dump()["posts"]), 3,
+                         "в спектакле из ДАМПа задвоилась реплика")
+
+    def test_an_act_is_replayed_from_its_first_reply(self):
+        """Акт переигрывается целиком — с его первой реплики, а не с середины."""
+        self._play(2)
+        old = [p["content"] for p in self.session.posts]
+        plan, _held, problem = self.session.replay_plan_for(5, "round")
+
+        self.assertEqual(problem, "")
+        self.assertEqual(plan["posts"], 3, "в акте три реплики")
+        self.assertEqual(plan["round"], 2)
+        self.assertEqual(plan["name"], "Первый",
+                         "акт играется заново не с его первой реплики")
+        self.assertEqual([p["id"] for p in self.session.posts], [1, 2, 3],
+                         "лента оборвана не на начале акта")
+
+        self._again(plan)
+
+        self.assertEqual([p["id"] for p in self.session.posts], [1, 2, 3, 4, 5, 6])
+        self.assertEqual([p["content"] for p in self.session.posts[:3]], old[:3],
+                         "переигровка акта тронула прежний акт")
+        self.assertEqual([p["round"] for p in self.session.posts[3:]], [2, 2, 2])
+        self.assertNotIn(old[4], [p["content"] for p in self.session.posts],
+                         "середина акта осталась прежней")
+        self.assertEqual([p["id"] for p in self._dump()["posts"]], [1, 2, 3, 4, 5, 6],
+                         "ДАМП после переигровки акта читается не по порядку")
+
+    def test_the_whole_show_is_replayed_from_the_first_reply(self):
+        """Весь спектакль — с первого слова и до последнего, тем же числом реплик."""
+        self._play(2)
+        old = [p["content"] for p in self.session.posts]
+        plan, _held, problem = self.session.replay_plan_for(4, "show")
+
+        self.assertEqual(problem, "")
+        self.assertEqual(plan["posts"], 6, "переигрывается не весь спектакль")
+        self.assertEqual(plan["round"], 1, "спектакль начинается не с первого акта")
+        self.assertEqual(plan["name"], "Первый")
+        self.assertEqual(self.session.posts, [], "лента не оборвана начисто")
+
+        self._again(plan)
+
+        self.assertEqual([p["id"] for p in self.session.posts], [1, 2, 3, 4, 5, 6])
+        self.assertEqual([p["content"] for p in self.session.posts],
+                         [p["content"] for p in self._dump()["posts"]],
+                         "в ДАМПе не то, что в ленте")
+        self.assertEqual([p["round"] for p in self.session.posts], [1, 1, 1, 2, 2, 2])
+        for was in old:
+            self.assertNotIn(was, [p["content"] for p in self.session.posts],
+                             "прежний ответ остался в переигранном спектакле")
+
+    def test_a_replay_cut_short_does_not_eat_the_rest_of_the_show(self):
+        """Переигровка, оборванная на середине, остаток спектакля не съедает.
+
+        Отметка о переигранном ложится в файл до самой записи: если процесс
+        кончится посреди переигровки, читается всё, что успело переиграться,
+        а остальное остаётся прежним — по своим местам (см. dump_replayed).
+        """
+        self._play(1)
+        old = [p["content"] for p in self.session.posts]
+        plan, _held, _problem = self.session.replay_plan_for(2, "post")
+
+        # Так выглядит оборванная переигровка: ход сыгран и записан, а поток
+        # умер до того, как вернул отложенное в ленту (см. return_held)
+        self.session.replay_show(plan)
+        with mock.patch.object(ollama_api, "ask_model",
+                               mock.Mock(side_effect=self.answer)):
+            self.session.handle_ai_turn(self.session.runtime_participants[1], 1,
+                                        replay=True)
+
+        play = self._dump()
+        self.assertEqual([p["id"] for p in play["posts"]], [1, 2, 3],
+                         "оборванная переигровка съела остаток спектакля")
+        self.assertEqual(play["posts"][0]["content"], old[0])
+        self.assertEqual(play["posts"][2]["content"], old[2])
+        self.assertEqual(len(play["posts"]), 3, "в ДАМПе задвоилась реплика")
+
+    def test_a_human_reply_can_be_restated(self):
+        """Свою реплику можно пересказать: слова другие, а место — то же.
+
+        В ленте и в разговоре после этого стоят новые слова: по ним и строятся
+        следующие ходы. Ответы, что шли после, отвечали на прежние — их
+        переигрывают отдельно (см. test_a_replayed_reply_comes_back_to_its_own_place).
+        """
+        show.start_dump(self.session.topic)
+        post = self._human("Сказано в первый раз.")
+        edited, problem = self.session.restate_post(post["id"], "Сказано во второй раз.")
+
+        self.assertEqual(problem, "")
+        self.assertEqual(edited["content"], "Сказано во второй раз.")
+        self.assertIn("Сказано во второй раз", edited["content_html"])
+        self.assertEqual(self.session.conversation_history[-1]["content"],
+                         "Сказано во второй раз.",
+                         "модели прочитали бы прежние слова")
+        self.assertEqual(self.session.posts[0]["content"],
+                         "Сказано во второй раз.")
+        written = self._written()
+        self.assertIn("Сказано в первый раз.", written,
+                      "прежние слова ушли из записи: летописи больше нет")
+        play = self._dump()
+        self.assertEqual(len(play["posts"]), 1, "в спектакле из ДАМПа задвоилась реплика")
+        self.assertEqual(play["posts"][0]["content"], "Сказано во второй раз.")
+
+    def test_the_words_of_a_model_are_replayed_not_restated(self):
+        """Реплику модели правят переигровкой, а не пересказом — за неё говорят заново."""
+        self._play(1)
+
+        edited, problem = self.session.restate_post(1, "Что-нибудь своё")
+
+        self.assertIsNone(edited)
+        self.assertIn("человека", problem)
+        self.assertEqual(self.session.posts[0]["content"],
+                         self._dump()["posts"][0]["content"],
+                         "правка всё-таки прошла")
+
+    def test_the_empty_reply_of_a_human_stays_empty(self):
+        """Пересказать пустой репликой человека без картинок — значит стереть её."""
+        show.start_dump(self.session.topic)
+        post = self._human("Уже сказано.")
+
+        edited, problem = self.session.restate_post(post["id"], "   ")
+
+        self.assertIsNone(edited)
+        self.assertIn("пустая", problem)
+        self.assertEqual(self.session.posts[0]["content"], "Уже сказано.")
+
+    def test_a_reply_of_someone_gone_from_the_cast_is_not_replayed(self):
+        """Говорящего нет на сцене — переигрывать некому, и об этом говорят словами.
+
+        Без этой проверки переигровка начиналась бы с чужих слов (с начала
+        состава), а прежняя реплика пропадала бы: отложенное возвращается
+        только тем, что нумеровано дальше отыгранного (см. return_held).
+        """
+        self._play(1)
+        self.session.runtime_participants = [
+            one for one in self.session.runtime_participants
+            if one["display_name"] != "Второй"]
+
+        plan, _held, problem = self.session.replay_plan_for(2, "post")
+
+        self.assertIsNone(plan)
+        self.assertIn("Второй", problem)
+        self.assertIn("состав", problem)
+        self.assertEqual(len(self.session.posts), 3, "лента оборвана впустую")
+
+    def test_a_replayed_reply_of_a_human_stands_in_the_dump_once(self):
+        """Переигранное слово человека тоже ложится в ДАМП с отметкой, а не рядом.
+
+        У модели отметку пишет сам ход (см. handle_ai_turn), а живая реплика
+        приходит через add_post — и там о переигровке надо сказать отдельно,
+        иначе в файле оказались бы две записи об одной реплике (и в ленте — две).
+        """
+        show.start_dump(self.session.topic)
+        self._human("Сказано в первый раз.")
+        # Переигровка обрывает ленту на прежнем месте (см. hold_from): своё слово
+        # человек говорит заново — тем же номером и на том же месте
+        plan, _held, problem = self.session.replay_plan_for(1, "post")
+        self.assertEqual(problem, "")
+        self.session.replay_show(plan)
+
+        said = self._human("Сказано заново.", replay=True)
+
+        self.assertEqual(said["id"], 1, "переигранное слово встало не на место прежнего")
+        self.assertEqual([p["content"] for p in self._dump()["posts"]],
+                         ["Сказано заново."],
+                         "вернулась не та реплика — или их задвоилось")
+        self.assertEqual(len(self._dump()["posts"]), 1)
+
+    def test_the_replay_route_refuses_while_the_show_is_on(self):
+        """Под идущим спектаклем не переигрывают: сцена занята (см. web.replay_said)."""
+        self._play(1)
+        self.session.running = True
+
+        answer = self.client.post("/api/replay", json={"post_id": 1}).get_json()
+
+        self.assertFalse(answer["success"])
+        self.assertIn("Завершить", answer["error"])
+        self.assertEqual(len(self.session.posts), 3, "лента всё-таки оборвана")
+
+    def test_the_replay_route_raises_the_curtain_and_cuts_the_feed(self):
+        """Маршрут переигровки обрывает ленту и пускает поток спектакля заново."""
+        self._play(1)
+        starter = mock.Mock()
+
+        with mock.patch.object(show, "run_debate_thread", starter):
+            answer = self.client.post("/api/replay",
+                                      json={"post_id": 2, "scope": "post"}).get_json()
+
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertEqual(answer["posts"], 1)
+        self.assertEqual(starter.call_count, 1, "спектакль заново никто не начал")
+        self.assertTrue(self.session.running, "переигровка не подняла занавес")
+        self.assertFalse(self.session.finished)
+        self.assertEqual([p["id"] for p in self.session.posts], [1])
+        self.session.running = False
+
+    def test_the_replay_route_says_what_is_missing(self):
+        """Переигрывать нечего — так и говорится, без намёков."""
+        self._play(1)
+
+        answer = self.client.post("/api/replay",
+                                  json={"post_id": 99, "scope": "post"}).get_json()
+
+        self.assertFalse(answer["success"])
+        self.assertIn("99", answer["error"])
+        self.assertEqual(len(self.session.posts), 3, "лента оборвана впустую")
+
+    def test_the_page_carries_the_buttons_of_the_replay(self):
+        """В ленте у каждой реплики — свои кнопки: эту, акт целиком и пересказать."""
+        self.assertIn("${postActionsHtml(post)}", page.HTML_TEMPLATE,
+                      "кнопок правки в реплике нет")
+        for control in ("replayPost", "replayWholeShow", "startRestate",
+                        "cancelRestate", "saveRestate", "rebuildFeed"):
+            with self.subTest(control=control):
+                self.assertIn(control, page.HTML_TEMPLATE, f"на странице нет {control}")
+        self.assertIn("/api/replay", page.HTML_TEMPLATE,
+                      "переигровка на странице никуда не отправляется")
+        self.assertIn("restate", page.HTML_TEMPLATE,
+                      "правка реплики на странице никуда не отправляется")
+
+    def test_the_replay_button_is_shown_only_under_the_curtain(self):
+        """«Переиграть спектакль» — под занавесом и только когда есть что переигрывать."""
+        self.assertIn('id="replayBtn"', page.HTML_TEMPLATE)
+        self.assertIn("const canReplay = !!showFinished && !!lastPostCount;",
+                      page.HTML_TEMPLATE)
+        self.assertIn("replayBtn.style.display = canReplay", page.HTML_TEMPLATE,
+                      "кнопка переигровки не прячется под идущим спектаклем")
+
+    def test_the_restate_route_gives_back_the_reply_as_it_was_said(self):
+        """Пересказанная реплика возвращается в том же виде, в каком её увидят модели."""
+        show.start_dump(self.session.topic)
+        post = self._human("Прежние слова.")
+
+        answer = self.client.post(f"/api/post/{post['id']}/restate",
+                                  json={"content": "Новые слова."}).get_json()
+
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertEqual(answer["post"]["content"], "Новые слова.")
+        self.assertEqual(self.session.posts[0]["content"], "Новые слова.")
 
 
 if __name__ == "__main__":

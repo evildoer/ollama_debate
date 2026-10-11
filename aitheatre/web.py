@@ -641,6 +641,62 @@ def post_turn(post_id):
     return response
 
 
+@app.route('/api/replay', methods=['POST'])
+def replay_said():
+    """Переиграть сказанное: реплику, акт целиком или весь спектакль.
+
+    Переигрывают под занавесом: идущий спектакль занят сценой, и второй поток
+    рядом с ним только писал бы в ленту наперебой. Отвечает нынешними правилами,
+    темой и составом — ради этого и переигрывают: ответить заново по тому,
+    что настроено сейчас, а не по тому, что было при первой попытке.
+    """
+    if show.session.running:
+        return jsonify({"success": False,
+                        "error": "спектакль идёт — переигрывают под занавесом: "
+                                 "сначала «Завершить спектакль»"})
+    data = request.get_json(silent=True) or {}
+    post_id = data.get("post_id")
+    scope = str(data.get("scope") or "post")
+    plan, _held, problem = show.session.replay_plan_for(post_id, scope)
+    if problem:
+        return jsonify({"success": False, "error": problem})
+    words = {"post": "реплика", "round": "акт", "show": "спектакль"}
+    print(f"🔁 Переигрывается {words.get(scope, scope)}: "
+          f"с акта {plan['round']}, реплик {plan['posts']} "
+          f"({plan['name']})")
+    show.session.replay_show(plan)
+    thread = threading.Thread(target=show.run_debate_thread,
+                              args=(show.session.topic,),
+                              kwargs={"on_post": publish_post, "on_draft": publish_draft,
+                                      "replay": plan})
+    thread.daemon = True
+    thread.start()
+    start_status_pusher()
+    return jsonify({"success": True, "scope": scope, "posts": plan["posts"],
+                    "round": plan["round"],
+                    "total_posts": len(show.session.posts)})
+
+
+@app.route('/api/post/<int:post_id>/restate', methods=['POST'])
+def restate_post(post_id):
+    """Пересказать реплику человека — пригодится перед переигровкой следующей.
+
+    Сказанное человеком — такая же часть спектакля, как ответ модели, и правится
+    оно на месте: и в ленте, и в разговоре, по которому строятся следующие ходы.
+    Модели после этого отвечали на прежние слова, поэтому дальше её реплику
+    переигрывают (см. /api/replay).
+    """
+    if show.session.running:
+        return jsonify({"success": False,
+                        "error": "спектакль идёт — правят под занавесом"})
+    data = request.get_json(silent=True) or {}
+    post, problem = show.session.restate_post(post_id, data.get("content", ""))
+    if problem:
+        return jsonify({"success": False, "error": problem})
+    return jsonify({"success": True, "post": show.post_view(post),
+                    "total_posts": len(show.session.posts)})
+
+
 @app.route('/api/status')
 def status():
     last_post_count = max(0, request.args.get("lastPostCount", 0, type=int))

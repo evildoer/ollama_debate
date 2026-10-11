@@ -132,6 +132,25 @@ HTML_TEMPLATE = """
            рамка читалась бы как «модель промолчала», поэтому говорим словами */
         .post-cut { color: #8a5a00; font-size: 15px; font-style: italic; border-left: 3px solid #e0c080; padding: 6px 0 6px 12px; }
         body.dark .post-cut { color: #d7b070; border-left-color: #5a4a20; }
+        /* Что можно сделать со сказанным: переиграть реплику или акт целиком,
+           а свою — пересказать. Мелко и внизу реплики: это правка спектакля,
+           а не то, за чем пришёл зритель (см. show.replay_plan_for) */
+        .post-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px;
+                        padding-top: 10px; border-top: 1px dashed #cccccc; }
+        body.dark .post-actions { border-top-color: #3a3a3a; }
+        .post-action { background: #ffffff; border: 1px solid #000000; color: #555555; cursor: pointer;
+                       font-family: Georgia, serif; font-size: 12px; padding: 3px 10px; letter-spacing: 1px; }
+        .post-action:hover { background: #000000; color: #ffffff; }
+        body.dark .post-action { background: #1c1c1c; border-color: #6f6f6f; color: #bbbbbb; }
+        body.dark .post-action:hover { background: #e8e8e8; color: #111111; }
+        /* Правка своей реплики идёт на месте самой реплики: слова человека —
+           часть сцены, и править их в стороне от неё было бы странно */
+        .restate-box { margin-top: 12px; }
+        .restate-box textarea { width: 100%; box-sizing: border-box; min-height: 90px; padding: 8px 10px;
+                                border: 2px solid #000000; font-family: Georgia, serif; font-size: 15px; line-height: 1.6; }
+        body.dark .restate-box textarea { background: #1c1c1c; color: #e8e8e8; border-color: #6f6f6f; }
+        .restate-actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+        .restate-actions .post-action { font-size: 13px; padding: 6px 14px; }
         /* Мысли модели: то, что она говорит сама с собой, пока не сказала вслух.
            Мелче и бледнее реплики: это не сказанное, а процесс. Свёрткой можно
            убрать их с глаз — но по умолчанию они видны, они уже оплачены */
@@ -530,6 +549,11 @@ HTML_TEMPLATE = """
                         <div style="display:flex;gap:15px;flex-wrap:wrap;">
                             <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
                             <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
+                            <!-- Переиграть весь спектакль целиком: тот же состав, тема
+                                 и правила — но все ответы заново. Тем же путём
+                                 переигрывают и реплику, и акт — кнопками в ленте -->
+                            <button class="btn btn-secondary" id="replayBtn" onclick="replayWholeShow()" style="display:none;"
+                                    title="Ответить заново на всё сказанное — по нынешним теме, правилам и составу. Прежние ответы останутся в ДАМПе, а в ленте встанут новые">🔁 Переиграть спектакль</button>
                             <button class="btn btn-secondary" id="newBtn" onclick="newShow()" style="display:none;">🎭 Новый спектакль</button>
                             <!-- Доиграть прежний спектакль: кнопка появляется только под занавесом
                                  и только если лента — из ДАМПа прошлого запуска (см. playRestored) -->
@@ -1810,10 +1834,15 @@ HTML_TEMPLATE = """
             const startBtn = document.getElementById('startBtn');
             const finishBtn = document.getElementById('finishBtn');
             const newBtn = document.getElementById('newBtn');
+            const replayBtn = document.getElementById('replayBtn');
             // Доиграть можно только то, что вернулось из ДАМПа: пустая сцена
             // продолжать нечего (см. show.session.resumed)
             const continueBtn = document.getElementById('continueBtn');
             const canContinue = showFinished && playRestored;
+            // Переигрывают только сказанное и только под занавесом: идущий
+            // спектакль занят сценой (см. web.replay_said)
+            const canReplay = !!showFinished && !!lastPostCount;
+            if (replayBtn) replayBtn.style.display = canReplay ? 'inline-block' : 'none';
             const title = document.getElementById('controlPanelTitle');
             if (debateRunning && !showFinished) {
                 startBtn.style.display = 'none';
@@ -2841,7 +2870,12 @@ HTML_TEMPLATE = """
             const postDiv = document.createElement('div');
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}${postAttachmentsHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${searchInfo}</div>`;
+            // Номер и слова реплики — приметами на самом элементе: по ним её
+            // находят кнопки правки (см. startRestate), а текст берётся тот же,
+            // что лежит в ленте, а не пересказанный разметкой
+            postDiv.setAttribute('data-post', post.id);
+            postDiv.setAttribute('data-restate', post.content || '');
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}${postAttachmentsHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${searchInfo}${postActionsHtml(post)}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
             // Отчёт о ходе спрашиваем только когда его открыли: событие toggle
@@ -2855,6 +2889,127 @@ HTML_TEMPLATE = """
             // Свежие реплики сверху: пульт и поле реплики тоже наверху, и читать
             // спектакль снизу вверх не приходится
             postsDiv.insertBefore(postDiv, postsDiv.firstChild);
+        }
+
+        // ── ПЕРЕИГРОВКА И ПРАВКА СКАЗАННОГО ─────────────────────
+        // Спектакль можно сыграть заново — не весь, а от любого места: реплику,
+        // акт целиком или всё с самого начала. Правила, тема и состав берутся
+        // нынешние: ради этого и переигрывают — чтобы ответили по тому, что
+        // настроено сейчас. Прежние ответы остаются в ДАМПе летописью, а в ленте
+        // встают новые (см. show.replay_plan_for)
+        const REPLAY_HINT = 'Переиграть — ответить заново по нынешним теме, правилам'
+            + ' и составу. Прежний ответ останется в ДАМПе, а в ленте встанет новый.';
+
+        function postActionsHtml(post) {
+            const act = Number(post.round || 0);
+            const mine = post.model_used === 'human';
+            return `<div class="post-actions">`
+                + `<button class="post-action" title="${REPLAY_HINT}"
+                    onclick="replayPost(${post.id})">🔁 эту реплику</button>`
+                + (act ? `<button class="post-action" title="${REPLAY_HINT} Акт целиком — все его реплики, с начала акта ${act}"
+                    onclick="replayPost(${post.id}, 'round')">🔁 акт ${act}</button>` : '')
+                + (mine ? `<button class="post-action" title="Пересказать свою реплику: слова в ленте и в разговоре станут другими. Ответы после неё отвечали на прежние слова — их переигрывают отдельно"
+                    onclick="startRestate(${post.id})">✍️ пересказать</button>` : '')
+                + `</div>`;
+        }
+
+        // Переигрывают только под занавесом: идущий спектакль занят сценой
+        // (см. web.replay_said)
+        function replayAllowed() {
+            if (debateRunning && !showFinished) {
+                alert('Спектакль идёт: переигрывают под занавесом — сначала «⏹ Завершить спектакль».');
+                return false;
+            }
+            return true;
+        }
+
+        function replayPost(postId, scope) {
+            if (!replayAllowed()) return;
+            const what = scope === 'round' ? 'акт целиком' : 'эту реплику';
+            if (!confirm(`Переиграть ${what}? Ответы придут заново — по нынешним теме, правилам и составу; прежние останутся в ДАМПе.`)) return;
+            sendReplay({post_id: postId, scope: scope || 'post'});
+        }
+
+        function replayWholeShow() {
+            if (!replayAllowed()) return;
+            if (!confirm('Переиграть весь спектакль с самого начала? Ответы придут заново — по нынешним теме, правилам и составу; прежние останутся в ДАМПе.')) return;
+            sendReplay({scope: 'show'});
+        }
+
+        function sendReplay(body) {
+            fetch('/api/replay', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                  body: JSON.stringify(body)})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) { alert('Переиграть не вышло: ' + (data.error || 'неизвестно почему')); return; }
+                    debateRunning = true;
+                    showFinished = false;
+                    finishRequested = false;
+                    // Ленту собираем заново, а не дорисовываем: переигранная реплика
+                    // встаёт на место прежней, а лишнее с ленты уходит
+                    rebuildFeed();
+                })
+                .catch(err => { console.error('Переигровка:', err); alert('Переиграть не вышло: ' + err.message); });
+        }
+
+        // Лента заново с сервера: примета того, что она уже не та, что была
+        function rebuildFeed() {
+            document.getElementById('posts').innerHTML = '';
+            lastPostCount = 0;
+            startPolling();
+            updatePosts();
+            updatePanel();
+        }
+
+        // Правка своей реплики — на месте самой реплики: слова человека — часть
+        // сцены, и править их в стороне от неё было бы странно
+        function startRestate(postId) {
+            if (!replayAllowed()) return;
+            const box = document.querySelector(`.post[data-post="${postId}"]`);
+            if (!box || box.querySelector('.restate-box')) return;
+            const text = box.querySelector('.post-text');
+            if (!text) return;
+            const holder = document.createElement('div');
+            holder.className = 'restate-box';
+            holder.innerHTML = `<textarea spellcheck="false"></textarea>`
+                + `<div class="restate-actions">`
+                + `<button class="post-action" onclick="saveRestate(${postId})">💾 Пересказать</button>`
+                + `<button class="post-action" onclick="cancelRestate(${postId})">Отмена</button>`
+                + `<span style="font-size:12px;color:#888;">Ctrl+Enter — сохранить. Ответы после этой реплики отвечали на прежние слова: их переигрывают отдельно.</span>`
+                + `</div>`;
+            const area = holder.querySelector('textarea');
+            area.value = box.getAttribute('data-restate') || '';
+            area.addEventListener('keydown', event => {
+                if (event.ctrlKey && event.key === 'Enter') { event.preventDefault(); saveRestate(postId); }
+            });
+            text.style.display = 'none';
+            text.parentNode.insertBefore(holder, text.nextSibling);
+            area.focus();
+        }
+
+        function cancelRestate(postId) {
+            const box = document.querySelector(`.post[data-post="${postId}"]`);
+            if (!box) return;
+            const holder = box.querySelector('.restate-box');
+            if (holder) holder.remove();
+            const text = box.querySelector('.post-text');
+            if (text) text.style.display = '';
+        }
+
+        function saveRestate(postId) {
+            const box = document.querySelector(`.post[data-post="${postId}"]`);
+            const area = box && box.querySelector('.restate-box textarea');
+            if (!area) return;
+            fetch(`/api/post/${postId}/restate`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                  body: JSON.stringify({content: area.value})})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) { alert('Не сохранилось: ' + (data.error || 'неизвестно почему')); return; }
+                    // Текст в ленте рисует сервер — тот же, что прочитают модели:
+                    // поэтому лента собирается заново, а не правится на месте
+                    rebuildFeed();
+                })
+                .catch(err => { console.error('Правка реплики:', err); alert('Не сохранилось: ' + err.message); });
         }
 
         // Черновик реплики: пока облачная модель говорит, текст растёт на глазах
