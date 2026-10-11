@@ -10004,6 +10004,50 @@ class TestPageScript(unittest.TestCase):
                                "Живо и по делу", "Живо и по делу", "", "▶", "⏸"],
                          "страница и театр читают пометку «на паузе» по-разному")
 
+    def test_the_previous_words_block_is_built_from_the_versions(self):
+        """Блок «прежние слова» — по версиям самой реплики (в node, как уедет).
+
+        Версии едут вместе с репликой (см. show.version_view): у реплики без
+        прежних слов блока нет вовсе, а у переигранной — своя строка на каждую
+        версию. Вернуть прежние слова предлагается только у своей реплики:
+        у модели за неё говорят заново (см. show.replay_plan_for).
+        """
+        mine = {"id": 4, "model_used": "human", "content": "Вторые слова",
+                "versions": [{"content": "Первые слова",
+                              "content_html": "<p>Первые слова</p>",
+                              "round": 2, "timestamp": "21:04",
+                              "display_name": "Элина", "why": "изменена"}]}
+        model = {"id": 5, "model_used": "local-one", "content": "Новый ответ",
+                 "versions": [{"content": "Прежний ответ",
+                               "content_html": "<p>Прежний ответ</p>",
+                               "round": 1, "timestamp": "20:01",
+                               "display_name": "Первый", "why": "переиграна"}]}
+        plain = {"id": 6, "model_used": "human", "content": "Без версий",
+                 "versions": []}
+        said = json.dumps(mine, ensure_ascii=False)
+        answered = json.dumps(model, ensure_ascii=False)
+        never = json.dumps(plain, ensure_ascii=False)
+
+        out = self._run_page(
+            ("escapeHtml", "versionsWord", "postVersionsHtml"),
+            f"postVersionsHtml({said})",
+            f"postVersionsHtml({answered})",
+            f"postVersionsHtml({never})",
+            "[versionsWord(1), versionsWord(2), versionsWord(5), versionsWord(11),"
+            " versionsWord(21)].join(' ')")
+
+        human_html, model_html, plain_html, words = out
+        self.assertEqual(plain_html, "", "блок есть и у реплики без прежних слов")
+        self.assertIn("🗂 прежние слова · 1 версия", human_html)
+        self.assertIn("Первые слова", human_html)
+        self.assertIn("Акт 2 · 21:04 · Элина · изменена", human_html)
+        self.assertIn("onclick=\"revertVersion(4, 0)\"", human_html,
+                      "вернуть прежние слова из ленты нечем")
+        self.assertIn("переиграна", model_html)
+        self.assertNotIn("revertVersion(5, 0)", model_html,
+                         "у реплики модели предлагают правку, которой у неё нет")
+        self.assertEqual(words, "версия версии версий версий версия")
+
 
 class TestRulesOnPause(unittest.TestCase):
     """Правило можно снять на раунд, не удаляя: оно ждёт своего часа в списке.
@@ -10417,7 +10461,7 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(play["posts"][2]["content"], old[2])
         self.assertEqual(len(play["posts"]), 3, "в ДАМПе задвоилась реплика")
 
-    def test_a_human_reply_can_be_restated(self):
+    def test_a_human_reply_can_be_edited(self):
         """Свою реплику можно изменить: слова другие, а место — то же.
 
         В ленте и в разговоре после этого стоят новые слова: по ним и строятся
@@ -10426,7 +10470,7 @@ class TestSayingItAgain(unittest.TestCase):
         """
         show.start_dump(self.session.topic)
         post = self._human("Сказано в первый раз.")
-        edited, problem = self.session.restate_post(post["id"], "Сказано во второй раз.")
+        edited, problem = self.session.edit_post(post["id"], "Сказано во второй раз.")
 
         self.assertEqual(problem, "")
         self.assertEqual(edited["content"], "Сказано во второй раз.")
@@ -10443,11 +10487,11 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(len(play["posts"]), 1, "в спектакле из ДАМПа задвоилась реплика")
         self.assertEqual(play["posts"][0]["content"], "Сказано во второй раз.")
 
-    def test_the_words_of_a_model_are_replayed_not_restated(self):
+    def test_the_words_of_a_model_are_replayed_not_edited(self):
         """Реплику модели правят переигровкой, а не правкой слов — за неё говорят заново."""
         self._play(1)
 
-        edited, problem = self.session.restate_post(1, "Что-нибудь своё")
+        edited, problem = self.session.edit_post(1, "Что-нибудь своё")
 
         self.assertIsNone(edited)
         self.assertIn("человека", problem)
@@ -10460,7 +10504,7 @@ class TestSayingItAgain(unittest.TestCase):
         show.start_dump(self.session.topic)
         post = self._human("Уже сказано.")
 
-        edited, problem = self.session.restate_post(post["id"], "   ")
+        edited, problem = self.session.edit_post(post["id"], "   ")
 
         self.assertIsNone(edited)
         self.assertIn("пустая", problem)
@@ -10573,13 +10617,13 @@ class TestSayingItAgain(unittest.TestCase):
         """В ленте у каждой реплики — свои кнопки: эту, акт целиком и изменить свою."""
         self.assertIn("${postActionsHtml(post)}", page.HTML_TEMPLATE,
                       "кнопок правки в реплике нет")
-        for control in ("replayPost", "replayWholeShow", "startRestate",
-                        "cancelRestate", "saveRestate", "rebuildFeed"):
+        for control in ("replayPost", "replayWholeShow", "startEdit",
+                        "cancelEdit", "saveEdit", "rebuildFeed"):
             with self.subTest(control=control):
                 self.assertIn(control, page.HTML_TEMPLATE, f"на странице нет {control}")
         self.assertIn("/api/replay", page.HTML_TEMPLATE,
                       "переигровка на странице никуда не отправляется")
-        self.assertIn("restate", page.HTML_TEMPLATE,
+        self.assertIn("/api/post/${postId}/edit", page.HTML_TEMPLATE,
                       "правка реплики на странице никуда не отправляется")
 
     def test_the_replay_button_is_shown_only_under_the_curtain(self):
@@ -10590,17 +10634,158 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertIn("replayBtn.style.display = canReplay", page.HTML_TEMPLATE,
                       "кнопка переигровки не прячется под идущим спектаклем")
 
-    def test_the_restate_route_gives_back_the_reply_as_it_was_said(self):
+    def test_the_edit_route_gives_back_the_reply_as_it_was_said(self):
         """Изменённая реплика возвращается в том же виде, в каком её увидят модели."""
         show.start_dump(self.session.topic)
         post = self._human("Прежние слова.")
 
-        answer = self.client.post(f"/api/post/{post['id']}/restate",
+        answer = self.client.post(f"/api/post/{post['id']}/edit",
                                   json={"content": "Новые слова."}).get_json()
 
         self.assertTrue(answer["success"], answer.get("error"))
         self.assertEqual(answer["post"]["content"], "Новые слова.")
         self.assertEqual(self.session.posts[0]["content"], "Новые слова.")
+
+    def test_the_previous_words_of_an_edited_reply_stay_in_the_feed(self):
+        """Изменённая реплика помнит прежние слова — блоком «прежние слова».
+
+        Слова человека не пропадают от того, что сказаны заново: прежняя версия
+        лежит рядом с репликой летописью, и по ней видно, чем реплика была
+        (см. show.version_view, page.postVersionsHtml).
+        """
+        show.start_dump(self.session.topic)
+        post = self._human("Сказано в первый раз.")
+
+        self.session.edit_post(post["id"], "Сказано во второй раз.")
+
+        versions = self.session.posts[0]["versions"]
+        self.assertEqual(len(versions), 1, "прежние слова пропали")
+        self.assertEqual(versions[0]["content"], "Сказано в первый раз.")
+        self.assertIn("Сказано в первый раз.", versions[0]["content_html"])
+        self.assertEqual(versions[0]["why"], "изменена")
+        # Версии едут странице вместе с репликой: отдельного запроса за ними нет
+        self.assertEqual(show.post_view(self.session.posts[0])["versions"], versions)
+
+    def test_the_previous_words_of_a_replayed_reply_go_to_the_feed(self):
+        """Переигранная реплика помнит прежний ответ — тем же блоком.
+
+        Прежний ответ остаётся в ДАМПе летописью, и та же летопись едет ленте:
+        иначе «прежние слова» были бы видны только в файле (см. held_versions,
+        add_post).
+        """
+        self._play(1)
+        old = self.session.posts[1]["content"]
+        plan, _held, problem = self.session.replay_plan_for(2, "post")
+        self.assertEqual(problem, "")
+
+        self._again(plan)
+
+        replayed = self.session.posts[1]
+        self.assertNotEqual(replayed["content"], old, "реплика не переиграна")
+        self.assertEqual([one["content"] for one in replayed["versions"]], [old],
+                         "прежний ответ пропал из ленты")
+        self.assertEqual(replayed["versions"][0]["why"], "переиграна")
+
+    def test_the_previous_words_come_back_from_the_dump(self):
+        """Летопись версий — в самом ДАМПе: перезапуск театра её не теряет.
+
+        Прежние слова собираются по отметкам о переигранном (см. dump_replayed),
+        и с каждой переигровкой список растёт: переигранная дважды реплика
+        помнит обе прежние версии (см. parse_dump, remember_version).
+        """
+        self._play(1)
+        first = self.session.posts[1]["content"]
+        plan, _held, _problem = self.session.replay_plan_for(2, "post")
+        self._again(plan)
+        second = self.session.posts[1]["content"]
+        plan, _held, _problem = self.session.replay_plan_for(2, "post")
+        self._again(plan)
+        third = self.session.posts[1]["content"]
+
+        play = self._dump()
+
+        self.assertEqual(len(play["posts"]), 3, "в спектакле из ДАМПа задвоилась реплика")
+        self.assertEqual(play["posts"][1]["content"], third)
+        self.assertEqual([one["content"] for one in play["posts"][1]["versions"]],
+                         [first, second],
+                         "ДАМП помнит не все прежние версии реплики")
+
+    def test_the_revert_route_gives_back_the_previous_words(self):
+        """Возврат ставит прежние слова на место, а нынешние отдаёт летописи.
+
+        Место и номер реплики при этом не меняются, а по версиям можно ходить
+        в обе стороны: в ленте и в ДАМПе остаются и те слова, к которым
+        вернулись, и те, что были сейчас (см. show.revert_version).
+        """
+        show.start_dump(self.session.topic)
+        post = self._human("Первые слова.")
+        self.client.post(f"/api/post/{post['id']}/edit",
+                         json={"content": "Вторые слова."}).get_json()
+
+        answer = self.client.post(f"/api/post/{post['id']}/revert",
+                                  json={"version": 0}).get_json()
+
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertEqual(answer["post"]["content"], "Первые слова.")
+        self.assertEqual(answer["post"]["id"], post["id"],
+                         "вернувшиеся слова встали не на своё место")
+        self.assertEqual(self.session.conversation_history[-1]["content"],
+                         "Первые слова.",
+                         "модели прочитали бы не то, что стоит в ленте")
+        self.assertEqual([one["content"] for one in answer["post"]["versions"]],
+                         ["Первые слова.", "Вторые слова."],
+                         "летопись версий идёт не тем порядком")
+        # Читается из ДАМПа то же самое — в театре и в файле одна летопись
+        play = self._dump()
+        self.assertEqual(play["posts"][0]["content"], "Первые слова.")
+        self.assertEqual([one["content"] for one in play["posts"][0]["versions"]],
+                         ["Первые слова.", "Вторые слова."],
+                         "в ДАМПе летопись версий другая, чем в ленте")
+
+    def test_the_revert_route_says_what_is_missing(self):
+        """Возвращать нечего или некому — так и говорится, без намёков.
+
+        Прежних слов может не быть вовсе (реплику не меняли), номер версии
+        может быть не тот, а у реплики модели правки нет: за неё говорят
+        заново — переигровкой.
+        """
+        show.start_dump(self.session.topic)
+        post = self._human("Сказано однажды.")
+
+        answer = self.client.post(f"/api/post/{post['id']}/revert",
+                                  json={"version": 0}).get_json()
+
+        self.assertFalse(answer["success"])
+        self.assertIn("прежних слов", answer["error"])
+        self.assertEqual(self.session.posts[0]["content"], "Сказано однажды.")
+
+        self._play(1)
+        model_post = self.session.posts[1]
+        answer = self.client.post(f"/api/post/{model_post['id']}/revert",
+                                  json={"version": 0}).get_json()
+        self.assertFalse(answer["success"])
+        self.assertIn("человека", answer["error"])
+
+        self.session.running = True
+        answer = self.client.post(f"/api/post/{model_post['id']}/revert",
+                                  json={"version": 0}).get_json()
+        self.session.running = False
+        self.assertFalse(answer["success"])
+        self.assertIn("спектакль идёт", answer["error"])
+
+    def test_the_page_carries_the_previous_words_block(self):
+        """Блок «прежние слова» есть у реплики в ленте, и вернуть версию — тоже."""
+        for control in ("postVersionsHtml", "versionsWord", "revertVersion"):
+            with self.subTest(control=control):
+                self.assertIn(control, page.HTML_TEMPLATE, f"на странице нет {control}")
+        self.assertIn("${postVersionsHtml(post)}", page.HTML_TEMPLATE,
+                      "в реплике нет блока прежних слов")
+        self.assertIn("/api/post/${postId}/revert", page.HTML_TEMPLATE,
+                      "возврат версии на странице никуда не отправляется")
+        self.assertIn("onclick=\"revertVersion(${post.id}, ${index})\"",
+                      page.HTML_TEMPLATE,
+                      "вернуть прежние слова из ленты нечем")
+        self.assertIn("прежние слова", page.HTML_TEMPLATE)
 
 
 if __name__ == "__main__":

@@ -145,12 +145,30 @@ HTML_TEMPLATE = """
         body.dark .post-action:hover { background: #e8e8e8; color: #111111; }
         /* Правка своей реплики идёт на месте самой реплики: слова человека —
            часть сцены, и править их в стороне от неё было бы странно */
-        .restate-box { margin-top: 12px; }
-        .restate-box textarea { width: 100%; box-sizing: border-box; min-height: 90px; padding: 8px 10px;
+        .edit-box { margin-top: 12px; }
+        .edit-box textarea { width: 100%; box-sizing: border-box; min-height: 90px; padding: 8px 10px;
                                 border: 2px solid #000000; font-family: Georgia, serif; font-size: 15px; line-height: 1.6; }
-        body.dark .restate-box textarea { background: #1c1c1c; color: #e8e8e8; border-color: #6f6f6f; }
-        .restate-actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
-        .restate-actions .post-action { font-size: 13px; padding: 6px 14px; }
+        body.dark .edit-box textarea { background: #1c1c1c; color: #e8e8e8; border-color: #6f6f6f; }
+        .edit-actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+        .edit-actions .post-action { font-size: 13px; padding: 6px 14px; }
+        /* Прежние слова реплики: то, что она говорила до правки или переигровки.
+           Свёрнуто по умолчанию — это летопись, а не то, за чем пришёл зритель,
+           но она у каждой реплики своя и никуда не девается (см. show.version_view) */
+        .post-versions { margin: 0 0 18px 0; padding: 10px 16px; border-left: 2px solid #d8cdb8; background: #fcfaf5;
+                         font-size: 15px; line-height: 1.6; }
+        .post-versions summary { cursor: pointer; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: #9a8f78; }
+        .post-versions[open] summary { margin-bottom: 8px; }
+        .post-versions .versions-hint { font-size: 13px; color: #9a9a9a; margin-bottom: 8px; }
+        .post-versions .version-head { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #9a8f78; margin: 12px 0 4px 0; }
+        .post-versions .version-words { white-space: pre-wrap; word-wrap: break-word; font-size: 14px; color: #555555;
+                                        padding-left: 10px; border-left: 1px solid #e4dccb; }
+        .post-versions .version-empty { color: #9a9a9a; font-style: italic; }
+        .post-versions .version-action { margin-top: 6px; }
+        body.dark .post-versions { background: #141210; border-left-color: #4a4230; }
+        body.dark .post-versions summary { color: #9a8f78; }
+        body.dark .post-versions .versions-hint { color: #7a7a7a; }
+        body.dark .post-versions .version-head { color: #9a8f78; }
+        body.dark .post-versions .version-words { color: #bdbdbd; border-left-color: #3a352a; }
         /* Мысли модели: то, что она говорит сама с собой, пока не сказала вслух.
            Мелче и бледнее реплики: это не сказанное, а процесс. Свёрткой можно
            убрать их с глаз — но по умолчанию они видны, они уже оплачены */
@@ -2837,6 +2855,51 @@ HTML_TEMPLATE = """
                 + `<div class="prompt-body"></div></details>`;
         }
 
+        // Склонение слова «версия»: число бывает любым, а «2 версий» читается
+        // как опечатка
+        function versionsWord(count) {
+            const many = count % 100, few = count % 10;
+            if (many > 10 && many < 20) return 'версий';
+            if (few === 1) return 'версия';
+            if (few >= 2 && few <= 4) return 'версии';
+            return 'версий';
+        }
+
+        // Прежние слова реплики — свёрнутым блоком: реплика правилась или
+        // переигрывалась, и прежнее не пропало, а лежит летописью
+        // (см. show.version_view). Версии приходят вместе с репликой: их
+        // немного, и отдельного запроса к ДАМПу ради них не нужно (см. post_view)
+        function postVersionsHtml(post) {
+            const versions = post.versions || [];
+            if (!versions.length) return '';
+            const mine = post.model_used === 'human';
+            const body = versions.map((one, index) => {
+                // Летопись растёт только вперёд: в ней остаются и те слова,
+                // к которым реплика вернулась, — поэтому у прежней версии,
+                // совпавшей с нынешними словами, это сказано прямо
+                const is_current = one.content === (post.content || '');
+                const head = [one.round ? `Акт ${one.round}` : '', one.timestamp,
+                              one.display_name, one.why,
+                              is_current ? 'эти же слова в реплике сейчас' : ''
+                              ].filter(Boolean).join(' · ');
+                const words = one.content
+                    ? `<div class="version-words">${one.content_html || escapeHtml(one.content)}</div>`
+                    : '<div class="version-words version-empty">слов в этой версии не было</div>';
+                // Вернуть прежние слова — только у своей реплики: у модели за неё
+                // говорят заново, переигровкой (см. postActionsHtml)
+                const back = mine ? `<div class="version-action"><button class="post-action"`
+                    + ` title="Вернуть реплике эти слова: место и номер останутся её же, а нынешние слова лягут в «прежние» — по версиям можно ходить в обе стороны"`
+                    + ` onclick="revertVersion(${post.id}, ${index})">↩ вернуть эти слова</button></div>` : '';
+                return `<div class="version-head">Версия ${index + 1} из ${versions.length} · ${head}</div>`
+                    + words + back;
+            }).join('');
+            return `<details class="post-versions" data-post-id="${post.id}">`
+                + `<summary>🗂 прежние слова · ${versions.length} ${versionsWord(versions.length)}</summary>`
+                + '<div class="versions-hint">То, что эта реплика говорила прежде. '
+                + 'Прежние слова остаются и в ДАМПе — летописью.</div>'
+                + body + '</details>';
+        }
+
         // Приложенное к реплике — прямо над текстом: без этого непонятно, о чём
         // реплика, к которой приложена картинка. По клику она разворачивается
         // целиком — как и любой другой портрет (см. showAvatarFull)
@@ -2871,11 +2934,11 @@ HTML_TEMPLATE = """
             // Класс роли нужен для цветной полосы слева (см. body.role-marks)
             postDiv.className = `post post-role-${post.role || 'participant'}`;
             // Номер и слова реплики — приметами на самом элементе: по ним её
-            // находят кнопки правки (см. startRestate), а текст берётся тот же,
+            // находят кнопки правки (см. startEdit), а текст берётся тот же,
             // что лежит в ленте, а не пересказанный разметкой
             postDiv.setAttribute('data-post', post.id);
-            postDiv.setAttribute('data-restate', post.content || '');
-            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}${postAttachmentsHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${searchInfo}${postActionsHtml(post)}</div>`;
+            postDiv.setAttribute('data-post-text', post.content || '');
+            postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}${postAttachmentsHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${postVersionsHtml(post)}${searchInfo}${postActionsHtml(post)}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
             // Отчёт о ходе спрашиваем только когда его открыли: событие toggle
@@ -2909,7 +2972,7 @@ HTML_TEMPLATE = """
                 + (act ? `<button class="post-action" title="${REPLAY_HINT} Акт целиком — все его реплики, с начала акта ${act}"
                     onclick="replayPost(${post.id}, 'round')">🔁 акт ${act}</button>` : '')
                 + (mine ? `<button class="post-action" title="Изменить свою реплику: слова в ленте и в разговоре станут другими, а номер и место останутся теми же. Ответы после неё отвечали на прежние слова — их переигрывают отдельно"
-                    onclick="startRestate(${post.id})">✍️ изменить</button>` : '')
+                    onclick="startEdit(${post.id})">✍️ изменить</button>` : '')
                 + `</div>`;
         }
 
@@ -2980,44 +3043,44 @@ HTML_TEMPLATE = """
         // сцены, и менять их в стороне от неё было бы странно.
         // «Пересказать» тут было бы неправдой: это не пересказ, а та же реплика
         // другими словами — и кнопка так и называется (см. postActionsHtml)
-        function startRestate(postId) {
+        function startEdit(postId) {
             if (!replayAllowed()) return;
             const box = document.querySelector(`.post[data-post="${postId}"]`);
-            if (!box || box.querySelector('.restate-box')) return;
+            if (!box || box.querySelector('.edit-box')) return;
             const text = box.querySelector('.post-text');
             if (!text) return;
             const holder = document.createElement('div');
-            holder.className = 'restate-box';
+            holder.className = 'edit-box';
             holder.innerHTML = `<textarea spellcheck="false"></textarea>`
-                + `<div class="restate-actions">`
-                + `<button class="post-action" onclick="saveRestate(${postId})">💾 Изменить</button>`
-                + `<button class="post-action" onclick="cancelRestate(${postId})">Отмена</button>`
+                + `<div class="edit-actions">`
+                + `<button class="post-action" onclick="saveEdit(${postId})">💾 Изменить</button>`
+                + `<button class="post-action" onclick="cancelEdit(${postId})">Отмена</button>`
                 + `<span style="font-size:12px;color:#888;">Ctrl+Enter — сохранить. Ответы после этой реплики отвечали на прежние слова: их переигрывают отдельно.</span>`
                 + `</div>`;
             const area = holder.querySelector('textarea');
-            area.value = box.getAttribute('data-restate') || '';
+            area.value = box.getAttribute('data-post-text') || '';
             area.addEventListener('keydown', event => {
-                if (event.ctrlKey && event.key === 'Enter') { event.preventDefault(); saveRestate(postId); }
+                if (event.ctrlKey && event.key === 'Enter') { event.preventDefault(); saveEdit(postId); }
             });
             text.style.display = 'none';
             text.parentNode.insertBefore(holder, text.nextSibling);
             area.focus();
         }
 
-        function cancelRestate(postId) {
+        function cancelEdit(postId) {
             const box = document.querySelector(`.post[data-post="${postId}"]`);
             if (!box) return;
-            const holder = box.querySelector('.restate-box');
+            const holder = box.querySelector('.edit-box');
             if (holder) holder.remove();
             const text = box.querySelector('.post-text');
             if (text) text.style.display = '';
         }
 
-        function saveRestate(postId) {
+        function saveEdit(postId) {
             const box = document.querySelector(`.post[data-post="${postId}"]`);
-            const area = box && box.querySelector('.restate-box textarea');
+            const area = box && box.querySelector('.edit-box textarea');
             if (!area) return;
-            fetch(`/api/post/${postId}/restate`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+            fetch(`/api/post/${postId}/edit`, {method: 'POST', headers: {'Content-Type': 'application/json'},
                                                   body: JSON.stringify({content: area.value})})
                 .then(r => r.json())
                 .then(data => {
@@ -3027,6 +3090,25 @@ HTML_TEMPLATE = """
                     rebuildFeed();
                 })
                 .catch(err => { console.error('Правка реплики:', err); alert('Не сохранилось: ' + err.message); });
+        }
+
+        // Вернуть реплике прежние слова — той же правкой, только слова берутся
+        // из летописи (см. show.revert_version). Спрашиваем подтверждение: это
+        // тоже правка сказанного, и без него клик по «↩ вернуть» менял бы слова
+        // молча, хотя человек мог просто разглядывать прежние версии
+        function revertVersion(postId, version) {
+            if (!replayAllowed()) return;
+            if (!confirm('Вернуть реплике прежние слова? Место и номер останутся её же, а нынешние слова лягут в «прежние»; ДАМП допишется.')) return;
+            fetch(`/api/post/${postId}/revert`, {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                 body: JSON.stringify({version: version})})
+                .then(r => r.json())
+                .then(data => {
+                    if (!data.success) { alert('Не вернулось: ' + (data.error || 'неизвестно почему')); return; }
+                    // Слова в ленте рисует сервер — тот же, что прочитают модели:
+                    // поэтому лента собирается заново, а не правится на месте
+                    rebuildFeed();
+                })
+                .catch(err => { console.error('Возврат версии:', err); alert('Не вернулось: ' + err.message); });
         }
 
         // Черновик реплики: пока облачная модель говорит, текст растёт на глазах

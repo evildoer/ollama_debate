@@ -676,6 +676,40 @@ def post_view(post: dict) -> dict:
     return view
 
 
+def version_view(post: dict) -> dict:
+    """Прежняя версия реплики — для блока «прежние слова» (см. post["versions"]).
+
+    Лежит ровно то, чем версия была: слова, акт, время и говорящий. Отдельной
+    копией, а не ссылкой на саму реплику: реплика остаётся в ленте и меняется
+    дальше, а список версий — летопись, и меняться вместе с ней он не должен.
+
+    «Почему» названо по тому, кто говорил: слова человека правят (см. edit_post,
+    revert_version), а ответ модели переигрывают (см. replay_plan_for). Обе
+    версии оплачены, и обе остаются — поэтому у каждой и есть своё имя.
+    """
+    human = post.get("model_used") == "human"
+    content = post.get("content") or ""
+    return {
+        "content": content,
+        "content_html": post.get("content_html") or text.markdown_to_html(content),
+        "timestamp": post.get("timestamp") or "",
+        "round": int(post.get("round") or 0),
+        "display_name": post.get("display_name") or "",
+        "model_used": post.get("model_used") or "",
+        "why": "изменена" if human else "переиграна",
+    }
+
+
+def remember_version(post: dict) -> list:
+    """Летопись версий реплики: прежние слова — к тем, что уже были.
+
+    Список растёт с каждой правкой и переигровкой, старые версии впереди:
+    по нему видно, из чего реплика сложилась, и к любой из версий можно
+    вернуться (см. version_view, revert_version, parse_dump).
+    """
+    return list(post.get("versions") or []) + [version_view(post)]
+
+
 def added_purpose(summary: dict, added: list) -> str:
     """Из чего сложился дописанный хвост — теми же словами, что в ленте.
 
@@ -940,8 +974,8 @@ def dump_replayed(ids: list) -> None:
 
     Файл дописывается, а не переписывается (см. start_dump), поэтому переигранная
     реплика остаётся в нём такой, какой была сказана: рядом с ней ложится отметка,
-    что её переиграли, а ниже — новая запись с тем же номером (см. replay_post,
-    restate_post). Читается последнее (см. parse_dump), поэтому запись остаётся
+    что её переиграли, а ниже — новая запись с тем же номером (см. add_post,
+    edit_post). Читается последнее (см. parse_dump), поэтому запись остаётся
     и летописью правок, и текущим спектаклем, а тема с картинками не теряется
     вовсе: она лежит в тех же строках файла.
     """
@@ -1316,6 +1350,18 @@ def start_dump(topic: str, keep: bool = False) -> None:
             encoding="utf-8")
     except Exception as e:
         print(f"  ⚠️  Не открывается {settings.DUMP_FILE.name}: {e}")
+
+
+def dump_new_version(post: dict) -> None:
+    """Новая версия реплики — в ДАМП, на прежнем месте.
+
+    Так ложатся и правка слова человека, и возврат прежней версии: отметка
+    говорит читающему, что запись выше — уже не реплика, а сама запись встаёт
+    тем же номером (см. dump_replayed, parse_dump). Поэтому в спектакле
+    остаётся одно место, а в файле — обе версии.
+    """
+    dump_replayed([int(post.get("id") or 0)])
+    save_dump_entry(post)
 
 
 def save_dump_entry(post: dict, turn: dict = None) -> None:
@@ -1963,15 +2009,21 @@ def _parse_record(post_id: int, rest: str, body: list, faces: dict = None,
 
 def _add_record(current: tuple, body: list, posts: list, turns: dict,
                 faces: dict = None, pictures: dict = None, store: bool = False,
-                slot: int = None) -> None:
+                slot: int = None, versions: list = None) -> None:
     """Одна запись — в спектакль: реплика всегда, отчёт о ходе — если он был.
 
     slot — место, с которого эта запись была убрана как переигранная: сказанное
     заново встаёт ровно на своё место, а не в конец ленты (см. dump_replayed,
     parse_dump). Без него запись дописывается в конец — как и раньше.
+
+    versions — прежние слова этой реплики, собранные по отметкам о переигранном
+    (см. parse_dump). У реплики, которая ни разу не менялась, их нет вовсе —
+    и блока «прежние слова» у неё тогда тоже нет.
     """
     post_id, rest = current
     record = _parse_record(post_id, rest, body, faces, pictures, store)
+    if versions:
+        record["post"]["versions"] = list(versions)
     if slot is None:
         posts.append(record["post"])
     else:
@@ -2042,14 +2094,15 @@ def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dic
     # Картинки разбираются до записей: реплика ссылается на адрес, а данные
     # к нему лежат ниже в том же файле (см. _pictures_in_dump)
     pictures = _pictures_in_dump(lines, store)
-    posts, turns, slots = [], {}, {}
+    posts, turns, slots, versions = [], {}, {}, {}
     current, body = None, []
     for line in lines:
         found = _RECORD_RE.match(line)
         if found:
             if current is not None:
                 _add_record(current, body, posts, turns, faces, pictures, store,
-                            slot=slots.pop(current[0], None))
+                            slot=slots.pop(current[0], None),
+                            versions=versions.pop(current[0], None))
             current, body = (int(found.group(1)), found.group(2)), []
             continue
         gone = _REPLAYED_RE.match(line)
@@ -2059,7 +2112,8 @@ def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dic
             # прежний ответ остался бы в спектакле рядом с новым
             if current is not None:
                 _add_record(current, body, posts, turns, faces, pictures, store,
-                            slot=slots.pop(current[0], None))
+                            slot=slots.pop(current[0], None),
+                            versions=versions.pop(current[0], None))
                 current, body = None, []
             # Переигранные: прежние записи этих номеров убираются из спектакля,
             # а новые стоят ниже и остаются (см. dump_replayed). Место каждой
@@ -2067,9 +2121,16 @@ def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dic
             # место, а не в конец ленты
             drop = {int(one) for one in re.findall(r"\d+", gone.group("ids"))}
             for post in [one for one in posts if int(one.get("id") or 0) in drop]:
-                slots[int(post.get("id") or 0)] = posts.index(post)
+                key = int(post.get("id") or 0)
+                # Прежние слова убранной реплики не пропадают: они остаются
+                # летописью, и её отдаёт лента блоком «прежние слова»
+                # (см. version_view, page.postVersionsHtml). Собирается она
+                # вместе с прежними версиями этой же реплики: переигранная
+                # дважды, она помнит обе (см. remember_version)
+                versions[key] = remember_version(post)
+                slots[key] = posts.index(post)
                 posts.remove(post)
-                turns.pop(int(post.get("id") or 0), None)
+                turns.pop(key, None)
             continue
         if line.startswith("**Продолжение"):
             # Шапка продолжения — не текст записи, а граница: она дописывается
@@ -2079,14 +2140,16 @@ def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dic
             # читалась бы последним «> »-блоком записи — то есть картинкой
             if current is not None:
                 _add_record(current, body, posts, turns, faces, pictures, store,
-                            slot=slots.pop(current[0], None))
+                            slot=slots.pop(current[0], None),
+                            versions=versions.pop(current[0], None))
                 current, body = None, []
             continue
         if current is not None:
             body.append(line)
     if current is not None:
         _add_record(current, body, posts, turns, faces, pictures, store,
-                    slot=slots.pop(current[0], None))
+                    slot=slots.pop(current[0], None),
+                    versions=versions.pop(current[0], None))
     if not posts:
         return None
     return {
@@ -3379,6 +3442,12 @@ class DebateSession:
         # рвётся (см. plan_replay и replay_broken_turn). Решается это на старте
         # продолжения, а играется там же, где и сам спектакль — первым делом
         self.replay_plan = None
+        # Прежние слова отложенных реплик: переигранная реплика встаёт тем же
+        # номером, и её прежние слова должны остаться летописью, а не пропасть
+        # (см. hold_from, add_post). Наполняется откладыванием ленты перед
+        # переигровкой, а пустеет, как только переигровка кончилась (см.
+        # return_held)
+        self.held_versions = {}
         # Сцена: места состава без имён, аватаров и личных инструкций — роли,
         # модели, порядок и числа. None значит «своей сцены нет»: места берутся
         # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
@@ -3528,7 +3597,7 @@ class DebateSession:
 
         Отдельным заведением, потому что спрашивают её в двух случаях: когда
         спектакль продолжается (см. start_show) и когда сказанное переигрывают
-        или правят (см. replay_plan_for, restate_post). Строки у них одни и те же,
+        или правят (см. replay_plan_for, edit_post). Строки у них одни и те же,
         а разойтись эти два места не должны.
 
         Приложенное едет вместе с репликой: в ДАМПе лежат адреса картинок
@@ -3664,6 +3733,9 @@ class DebateSession:
             if key in self.turn_log:
                 held["turns"][key] = self.turn_log.pop(key)
         self.posts = kept
+        # Прежние слова отложенных реплик держатся отдельно: переигранная встанет
+        # тем же номером (см. add_post), и по ним видно, что́ она говорила прежде
+        self.held_versions = {int(one.get("id") or 0): one for one in held["posts"]}
         self.conversation_history = self.history_from_posts()
         # Акт — по оставшемуся: переигранное продолжает спектакль с этого места,
         # а не начинает новый
@@ -3693,6 +3765,9 @@ class DebateSession:
         if back:
             self.conversation_history = self.history_from_posts()
             self.restore_shown_pictures()
+        # Отложенное больше не ждёт: то, чего переигровка не коснулась, вернулось
+        # на своё место, и прежними словами его летопись не ведут (см. add_post)
+        self.held_versions = {}
         return len(back)
 
     def replay_plan_for(self, post_id, scope: str = "post") -> tuple:
@@ -3775,7 +3850,7 @@ class DebateSession:
         # Оборванный ход тут не при чём: ленту переигрывают, а не возвращают
         self.replay_plan = None
 
-    def restate_post(self, post_id, content) -> tuple:
+    def edit_post(self, post_id, content) -> tuple:
         """Изменить реплику человека: слова другие, а место — то же.
 
         Ответы, которые шли после неё, отвечали на прежние слова: чтобы модель
@@ -3796,13 +3871,59 @@ class DebateSession:
         said = str(content or "").strip()
         if not said and not post.get("attachments"):
             return None, "пустая реплика: сказать нечего"
+        # Прежние слова остаются летописью — и в ДАМПе, и в ленте: к ним можно
+        # вернуться (см. version_view, revert_version)
+        post["versions"] = remember_version(post)
         post["content"] = said
         post["content_html"] = text.markdown_to_html(said)
         self.conversation_history = self.history_from_posts()
-        dump_replayed([int(post.get("id") or 0)])
-        save_dump_entry(post)
+        dump_new_version(post)
         print(f"✍️  Реплика человека №{post['id']} изменена: "
               f"{len(said)} знаков")
+        return post, ""
+
+    def revert_version(self, post_id, version_index) -> tuple:
+        """Вернуть реплике прежние слова — те, что лежат в её летописи.
+
+        Возврат — это та же правка, только слова берутся не из формы, а из
+        «прежних слов» (см. version_view): место и номер реплики остаются её
+        же, а в ленте и в разговоре снова стоят прежние слова. Нынешние слова
+        при этом не пропадают — они ложатся в ту же летопись, — поэтому по
+        версиям можно ходить в обе стороны, а в ДАМПе остаются обе записи
+        (см. dump_new_version).
+
+        Только для реплики человека: за модель говорят заново — её
+        переигрывают (см. replay_plan_for).
+
+        Возвращает (реплика, беда): беда не пустая — возвращать нечего.
+        """
+        index = self.index_of(post_id)
+        if index is None:
+            return None, f"реплики №{post_id} в ленте нет"
+        post = self.posts[index]
+        if post.get("model_used") != "human":
+            return None, ("вернуть прежние слова можно реплике человека: "
+                          "у модели её переигрывают")
+        versions = list(post.get("versions") or [])
+        try:
+            version_index = int(version_index)
+        except (TypeError, ValueError):
+            version_index = -1
+        if not 0 <= version_index < len(versions):
+            return None, (f"прежних слов у реплики №{post_id} столько нет: "
+                          f"просят версию №{version_index + 1}, а их {len(versions)}")
+        was = versions[version_index]
+        # Нынешние слова ложатся в летопись — тем же порядком, что и при правке:
+        # список растёт только вперёд, и ДАМП читает его так же (см. parse_dump).
+        # Вернувшаяся версия в нём остаётся: эти слова реплика и вправду
+        # говорила прежде — просто теперь они и есть реплика
+        post["versions"] = remember_version(post)
+        post["content"] = str(was.get("content") or "")
+        post["content_html"] = text.markdown_to_html(post["content"])
+        self.conversation_history = self.history_from_posts()
+        dump_new_version(post)
+        print(f"↩️  Реплика человека №{post['id']} вернулась к версии "
+              f"{version_index + 1}: {len(post['content'])} знаков")
         return post, ""
 
     def new_show(self):
@@ -3867,6 +3988,14 @@ class DebateSession:
                           avatar_url, avatar_emoji, search_count, search_queries, role,
                           gender, thinking, sketch, turn, attachments, public_judge)
         self.posts.append(post)
+
+        # Прежние слова этой реплики отложены переигровкой (см. hold_from): они
+        # остаются летописью и едут странице блоком «прежние слова»
+        # (см. version_view). Это отдельно от отметки в ДАМПе: у человека она
+        # пишется ниже и здесь же, а у модели — самим ходом (см. handle_ai_turn)
+        was = self.held_versions.pop(int(post.get("id") or 0), None)
+        if was is not None:
+            post["versions"] = remember_version(was)
 
         if content.strip() or attachments:
             # Приложенная картинка — часть реплики: и в истории диалога она

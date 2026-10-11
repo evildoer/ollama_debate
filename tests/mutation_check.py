@@ -1827,9 +1827,12 @@ BUGS = {
          "            dump_replayed([])"),
     ],
     "изменённая реплика снова ложится в ДАМП без отметки": [
+        # Правка и возврат версии пишут в ДАМП одним заведением (см.
+        # dump_new_version), и правка без отметки делает из этой же реплики
+        # две — одну для модели, другую для читателя
         ("aitheatre/show.py",
-         '        dump_replayed([int(post.get("id") or 0)])',
-         "        dump_replayed([])"),
+         '    dump_replayed([int(post.get("id") or 0)])\n    save_dump_entry(post)',
+         "    dump_replayed([])\n    save_dump_entry(post)"),
     ],
     "отложенное снова не возвращается в ленту": [
         ("aitheatre/show.py",
@@ -1938,6 +1941,52 @@ BUGS = {
         ("aitheatre/page.py",
          "            return {show: fresh && (direct || !first), stamp: stamp, info: info};",
          "            return {show: fresh, stamp: stamp, info: info};"),
+    ],
+    "прежние слова снова пропадают при правке реплики": [
+        ("aitheatre/show.py",
+         '        # Прежние слова остаются летописью — и в ДАМПе, и в ленте: к ним можно\n'
+         '        # вернуться (см. version_view, revert_version)\n'
+         '        post["versions"] = remember_version(post)\n'
+         '        post["content"] = said',
+         '        post["content"] = said'),
+    ],
+    "прежние слова снова пропадают при переигровке": [
+        ("aitheatre/show.py",
+         '        was = self.held_versions.pop(int(post.get("id") or 0), None)\n'
+         '        if was is not None:\n'
+         '            post["versions"] = remember_version(was)',
+         '        was = None\n'
+         '        if was is not None:\n'
+         '            post["versions"] = remember_version(was)'),
+    ],
+    "летопись версий снова теряется при чтении ДАМПа": [
+        ("aitheatre/show.py",
+         "                versions[key] = remember_version(post)",
+         "                versions[key] = []"),
+    ],
+    "возврат версии снова не проверяет, есть ли такие прежние слова": [
+        ("aitheatre/show.py",
+         "        if not 0 <= version_index < len(versions):",
+         "        if False:"),
+    ],
+    "вернуть прежние слова снова можно и реплике модели": [
+        ("aitheatre/show.py",
+         '        if post.get("model_used") != "human":\n'
+         '            return None, ("вернуть прежние слова можно реплике человека: "\n'
+         '                          "у модели её переигрывают")',
+         '        if False:\n'
+         '            return None, ("вернуть прежние слова можно реплике человека: "\n'
+         '                          "у модели её переигрывают")'),
+    ],
+    "страница снова не строит блок прежних слов": [
+        ("aitheatre/page.py",
+         "            if (!versions.length) return '';",
+         "            if (true) return '';"),
+    ],
+    "у реплики модели снова предлагают вернуть прежние слова": [
+        ("aitheatre/page.py",
+         "                const back = mine ? `<div class=\"version-action\"><button class=\"post-action\"`",
+         "                const back = true ? `<div class=\"version-action\"><button class=\"post-action\"`"),
     ],
 }
 

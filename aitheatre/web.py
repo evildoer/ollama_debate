@@ -677,8 +677,8 @@ def replay_said():
                     "total_posts": len(show.session.posts)})
 
 
-@app.route('/api/post/<int:post_id>/restate', methods=['POST'])
-def restate_post(post_id):
+@app.route('/api/post/<int:post_id>/edit', methods=['POST'])
+def edit_post(post_id):
     """Изменить реплику человека — пригодится перед переигровкой следующей.
 
     Сказанное человеком — такая же часть спектакля, как ответ модели, и правится
@@ -690,7 +690,29 @@ def restate_post(post_id):
         return jsonify({"success": False,
                         "error": "спектакль идёт — правят под занавесом"})
     data = request.get_json(silent=True) or {}
-    post, problem = show.session.restate_post(post_id, data.get("content", ""))
+    post, problem = show.session.edit_post(post_id, data.get("content", ""))
+    if problem:
+        return jsonify({"success": False, "error": problem})
+    return jsonify({"success": True, "post": show.post_view(post),
+                    "total_posts": len(show.session.posts)})
+
+
+@app.route('/api/post/<int:post_id>/revert', methods=['POST'])
+def revert_post(post_id):
+    """Вернуть реплике прежние слова — из её же летописи (см. show.version_view).
+
+    Тело: {"version": 0} — номер прежней версии, как их показывает лента
+    (блок «прежние слова»). Это та же правка, что и /api/post/<id>/edit, только
+    слова берутся не из формы, а из летописи: место и номер реплики остаются
+    её же, а нынешние слова ложатся в летопись — поэтому по версиям можно
+    ходить и назад, и вперёд. Реплику модели так не вернуть: за неё говорят
+    заново, переигровкой (см. /api/replay).
+    """
+    if show.session.running:
+        return jsonify({"success": False,
+                        "error": "спектакль идёт — правят под занавесом"})
+    data = request.get_json(silent=True) or {}
+    post, problem = show.session.revert_version(post_id, data.get("version"))
     if problem:
         return jsonify({"success": False, "error": problem})
     return jsonify({"success": True, "post": show.post_view(post),
