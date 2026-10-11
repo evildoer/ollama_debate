@@ -10028,7 +10028,9 @@ class TestPageScript(unittest.TestCase):
                 "versions": [{"content": "Первые слова",
                               "content_html": "<p>Первые слова</p>",
                               "round": 2, "timestamp": "21:04",
-                              "display_name": "Элина", "why": "изменена"}]}
+                              "display_name": "Элина", "why": "изменена",
+                              "attachments": [{"name": "схема.png",
+                                               "url": "/uploads/abc.png"}]}]}
         model = {"id": 5, "model_used": "local-one", "content": "Новый ответ",
                  "versions": [{"content": "Прежний ответ",
                                "content_html": "<p>Прежний ответ</p>",
@@ -10043,7 +10045,7 @@ class TestPageScript(unittest.TestCase):
         out = self._run_page(
             ("escapeHtml", "versionsWord", "pluralForm", "pluralText",
              "versionWords", "versionDiff", "diffWordsHtml", "versionDiffHtml",
-             "postVersionsHtml"),
+             "versionPicturesHtml", "postVersionsHtml"),
             f"postVersionsHtml({said})",
             f"postVersionsHtml({answered})",
             f"postVersionsHtml({never})",
@@ -10066,7 +10068,45 @@ class TestPageScript(unittest.TestCase):
                          "в блоке прежних слов снова переигрывают с них самих")
         self.assertNotIn("переиграть с этих слов", human_html + model_html,
                          "кнопка переигровки с прежних слов вернулась в блок")
+        # Приложенное к прежней версии видно при ней: слова были сказаны с этой
+        # картинкой — и вернутся вместе с ней (см. show.version_view)
+        self.assertIn("/uploads/abc.png", human_html,
+                      "картинка прежней версии пропала из блока")
+        self.assertIn("version-pictures", human_html)
+        self.assertNotIn("version-pictures", model_html,
+                         "у версии без картинок появился пустой блок")
         self.assertEqual(words, "версия версии версий версий версия")
+
+    def test_the_reply_pictures_are_managed_where_the_reply_is_edited(self):
+        """Приложенное к своей реплике убирается и прикладывается при её правке.
+
+        Одних слов мало: к реплике приложена картинка, и правится реплика целиком —
+        ненужную убирают крестиком, нужную прикладывают тут же (см. page.startEdit,
+        page.saveEdit). Приложенное едет на сервер вместе со словами, а прежнее
+        остаётся в «прежних словах» и возвращается со словами (см. show.edit_post).
+        """
+        source = page.HTML_TEMPLATE
+        for control in ("pickEditFiles", "attachEditFiles", "uploadEditAttachment",
+                        "dropEditAttachment", "renderEditChips", "editFileInput"):
+            with self.subTest(control=control):
+                self.assertIn(control, source, f"на странице нет {control}")
+        self.assertIn("data-post-attachments", source,
+                      "правка не знает, что к реплике уже приложено")
+        self.assertIn("attachments: editAttachments", source,
+                      "приложенное не уезжает на сервер вместе с правкой")
+        self.assertIn("JSON.parse(box.getAttribute('data-post-attachments')", source,
+                      "приложенное не возвращается в правку из самой реплики")
+
+        shown, empty = self._run_page(
+            ("escapeHtml", "versionPicturesHtml"),
+            "versionPicturesHtml({attachments: [{name: 'схема.png',"
+            " url: '/uploads/a.png'}]})",
+            "versionPicturesHtml({})")
+        self.assertIn("/uploads/a.png", shown)
+        self.assertIn("version-pictures", shown)
+        self.assertIn("showAvatarFull('/uploads/a.png', true)", shown,
+                      "картинка версии не разворачивается по клику")
+        self.assertEqual(empty, "", "у версии без картинок пустой блок")
 
     def test_the_buttons_in_the_feed_are_chosen_by_the_speaker(self):
         """Кнопки в ленте — по говорящему: своё правят, за ответ модели отвечают.
@@ -10260,7 +10300,7 @@ class TestPageScript(unittest.TestCase):
         out = self._run_page(
             ("escapeHtml", "versionsWord", "pluralForm", "pluralText",
              "versionWords", "versionDiff", "diffWordsHtml", "versionDiffHtml",
-             "postVersionsHtml"),
+             "versionPicturesHtml", "postVersionsHtml"),
             f"postVersionsHtml({json.dumps(post, ensure_ascii=False)})",
             f"postVersionsHtml({json.dumps(same, ensure_ascii=False)})")
 
@@ -10475,6 +10515,15 @@ class TestSayingItAgain(unittest.TestCase):
 
     def _written(self) -> str:
         return self.dump.read_text(encoding="utf-8")
+
+    def _written_pictures(self) -> int:
+        """Сколько картинок записано в ДАМП данными — по строкам записей.
+
+        Именно строками: в шапке файла про эту самую строку сказано словами
+        (см. start_dump), и разбор одного текста за неё бы и зацепился.
+        """
+        return sum(1 for line in self._written().splitlines()
+                   if line.startswith("**Картинка:** "))
 
     def _dump(self) -> dict:
         return show.parse_dump(self._written())
@@ -11036,6 +11085,161 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(self.session.posts[1]["content"],
                          self.session.posts[1]["versions"][0]["content"],
                          "вернулись не те слова, что просили")
+
+    def _pictures_folder(self):
+        """Своя папка приложенного: тест не пачкает папку театра (см. save_upload)."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        for key, value in (("UPLOAD_DIR", Path(folder.name)),
+                           ("MAX_UPLOAD_BYTES", 1024)):
+            patcher = mock.patch.object(settings, key, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _picture(self, name="схема.png") -> dict:
+        """Приложенная картинка в том виде, в каком её отдаёт /api/upload."""
+        picture, error = show.save_upload(
+            name, "data:image/png;base64,"
+            + base64.b64encode(PNG_SIGN).decode("ascii"))
+        self.assertEqual(error, "", "картинка обязана приниматься")
+        return picture
+
+    def test_the_picture_stays_with_the_words_it_was_said_with(self):
+        """Картинка — часть версии: убрали её — вернётся вместе с прежними словами.
+
+        К своей реплике картинку можно убрать или приложить другую, и прежняя
+        остаётся при тех словах, с которыми была сказана: «↩ вернуть эти слова»
+        возвращает и её (см. show.version_view, switch_words). В ДАМПе прежняя
+        картинка тоже цела: она лежит данными в своей записи, а читается
+        последняя (см. attachment_section, dump_replayed).
+        """
+        self._pictures_folder()
+        picture = self._picture()
+        show.start_dump(self.session.topic)
+        post = self._human("Смотрите, что нашёл.", attachments=[picture])
+        changed, problem = self.session.edit_post(post["id"], "Уже без картинки.", [])
+        self.assertEqual(problem, "")
+
+        version = self.session.posts[0]["versions"][-1]
+
+        self.assertEqual([one["url"] for one in version["attachments"]],
+                         [picture["url"]],
+                         "картинка прежней версии не осталась при ней")
+        self.assertEqual(changed["attachments"], [],
+                         "картинку убрали, а она осталась у реплики")
+
+        again, problem = self.session.revert_version(post["id"], 0)
+
+        self.assertEqual(problem, "")
+        self.assertEqual(again["content"], "Смотрите, что нашёл.")
+        self.assertEqual([one["url"] for one in again["attachments"]],
+                         [picture["url"]], "картинка не вернулась со словами")
+        play = self._dump()
+        self.assertEqual([one["url"] for one in play["posts"][0]["attachments"]],
+                         [picture["url"]],
+                         "в ДАМПе у реплики не та картинка")
+        self.assertIn("**Картинка:**", self._written(),
+                      "данные картинки не уехали в ДАМП — в другом театре её не будет")
+        # И у прежней версии в ДАМПе картинка своя: история возвращается
+        # вместе со спектаклем, а не только живёт в памяти этого запуска
+        self.assertEqual([one["url"]
+                          for one in play["posts"][0]["versions"][0]["attachments"]],
+                         [picture["url"]],
+                         "у прежней версии в ДАМПе картинки не осталось")
+        self.assertEqual([one["url"]
+                          for one in play["posts"][0]["versions"][1]["attachments"]],
+                         [], "у версии без картинки она откуда-то взялась")
+
+    def test_a_reply_is_not_left_without_words_and_pictures_at_once(self):
+        """Правкой управляют приложенным: убрать, сменить, приложить заново.
+
+        Приложенное — часть реплики, и правка — про неё целиком (см. edit_post).
+        Пустой реплика при этом не становится: ни слов, ни картинок — это уже
+        не реплика, и сказано об этом словами ещё до правки (см. check_order).
+        """
+        self._pictures_folder()
+        picture = self._picture()
+        other = self._picture("другая.png")
+        show.start_dump(self.session.topic)
+        post = self._human("Слова и картинка.", attachments=[picture])
+
+        # Картинку меняют, не трогая слов
+        changed, problem = self.session.edit_post(post["id"], "Слова и картинка.",
+                                                  [other])
+        self.assertEqual(problem, "")
+        self.assertEqual([one["url"] for one in changed["attachments"]],
+                         [other["url"]], "приложенное не сменилось")
+        self.assertEqual(changed["content"], "Слова и картинка.")
+        # И убирают тоже: слова остались — реплика есть
+        emptied, problem = self.session.edit_post(post["id"], "Только слова.", [])
+        self.assertEqual(problem, "")
+        self.assertEqual(emptied["attachments"], [])
+        # Слов может и не остаться: реплика с одной картинкой — всё ещё реплика,
+        # и на неё отвечают (см. post_to_edit)
+        shown, problem = self.session.edit_post(post["id"], "", [picture])
+        self.assertEqual(problem, "")
+        self.assertEqual(shown["content"], "")
+        self.assertEqual([one["url"] for one in shown["attachments"]],
+                         [picture["url"]], "картинка ушла вместе со словами")
+        # А вот ни того, ни другого: репликой такое не назвать
+        problem = self.session.check_order("edit", post_id=post["id"],
+                                          content="   ", attachments=[])
+        self.assertIn("пустая реплика", problem)
+        self.assertEqual([one["url"] for one in self.session.posts[0]["attachments"]],
+                         [picture["url"]],
+                         "отказанная правка всё равно убрала картинку")
+
+    def test_a_continued_show_does_not_write_the_same_picture_again(self):
+        """Продолженный спектакль не кладёт картинку в ДАМП второй раз.
+
+        Файл дописывается, и картинка в нём уже лежит данными: без этой пометки
+        правка реплики или возврат версии клали бы в файл её мегабайты заново —
+        а ДАМП растёт на них с каждой правкой (см. _remember_written_pictures).
+        """
+        self._pictures_folder()
+        picture = self._picture()
+        show.start_dump(self.session.topic)
+        post = self._human("С картинкой.", attachments=[picture])
+        self.assertEqual(self._written_pictures(), 1,
+                         "картинка не уехала в ДАМП")
+
+        # Театр перезапустили: ДАМП закрыт, а картинка в нём уже записана
+        show._dump_reset()
+        self.session.edit_post(post["id"], "Слова другие.", [picture])
+
+        self.assertEqual(self._written_pictures(), 1,
+                         "та же картинка уехала в файл второй раз")
+
+    def test_the_edit_route_takes_the_pictures_with_the_words(self):
+        """Правка уезжает вместе с приложенным — и адреса проверяются там же.
+
+        Тело правки — и слова, и приложенное (см. /api/post/<id>/edit): страница
+        присылает картинки, которые уже принял /api/upload, а сервер проверяет
+        адреса ещё раз, как у реплики из формы (см. show.upload_files).
+        """
+        self._pictures_folder()
+        picture = self._picture()
+        show.start_dump(self.session.topic)
+        post = self._human("С картинкой.", attachments=[picture])
+
+        answer = self.client.post(f"/api/post/{post['id']}/edit",
+                                  json={"content": "Без картинки.",
+                                        "attachments": []}).get_json()
+
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertEqual(answer["post"]["attachments"], [],
+                         "картинку убрать нечем")
+
+        # Чужой адрес не принимается: по нему ничего нет (см. show.upload_files)
+        answer = self.client.post(f"/api/post/{post['id']}/edit",
+                                  json={"content": "Снова с картинкой.",
+                                        "attachments": [{"name": "чужое.png",
+                                                         "url": "/uploads/не-наше.png"}]}).get_json()
+
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertEqual(answer["post"]["attachments"], [],
+                         "в реплику пустили адрес, по которому ничего нет")
+        self.assertEqual(len(self.session.posts[0]["attachments"]), 0)
 
     def test_the_page_carries_the_previous_words_block(self):
         """Блок «прежние слова» есть у реплики в ленте, и вернуть версию — тоже."""

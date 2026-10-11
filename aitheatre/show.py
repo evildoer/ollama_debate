@@ -714,6 +714,11 @@ def version_view(post: dict) -> dict:
     копией, а не ссылкой на саму реплику: реплика остаётся в ленте и меняется
     дальше, а список версий — летопись, и меняться вместе с ней он не должен.
 
+    Приложенное к реплике — тоже часть версии: к своей реплике картинку можно
+    убрать или приложить другую, и прежняя остаётся при тех словах, с которыми
+    была сказана — поэтому «↩ вернуть эти слова» возвращает и её (см.
+    switch_words, page.postVersionsHtml).
+
     «Почему» названо по тому, кто говорил: слова человека правят (см. edit_post,
     revert_version), а ответ модели переигрывают (см. replay_plan_for). Обе
     версии оплачены, и обе остаются — поэтому у каждой и есть своё имя.
@@ -728,6 +733,10 @@ def version_view(post: dict) -> dict:
         "display_name": post.get("display_name") or "",
         "model_used": post.get("model_used") or "",
         "why": "изменена" if human else "переиграна",
+        # Копией, а не ссылкой: список версий — летопись, и приложенное в ней
+        # живёт своей жизнью, даже когда у реплики оно уже другое
+        "attachments": [dict(one) for one in post.get("attachments") or []
+                        if str((one or {}).get("url") or "").strip()],
     }
 
 
@@ -1048,7 +1057,28 @@ def dump_human_markdown(post: dict) -> str:
 # в запись по второму разу, а убранная возвращалась бы (см. picture_data_lines,
 # dump_topic_pictures)
 _DUMP = {"handle": None, "thought": None, "line_start": True,
-         "pictures": set(), "topic_pictures": set(), "topic_removed": set()}
+         "pictures": set(), "pictures_seen": False,
+         "topic_pictures": set(), "topic_removed": set()}
+
+
+def _remember_written_pictures() -> None:
+    """Пометить картинки, лежащие в файле данными, — чтобы не писать их снова.
+
+    Файл дописывается, а не переписывается: продолженный спектакль вернулся
+    в ленту из этого же ДАМПа (см. load_play_from_dump), и его картинки в файле
+    уже есть. Без этой пометки правка реплики с картинкой клала бы в файл ещё
+    раз все её мегабайты: ДАМП растёт от каждой правки и каждого возврата версии
+    (см. picture_data_lines). Читаются только строки «**Картинка:**» — сами
+    данные для этого разбирать незачем.
+    """
+    try:
+        lines = Path(settings.DUMP_FILE).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        head = _PICTURE_HEAD_RE.match(line)
+        if head:
+            _DUMP["pictures"].add(head.group("url"))
 
 
 def dump_write(text: str, force: bool = True) -> None:
@@ -1064,6 +1094,12 @@ def dump_write(text: str, force: bool = True) -> None:
     handle = _DUMP.get("handle")
     try:
         if handle is None:
+            # Дописываем к прежнему файлу — к тому, что остался от прошлого
+            # запуска: его картинки в нём уже лежат, и второй раз они бы уехали
+            # в файл ещё раз (см. _remember_written_pictures)
+            if not _DUMP.get("pictures_seen"):
+                _remember_written_pictures()
+                _DUMP["pictures_seen"] = True
             with open(settings.DUMP_FILE, "a", encoding="utf-8") as one:
                 one.write(text)
             return
@@ -1259,6 +1295,7 @@ def _dump_reset() -> None:
     _DUMP["line_start"] = True
     # Файл больше не наш: то, что было в нём записано, писать заново не надо
     _DUMP["pictures"] = set()
+    _DUMP["pictures_seen"] = False
     _DUMP["topic_pictures"] = set()
     _DUMP["topic_removed"] = set()
     if handle is not None:
@@ -4038,7 +4075,8 @@ class DebateSession:
         kind = str(kind or "")
         post_id = payload.get("post_id")
         if kind == "edit":
-            _post, problem = self.post_to_edit(post_id, payload.get("content"))
+            _post, problem = self.post_to_edit(post_id, payload.get("content"),
+                                              payload.get("attachments"))
             return problem
         if kind == "version":
             # Вернуть прежние слова можно любой реплике: у реплики человека так
@@ -4049,8 +4087,13 @@ class DebateSession:
             return self.replay_scope(post_id, payload.get("scope"))[2]
         return f"неизвестно, что делать с лентой: «{kind}»"
 
-    def post_to_edit(self, post_id, content) -> tuple:
-        """Реплика человека, которую правят: (реплика, беда) — без единой правки."""
+    def post_to_edit(self, post_id, content, attachments=None) -> tuple:
+        """Реплика человека, которую правят: (реплика, беда) — без единой правки.
+
+        Ни слов, ни картинок — править нечего: реплика без того и другого
+        перестала бы быть репликой (см. edit_post). Приложенное берётся то, что
+        просят поставить, а без просьбы — то, что у реплики уже есть.
+        """
         index = self.index_of(post_id)
         if index is None:
             return None, f"реплики №{post_id} в ленте нет"
@@ -4058,7 +4101,13 @@ class DebateSession:
         if post.get("model_used") != "human":
             return None, "править можно реплику человека: у модели её переигрывают"
         said = str(content or "").strip()
-        if not said and not post.get("attachments"):
+        if attachments is None:
+            left = [one for one in post.get("attachments") or []
+                    if str((one or {}).get("url") or "").strip()]
+        else:
+            left = [one for one in attachments
+                    if str((one or {}).get("url") or "").strip()]
+        if not said and not left:
             return None, "пустая реплика: сказать нечего"
         return post, ""
 
@@ -4077,7 +4126,8 @@ class DebateSession:
         post_id = order.get("post_id")
         focus, problem = 0, ""
         if kind == "edit":
-            post, problem = self.edit_post(post_id, order.get("content"))
+            post, problem = self.edit_post(post_id, order.get("content"),
+                                           order.get("attachments"))
             note = "✍️ Реплика человека изменена"
             focus = int((post or {}).get("id") or 0)
         elif kind == "version":
@@ -4153,6 +4203,9 @@ class DebateSession:
         post["versions"] = remember_version(post)
         post["content"] = str(was.get("content") or "")
         post["content_html"] = text.markdown_to_html(post["content"])
+        # Вместе со словами возвращается и приложенное к ним: версия — это то,
+        # чем реплика была целиком, и картинка тех слов — тоже (см. version_view)
+        post["attachments"] = [dict(one) for one in was.get("attachments") or []]
         self.conversation_history = self.history_from_posts()
         dump_new_version(post)
         return ""
@@ -4194,31 +4247,40 @@ class DebateSession:
         # Показывать надо ту реплику, за которую взялись (см. page.openTurnWhenArrives)
         return plan, self.replay_aim(post_id, scope), ""
 
-    def edit_post(self, post_id, content) -> tuple:
+    def edit_post(self, post_id, content, attachments=None) -> tuple:
         """Изменить реплику человека: слова другие, а место — то же.
 
         Ответы, которые шли после неё, отвечали на прежние слова: чтобы модель
         ответила на новые, её реплику переигрывают (см. replay_plan_for). Сама
         же правка делает ленту и разговор честными: в них стоят новые слова.
 
+        attachments — приложенное к реплике: None значит «не трогать» (так её
+        правят, не заглядывая в картинки), а список — «вот что теперь приложено»,
+        вплоть до пустого: картинку к своей реплике можно и убрать. Прежние
+        картинки от этого не пропадают — они остаются при своей версии и
+        возвращаются вместе со словами (см. version_view, switch_words).
+
         В ДАМПе реплика остаётся и прежней, и новой: файл дописывается, а
-        читается последняя (см. dump_replayed).
+        читается последняя (см. dump_replayed), и данные новых картинок уезжают
+        вместе с ней (см. attachment_section).
 
         Возвращает (реплика, беда): беда не пустая — править нечего.
         """
-        post, problem = self.post_to_edit(post_id, content)
+        post, problem = self.post_to_edit(post_id, content, attachments)
         if problem:
             return None, problem
         said = str(content or "").strip()
-        # Прежние слова остаются летописью — и в ДАМПе, и в ленте: к ним можно
-        # вернуться (см. version_view, revert_version)
+        # Прежние слова и прежнее приложенное остаются летописью — и в ДАМПе,
+        # и в ленте: к ним можно вернуться (см. version_view, revert_version)
         post["versions"] = remember_version(post)
         post["content"] = said
         post["content_html"] = text.markdown_to_html(said)
+        if attachments is not None:
+            post["attachments"] = [dict(one) for one in attachments]
         self.conversation_history = self.history_from_posts()
         dump_new_version(post)
         print(f"✍️  Реплика человека №{post['id']} изменена: "
-              f"{len(said)} знаков")
+              f"{len(said)} знаков, приложено {len(post.get('attachments') or [])}")
         return post, ""
 
     def revert_version(self, post_id, version_index) -> tuple:

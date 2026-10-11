@@ -2018,8 +2018,8 @@ BUGS = {
     ],
     "прежние слова снова пропадают при правке реплики": [
         ("aitheatre/show.py",
-         '        # Прежние слова остаются летописью — и в ДАМПе, и в ленте: к ним можно\n'
-         '        # вернуться (см. version_view, revert_version)\n'
+         '        # Прежние слова и прежнее приложенное остаются летописью — и в ДАМПе,\n'
+         '        # и в ленте: к ним можно вернуться (см. version_view, revert_version)\n'
          '        post["versions"] = remember_version(post)\n'
          '        post["content"] = said',
          '        post["content"] = said'),
@@ -2037,6 +2037,48 @@ BUGS = {
         ("aitheatre/show.py",
          "                versions[key] = remember_version(post)",
          "                versions[key] = []"),
+    ],
+    "продолженный спектакль снова пишет ту же картинку в ДАМП": [
+        ("aitheatre/show.py",
+         '            if not _DUMP.get("pictures_seen"):\n'
+         '                _remember_written_pictures()\n'
+         '                _DUMP["pictures_seen"] = True',
+         '            if False:\n'
+         '                _remember_written_pictures()\n'
+         '                _DUMP["pictures_seen"] = True'),
+    ],
+    "приложенное к прежней версии снова теряется": [
+        ("aitheatre/show.py",
+         '        "attachments": [dict(one) for one in post.get("attachments") or []\n'
+         '                        if str((one or {}).get("url") or "").strip()],',
+         '        "attachments": [],'),
+    ],
+    "вернуть прежние слова снова можно без приложенного к ним": [
+        ("aitheatre/show.py",
+         '        post["attachments"] = [dict(one) for one in was.get("attachments") or []]',
+         '        post["attachments"] = []'),
+    ],
+    "правкой снова не сменить приложенное к реплике": [
+        ("aitheatre/show.py",
+         '        if attachments is not None:\n'
+         '            post["attachments"] = [dict(one) for one in attachments]',
+         '        if False:\n'
+         '            post["attachments"] = [dict(one) for one in attachments]'),
+    ],
+    "пустой репликой снова становится и реплика с одной картинкой": [
+        ("aitheatre/show.py",
+         "        if not said and not left:",
+         "        if not said:"),
+    ],
+    "страница снова не показывает приложенное к прежней версии": [
+        ("aitheatre/page.py",
+         "                const pictures = versionPicturesHtml(one);",
+         "                const pictures = '';"),
+    ],
+    "приложенное снова не уезжает вместе с правкой реплики": [
+        ("aitheatre/page.py",
+         "                                                                       attachments: editAttachments})})",
+         "                                                                       attachments: []})})"),
     ],
     "возврат версии снова не проверяет, есть ли такие прежние слова": [
         ("aitheatre/show.py",

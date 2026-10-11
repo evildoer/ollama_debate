@@ -728,18 +728,30 @@ def edit_post(post_id):
     Модели после этого отвечали на прежние слова, поэтому дальше её реплику
     переигрывают (см. /api/replay).
 
+    Тело: {"content": "...", "attachments": [{"name": "кот.png", "url": "/uploads/..."}]}.
+    Приложенное — та же часть реплики, что и слова: картинки к своей реплике
+    можно убрать (пустой список) или приложить другие — адреса приходят из
+    /api/upload и проверяются здесь же, как у реплики из формы (см.
+    show.upload_files). Без поля attachments приложенное остаётся как есть.
+    Прежние картинки остаются при своей версии и возвращаются вместе со словами
+    (см. /api/post/<id>/revert).
+
     Идущий спектакль правке не помеха: лента и ДАМП в это время — его, и заказ
     он берёт сам, между ходами (см. show.order_feed). Останавливать его для
     этого не приходится.
     """
     data = request.get_json(silent=True) or {}
+    attachments = (show.upload_files(data.get("attachments") or [])
+                   if "attachments" in data else None)
     if show.session.running:
         problem = show.session.order_feed("edit", post_id=post_id,
-                                          content=data.get("content", ""))
+                                          content=data.get("content", ""),
+                                          attachments=attachments)
         if problem:
             return refuse_order(problem)
         return jsonify({"success": True, "queued": True, **feed_payload()})
-    post, problem = show.session.edit_post(post_id, data.get("content", ""))
+    post, problem = show.session.edit_post(post_id, data.get("content", ""),
+                                           attachments)
     if problem:
         return refuse_order(problem)
     # О сделанном рассказывают тем же слогом, что и о заказе, взятом на ходу:

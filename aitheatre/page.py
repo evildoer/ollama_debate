@@ -108,6 +108,11 @@ HTML_TEMPLATE = """
         /* Убрать приложенную картинку: квадратик поверх её угла. Фон — из класса,
            а не инлайн: тёмная сцена перекрашивает его вместе со всем остальным */
         .chip-drop { position: absolute; top: -9px; right: -9px; border: 1px solid #000000; background: #ffffff; cursor: pointer; padding: 0 4px; }
+        /* Правка своей реплики: приложенное видно и убирается там же, где слова
+           (см. page.startEdit) — приложить другую картинку можно тут же */
+        .edit-attachments { margin: 10px 0; }
+        .edit-attachments img { height: 72px; border: 1px solid #000000; }
+        body.dark .edit-attachments img { border-color: #3a3a3a; }
         body.dark .chip-drop { background: #141414; border-color: #3a3a3a; color: #e8e8e8; }
         .post-content { flex: 1; min-width: 0; }
         .post-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #000000; }
@@ -164,6 +169,11 @@ HTML_TEMPLATE = """
                                         padding-left: 10px; border-left: 1px solid #e4dccb; }
         .post-versions .version-empty { color: #9a9a9a; font-style: italic; }
         .post-versions .version-action { margin-top: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
+        /* Приложенное к прежней версии: слова были с картинкой — и она возвращается
+           вместе с ними (см. show.version_view, page.versionPicturesHtml) */
+        .post-versions .version-pictures { margin-top: 6px; }
+        .post-versions .version-pictures img { max-height: 110px; border: 1px solid #000000; cursor: pointer; }
+        body.dark .post-versions .version-pictures img { border-color: #3a3a3a; }
         /* Разница версии с нынешними словами: стороны рядом — слева то, на что
            отвечали тогда, справа то, что стоит в ленте сейчас (см. versionDiffHtml) */
         .post-versions .version-diff { margin-top: 6px; }
@@ -685,6 +695,7 @@ HTML_TEMPLATE = """
         let thinkingModels = [];       // из них те, что умеют размышлять (capabilities Ollama)
         let visionModels = [];         // и те, что читают картинки: у них в пульте стоит «+»
         let pendingUploads = [];       // приложенное к реплике, но ещё не отправленное
+        let editAttachments = [];      // приложенное к реплике, которую сейчас правят
         let topicPictures = [];        // приложенное к теме: список держит сервер
         let topicSavePending = false;  // список в пути: опрос не должен его перебивать
         let debateRunning = false;
@@ -3076,23 +3087,39 @@ HTML_TEMPLATE = """
                 const words = one.content
                     ? `<div class="version-words">${one.content_html || escapeHtml(one.content)}</div>`
                     : '<div class="version-words version-empty">слов в этой версии не было</div>';
+                // Приложенное к этой версии — рядом с её словами: слова были
+                // с картинкой, и по ней видно, что приложили тогда (см.
+                // show.version_view). Возвращается оно вместе со словами
+                const pictures = versionPicturesHtml(one);
                 // Вернуть эти слова можно любой реплике: у своей так возвращают
                 // её же прежние слова, а у ответа модели — выбирают лучший из её
                 // ответов (см. show.revert_version). Переигрывать заново нечего:
                 // слова уже сказаны, а заново отвечают кнопкой «🔁 эту реплику»
                 const back = `<button class="post-action"`
-                    + ` title="Вернуть реплике эти слова: место и номер останутся её же, а нынешние слова лягут в «прежние» — по ним можно ходить в обе стороны. У ответа модели так выбирают лучший из её ответов"`
+                    + ` title="Вернуть реплике эти слова — и приложенное к ним: место и номер останутся её же, а нынешнее ляжет в «прежние» — по версиям можно ходить в обе стороны. У ответа модели так выбирают лучший из её ответов"`
                     + ` onclick="revertVersion(${post.id}, ${index})">↩ вернуть эти слова</button>`;
                 // И рядом с прежними словами — чем они отличаются от нынешних
                 const differ = versionDiffHtml(one, post);
                 return `<div class="version-head">Версия ${index + 1} из ${versions.length} · ${head}</div>`
-                    + words + differ + `<div class="version-action">${back}</div>`;
+                    + words + pictures + differ + `<div class="version-action">${back}</div>`;
             }).join('');
             return `<details class="post-versions" data-post-id="${post.id}">`
                 + `<summary>🗂 прежние слова · ${versions.length} ${versionsWord(versions.length)}</summary>`
                 + '<div class="versions-hint">То, что эта реплика говорила прежде. '
-                + 'Прежние слова остаются и в ДАМПе — летописью.</div>'
+                + 'Прежние слова остаются и в ДАМПе — летописью, а приложенные '
+                + 'к ним картинки возвращаются вместе со словами.</div>'
                 + body + '</details>';
+        }
+
+        // Приложенное к прежней версии: слова были сказаны с этой картинкой —
+        // и она остаётся при них, а не теряется вместе с ними (см. show.version_view)
+        function versionPicturesHtml(version) {
+            const list = version.attachments || [];
+            if (!list.length) return '';
+            return '<div class="post-attachments version-pictures">' + list.map(one =>
+                `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
+                + ` onclick="showAvatarFull('${one.url}', true)">`).join('')
+                + '</div>';
         }
 
         // Приложенное к реплике — прямо над текстом: без этого непонятно, о чём
@@ -3133,6 +3160,11 @@ HTML_TEMPLATE = """
             // что лежит в ленте, а не пересказанный разметкой
             postDiv.setAttribute('data-post', post.id);
             postDiv.setAttribute('data-post-text', post.content || '');
+            // Приложенное — тоже приметой: правка своей реплики начинается
+            // с того, что уже есть, и картинки должны быть видны и убираемы
+            // (см. startEdit)
+            postDiv.setAttribute('data-post-attachments',
+                                 JSON.stringify(post.attachments || []));
             postDiv.innerHTML = `<div class="post-avatar">${postAvatarHtml(post)}</div><div class="post-content">${postHeaderHtml(post)}${postTurnHtml(post)}${postAttachmentsHtml(post)}<div class="post-text">${postTextHtml(post)}</div>${postVersionsHtml(post)}${searchInfo}${postActionsHtml(post)}</div>`;
             // Формулы в реплике — в MathML (см. renderMath)
             renderMath(postDiv.querySelector('.post-text'));
@@ -3296,13 +3328,21 @@ HTML_TEMPLATE = """
             if (!box || box.querySelector('.edit-box')) return;
             const text = box.querySelector('.post-text');
             if (!text) return;
+            // Правят не только слова: приложенное к своей реплике — тоже её
+            // часть, и его тут же видно, убирается крестиком и прикладывается
+            // заново (см. renderEditChips, pickEditFiles)
+            editAttachments = JSON.parse(box.getAttribute('data-post-attachments') || '[]');
             const holder = document.createElement('div');
             holder.className = 'edit-box';
             holder.innerHTML = `<textarea spellcheck="false"></textarea>`
+                + `<div class="edit-attachments"><div id="editAttachChips"></div>`
+                + `<button class="post-action" onclick="pickEditFiles()" title="Приложить к реплике другую картинку: она уедет только тем моделям, которые читают картинки">🖼 приложить картинку</button>`
+                + `<input type="file" accept="image/*" multiple style="display:none;" id="editFileInput" onchange="attachEditFiles(this.files)">`
+                + `<span id="editAttachHint" style="font-size:12px;color:#888;font-style:italic;"></span></div>`
                 + `<div class="edit-actions">`
                 + `<button class="post-action" onclick="saveEdit(${postId})">💾 Изменить</button>`
                 + `<button class="post-action" onclick="cancelEdit(${postId})">Отмена</button>`
-                + `<span style="font-size:12px;color:#888;">Ctrl+Enter — сохранить. Ответы после этой реплики отвечали на прежние слова: их переигрывают отдельно.</span>`
+                + `<span style="font-size:12px;color:#888;">Ctrl+Enter — сохранить. Крестик на картинке — убрать её из реплики. Ответы после этой реплики отвечали на прежние слова: их переигрывают отдельно.</span>`
                 + `</div>`;
             const area = holder.querySelector('textarea');
             area.value = box.getAttribute('data-post-text') || '';
@@ -3311,7 +3351,69 @@ HTML_TEMPLATE = """
             });
             text.style.display = 'none';
             text.parentNode.insertBefore(holder, text.nextSibling);
+            renderEditChips();
             area.focus();
+        }
+
+        // ── ПРИЛОЖЕННОЕ К ПРАВИМОЙ РЕПЛИКЕ ─────────────────────────────────
+        // То же, что у новой реплики (см. attachFiles): файл читает браузер,
+        // а на сервере он проверяется по содержимому (см. show.save_upload).
+        // Заодно старое приложенное видно и убирается — у правки это сразу обе
+        // половины дела: убрать ненужное и приложить новое
+        function pickEditFiles() {
+            const input = document.getElementById('editFileInput');
+            if (input) input.click();
+        }
+
+        function noteEditAttach(text) {
+            const hint = document.getElementById('editAttachHint');
+            if (hint) hint.textContent = text || '';
+        }
+
+        function attachEditFiles(files) {
+            const input = document.getElementById('editFileInput');
+            Array.from(files || []).forEach(file => {
+                if (!file.type.startsWith('image/')) {
+                    noteEditAttach('⚠️ Только картинки: ' + file.name);
+                    return;
+                }
+                const reader = new FileReader();
+                reader.onload = () => uploadEditAttachment(file, reader.result);
+                reader.onerror = () => noteEditAttach('⚠️ Не удалось прочитать ' + file.name);
+                reader.readAsDataURL(file);
+            });
+            if (input) input.value = '';
+        }
+
+        function uploadEditAttachment(file, dataUrl) {
+            noteEditAttach('⏳ ' + file.name + ' — прикладываю…');
+            fetch('/api/upload', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: file.name, data_url: dataUrl})
+            })
+            .then(r => r.json().then(data => { if (!r.ok) throw new Error(data.error || 'не принято'); return data; }))
+            .then(data => {
+                editAttachments.push({name: data.name, url: data.url});
+                noteEditAttach('');
+                renderEditChips();
+            })
+            .catch(err => noteEditAttach('⚠️ ' + file.name + ': ' + (err.message || 'не приложилось')));
+        }
+
+        function dropEditAttachment(index) {
+            editAttachments.splice(index, 1);
+            renderEditChips();
+        }
+
+        function renderEditChips() {
+            const box = document.getElementById('editAttachChips');
+            if (!box) return;
+            box.innerHTML = editAttachments.map((one, index) =>
+                '<span style="position:relative;display:inline-block;margin-right:14px;">'
+                + `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}">`
+                + `<button class="chip-drop" onclick="dropEditAttachment(${index})"`
+                + ' title="Убрать приложение из реплики: прежняя картинка при этом не пропадёт — она останется в «прежних словах» и вернётся вместе с ними">✕</button>'
+                + '</span>').join('');
         }
 
         function cancelEdit(postId) {
@@ -3327,8 +3429,11 @@ HTML_TEMPLATE = """
             const box = document.querySelector(`.post[data-post="${postId}"]`);
             const area = box && box.querySelector('.edit-box textarea');
             if (!area) return;
+            // Приложенное едет вместе со словами: что осталось в правке, то у реплики
+            // и будет, а убранное остаётся в её «прежних словах» (см. show.edit_post)
             fetch(`/api/post/${postId}/edit`, {method: 'POST', headers: {'Content-Type': 'application/json'},
-                                                  body: JSON.stringify({content: area.value})})
+                                                  body: JSON.stringify({content: area.value,
+                                                                       attachments: editAttachments})})
                 .then(r => r.json())
                 .then(data => {
                     if (!data.success) { alert('Не сохранилось: ' + (data.error || 'неизвестно почему')); return; }
