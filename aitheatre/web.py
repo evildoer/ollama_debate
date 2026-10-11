@@ -148,11 +148,39 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         # След последней записи пульта: по нему страница объявляет о правке,
         # даже если её сделала другая вкладка (см. show.last_settings_write)
         "settings_write": show.last_settings_write(),
+        # И след последнего заказа ленты: правка сказанного, возврат версии
+        # и переигровка делаются и на ходу — тогда их берёт сам спектакль,
+        # между ходами, и страница узнаёт о сделанном только так
+        # (см. feed_payload, show.feed_note)
+        **feed_payload(),
     }
     # Для внешних клиентов (и для события подключения) — те же поля, но реплики целиком
     if with_posts:
         payload["posts"] = [show.post_view(p) for p in show.session.posts]
     return payload
+
+
+def feed_payload() -> dict:
+    """Что случилось с лентой — в ответ на саму правку и в состоянии.
+
+    Ответ на нажатие и рассылка состояния носят одно и то же (см.
+    status_payload): правку сказанного можно заказать и в другой вкладке,
+    и на чужом ходу, и страница должна рассказать о ней так же, как о своей
+    (см. page.noteFeedChange, show.feed_note).
+    """
+    return {"feed_note": show.session.feed_note,
+            "order_pending": show.session.feed_order is not None}
+
+
+def refuse_order(problem: str):
+    """Отказ по заказу ленты — ответом и состоянием, а не одной строкой ошибки.
+
+    Заказ правки, возврата версии или переигровки может прийти и из другой
+    вкладки, и на чужом ходу: тогда ответа на нажатие там не видно, и об отказе
+    рассказывает само состояние (см. show.note_feed_refusal, page.noteFeedChange).
+    """
+    show.session.note_feed_refusal(problem)
+    return jsonify({"success": False, "error": problem, **feed_payload()})
 
 
 def shown_balance():
@@ -645,22 +673,32 @@ def post_turn(post_id):
 def replay_said():
     """Переиграть сказанное: реплику, акт целиком или весь спектакль.
 
-    Переигрывают под занавесом: идущий спектакль занят сценой, и второй поток
-    рядом с ним только писал бы в ленту наперебой. Отвечает нынешними правилами,
-    темой и составом — ради этого и переигрывают: ответить заново по тому,
-    что настроено сейчас, а не по тому, что было при первой попытке.
+    Переигрывать можно и на ходу: спектакль не обязан стоять под занавесом ради
+    этого. Такой заказ он берёт сам, между ходами (см. show.order_feed): лента
+    и ДАМП в это время — его, и рвать их из другого потока нельзя. Отвечает
+    переигровка нынешними правилами, темой и составом — ради этого и переигрывают:
+    ответить заново по тому, что настроено сейчас, а не по тому, что было
+    при первой попытке.
+
+    Тело: {"post_id": 2, "scope": "post", "version": 0}. Версия — переиграть
+    с прежних слов этой реплики, а не с нынешних (см. show.plan_feed_replay).
     """
-    if show.session.running:
-        return jsonify({"success": False,
-                        "error": "спектакль идёт — переигрывают под занавесом: "
-                                 "сначала «Завершить спектакль»"})
     data = request.get_json(silent=True) or {}
     post_id = data.get("post_id")
     scope = str(data.get("scope") or "post")
-    plan, _held, problem = show.session.replay_plan_for(post_id, scope)
+    version = data.get("version")
+    problem = show.session.order_feed("replay", post_id=post_id, scope=scope,
+                                      version=version)
     if problem:
-        return jsonify({"success": False, "error": problem})
-    words = {"post": "реплика", "round": "акт", "show": "спектакль"}
+        return refuse_order(problem)
+    plan = show.session.take_replay_next()
+    if plan is None:
+        # Спектакль идёт: заказ принят, но играть заново будет он сам —
+        # и уже после того, как договорит нынешний говорящий
+        return jsonify({"success": True, "queued": True, "scope": scope,
+                        "total_posts": len(show.session.posts),
+                        **feed_payload()})
+    words = {"post": "реплика", "round": "акт", "act": "акт", "show": "спектакль"}
     print(f"🔁 Переигрывается {words.get(scope, scope)}: "
           f"с акта {plan['round']}, реплик {plan['posts']} "
           f"({plan['name']})")
@@ -674,27 +712,39 @@ def replay_said():
     start_status_pusher()
     return jsonify({"success": True, "scope": scope, "posts": plan["posts"],
                     "round": plan["round"],
-                    "total_posts": len(show.session.posts)})
+                    "total_posts": len(show.session.posts),
+                    **feed_payload()})
 
 
 @app.route('/api/post/<int:post_id>/edit', methods=['POST'])
 def edit_post(post_id):
-    """Изменить реплику человека — пригодится перед переигровкой следующей.
+    """Изменить реплику человека — пригодится и перед переигровкой следующей.
 
     Сказанное человеком — такая же часть спектакля, как ответ модели, и правится
     оно на месте: и в ленте, и в разговоре, по которому строятся следующие ходы.
     Модели после этого отвечали на прежние слова, поэтому дальше её реплику
     переигрывают (см. /api/replay).
+
+    Идущий спектакль правке не помеха: лента и ДАМП в это время — его, и заказ
+    он берёт сам, между ходами (см. show.order_feed). Останавливать его для
+    этого не приходится.
     """
-    if show.session.running:
-        return jsonify({"success": False,
-                        "error": "спектакль идёт — правят под занавесом"})
     data = request.get_json(silent=True) or {}
+    if show.session.running:
+        problem = show.session.order_feed("edit", post_id=post_id,
+                                          content=data.get("content", ""))
+        if problem:
+            return refuse_order(problem)
+        return jsonify({"success": True, "queued": True, **feed_payload()})
     post, problem = show.session.edit_post(post_id, data.get("content", ""))
     if problem:
-        return jsonify({"success": False, "error": problem})
+        return refuse_order(problem)
+    # О сделанном рассказывают тем же слогом, что и о заказе, взятом на ходу:
+    # странице и тут нужно собрать ленту заново и открыть ход этой же реплики
+    show.session.note_feed_done("✍️ Реплика человека изменена", post.get("id"))
     return jsonify({"success": True, "post": show.post_view(post),
-                    "total_posts": len(show.session.posts)})
+                    "total_posts": len(show.session.posts),
+                    **feed_payload()})
 
 
 @app.route('/api/post/<int:post_id>/revert', methods=['POST'])
@@ -707,16 +757,24 @@ def revert_post(post_id):
     её же, а нынешние слова ложатся в летопись — поэтому по версиям можно
     ходить и назад, и вперёд. Реплику модели так не вернуть: за неё говорят
     заново, переигровкой (см. /api/replay).
+
+    На ходу заказ берёт сам спектакль, между ходами, — занавес для возврата
+    версии не нужен (см. show.order_feed).
     """
-    if show.session.running:
-        return jsonify({"success": False,
-                        "error": "спектакль идёт — правят под занавесом"})
     data = request.get_json(silent=True) or {}
+    if show.session.running:
+        problem = show.session.order_feed("version", post_id=post_id,
+                                          version=data.get("version"))
+        if problem:
+            return refuse_order(problem)
+        return jsonify({"success": True, "queued": True, **feed_payload()})
     post, problem = show.session.revert_version(post_id, data.get("version"))
     if problem:
-        return jsonify({"success": False, "error": problem})
+        return refuse_order(problem)
+    show.session.note_feed_done("↩️ Реплике вернули прежние слова", post.get("id"))
     return jsonify({"success": True, "post": show.post_view(post),
-                    "total_posts": len(show.session.posts)})
+                    "total_posts": len(show.session.posts),
+                    **feed_payload()})
 
 
 @app.route('/api/status')

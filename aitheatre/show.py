@@ -3442,6 +3442,20 @@ class DebateSession:
         # рвётся (см. plan_replay и replay_broken_turn). Решается это на старте
         # продолжения, а играется там же, где и сам спектакль — первым делом
         self.replay_plan = None
+        # Заказ ленты: правка сказанного, возврат версии или переигровка. На ходу
+        # его берёт сам спектакль, между ходами (см. order_feed и take_order):
+        # лента и ДАМП в это время — собственность идущего хода, и второй писатель
+        # встал бы посреди незаконченной записи. Под занавесом заказ делается
+        # сразу: писать в ленту больше некому, а спектакль останавливать ради
+        # правки не приходится — статус не запрет (см. replay_show)
+        self.feed_order = None
+        # Что стало с последним заказом ленты — словами для страницы
+        # (см. status_payload): состоянием, а не ответом на нажатие, потому что
+        # заказ мог быть сделан и в другой вкладке, и на чужом ходу
+        self.feed_note = None
+        # Переигровка, посчитанная заказом и ждущая того, кто её сыграет:
+        # план берёт ведущий спектакля (см. take_replay_next)
+        self.replay_next = None
         # Прежние слова отложенных реплик: переигранная реплика встаёт тем же
         # номером, и её прежние слова должны остаться летописью, а не пропасть
         # (см. hold_from, add_post). Наполняется откладыванием ленты перед
@@ -3581,6 +3595,12 @@ class DebateSession:
             # не начинается с чистого листа, иначе модель отвечала бы не на то,
             # что говорилось на сцене, а в пустоту
             self.conversation_history = self.history_from_posts()
+            # Акт продолжения — по самой ленте, а не по памяти о последнем акте:
+            # память бывает и стёрта (спектакль доигрывали правкой, из архива,
+            # да и просто чужим кодом), а лента всегда на месте. Без этого
+            # продолжение своей же сцены начиналось бы с первого акта
+            # (см. page.canContinuePlay)
+            self.current_round = int(self.posts[-1].get("round") or 0) if self.posts else 0
             # Цена продолжения — вся цена спектакля: он всё ещё тот же
             self.money_told = bool(self.spent)
             # А ход, оборванный смертью процесса, переспрашивается: реплики
@@ -3770,14 +3790,71 @@ class DebateSession:
         self.held_versions = {}
         return len(back)
 
-    def replay_plan_for(self, post_id, scope: str = "post") -> tuple:
-        """Что переигрывается: с какого места лента обрывается и сколько играть заново.
+    def replay_scope(self, post_id, scope=None, version=None) -> tuple:
+        """Что переигрывается: (место в ленте, сколько реплик, беда).
 
         Реплика — одна (та же, тем же участником, в том же акте), акт — весь акт
         целиком, с его первой реплики, спектакль — всё, с самого начала. Число
         реплик берётся из ленты, а не из состава: переигрывается ровно то, что было
         сказано, — и если место из состава убрали, акт от этого короче не станет
         (участник просто пропустит свой ход, см. run_debate_thread).
+
+        Версия — переигровка с прежних слов реплики (см. version_pick): у реплики
+        модели заново отвечает она же, а у реплики человека — тот, кто отвечал
+        после: за человека говорит модель, и её ответ и переигрывается. Если после
+        реплики человека никто не отвечал, переигрывать нечего.
+
+        Ничего не меняет — по этому заказ ленты принимается или отклоняется сразу
+        (см. check_order), а лента обрывается уже перед самой переигровкой
+        (см. replay_plan_for).
+
+        Возвращает (место, реплик, беда): беда не пустая — переигрывать нечего.
+        """
+        if version is not None:
+            owner, _pick, problem = self.version_pick(post_id, version)
+            if problem:
+                return None, 0, problem
+            index = self.index_of(owner.get("id"))
+            if owner.get("model_used") == "human":
+                if index + 1 >= len(self.posts):
+                    return None, 0, ("за этой репликой никто не отвечал — "
+                                     "переигрывать нечего, спектакль можно просто "
+                                     "продолжить")
+                index += 1
+            count = 1
+        elif str(scope or "post").strip().lower() == "show":
+            if not self.posts:
+                return None, 0, "переигрывать нечего: лента пуста"
+            index, count = 0, len(self.posts)
+        else:
+            scope = str(scope or "post").strip().lower()
+            if scope not in ("post", "round", "act"):
+                return None, 0, f"неизвестно, что переигрывать: «{scope}»"
+            index = self.index_of(post_id)
+            if index is None:
+                return None, 0, f"реплики №{post_id} в ленте нет"
+            if scope in ("round", "act"):
+                act = int(self.posts[index].get("round") or 0)
+                index = next((place for place, one in enumerate(self.posts)
+                              if int(one.get("round") or 0) == act), index)
+                count = sum(1 for one in self.posts
+                            if int(one.get("round") or 0) == act)
+            else:
+                count = 1
+        name = self.posts[index].get("display_name") or ""
+        # С того, с кого играть, нужно начать — и он обязан быть на сцене. Место,
+        # ушедшее из состава (или переименованное), начало бы переигровку
+        # с чужого хода, а прежняя реплика пропала бы: отложенное возвращается
+        # только тем, что нумеровано дальше отыгранного (см. return_held)
+        if not any(one.get("display_name") == name
+                   for one in self.runtime_participants):
+            return None, 0, (f"места «{name}» больше нет в составе: "
+                             f"переигрывать некому")
+        return index, count, ""
+
+    def replay_plan_for(self, post_id, scope=None, version=None,
+                        hold: bool = True) -> tuple:
+        """Чем играть сказанное заново: с какого места лента обрывается и сколько.
 
         План — то, чем играют заново (см. run_debate_thread); вместе с планом
         возвращается отложенное, потому что лента уже оборвана и вернуть её
@@ -3788,39 +3865,25 @@ class DebateSession:
         один лишь scope (см. page.replayWholeShow), поэтому требовать номер значило
         бы отказывать в переигровке всему спектаклю.
 
+        hold=False — план без обрыва ленты: его берут заказом, и лента в этот
+        миг ещё занята идущим ходом или ждёт возврата версии. Место, с которого
+        её оборвать, лежит в самом плане ("index"), и обрывает её тот, кто
+        и вправду начинает переигровку (см. replay_show).
+
         Возвращает (план, отложенное, беда): беда не пустая — переигрывать нечего.
         """
-        scope = str(scope or "post").strip().lower()
-        if scope not in ("post", "round", "act", "show"):
-            return None, None, f"неизвестно, что переигрывать: «{scope}»"
-        index = 0 if scope == "show" else self.index_of(post_id)
-        if index is None:
-            return None, None, f"реплики №{post_id} в ленте нет"
-        if scope == "show":
-            if not self.posts:
-                return None, None, "переигрывать нечего: лента пуста"
-            count = len(self.posts)
-        elif scope in ("round", "act"):
-            act = int(self.posts[index].get("round") or 0)
-            index = next((place for place, one in enumerate(self.posts)
-                          if int(one.get("round") or 0) == act), index)
-            count = sum(1 for one in self.posts
-                        if int(one.get("round") or 0) == act)
-        else:
-            count = 1
+        index, count, problem = self.replay_scope(post_id, scope, version)
+        if problem:
+            return None, None, problem
         first = self.posts[index]
-        name = first.get("display_name") or ""
-        # С того, с кого играть, нужно начать — и он обязан быть на сцене. Место,
-        # ушедшее из состава (или переименованное), начало бы переигровку
-        # с чужого хода, а прежняя реплика пропала бы: отложенное возвращается
-        # только тем, что нумеровано дальше отыгранного (см. return_held)
-        if not any(one.get("display_name") == name
-                   for one in self.runtime_participants):
-            return None, None, (f"места «{name}» больше нет в составе: "
-                                f"переигрывать некому")
         plan = {"posts": count,
                 "round": int(first.get("round") or 0) or 1,
-                "name": name}
+                "name": first.get("display_name") or "",
+                # Место обрыва ленты: по нему это делает replay_show, когда
+                # план и вправду берут в игру
+                "index": index}
+        if not hold:
+            return plan, None, ""
         held = self.hold_from(index)
         plan["held"] = held
         return plan, held, ""
@@ -3832,7 +3895,13 @@ class DebateSession:
         записи остаются в файле, а переигранное ложится ниже, с отметкой
         (см. dump_replayed). Память о показанном у моделей тоже остаётся прежней —
         её возвращает сама лента (см. restore_shown_pictures).
+
+        Здесь же лента и обрывается — у плана, пришедшего заказом (см.
+        plan_feed_replay, replay_plan_for): переигранное встаёт тем же номером,
+        а прежнее ждёт в отложенном до конца переигровки (см. return_held).
         """
+        if plan.get("held") is None and plan.get("index") is not None:
+            plan["held"] = self.hold_from(int(plan["index"]))
         self.running = True
         self.finished = False
         self.moderator_finished = False
@@ -3850,6 +3919,254 @@ class DebateSession:
         # Оборванный ход тут не при чём: ленту переигрывают, а не возвращают
         self.replay_plan = None
 
+    # ------------------------------------------------------------
+    # Заказы ленты: правка, возврат версии и переигровка — без занавеса
+    # ------------------------------------------------------------
+    # Статус спектакля — это признак того, чем он сейчас занят, а не запрет:
+    # сказанное правят, возвращают и переигрывают и под занавесом, и на ходу.
+    # На ходу лента и ДАМП принадлежат идущему ходу, поэтому заказ из веб-потока
+    # не делается сам собой: его берёт спектакль, между ходами (см. take_order).
+
+    def order_feed(self, kind: str, **payload) -> str:
+        """Заказать правку ленты: правку реплики, возврат версии или переигровку.
+
+        Возвращает беду словами: пустая строка — заказ принят. Под занавесом
+        (и до спектакля) он тут же и сделан: в ленту больше никто не пишет.
+        А на ходу заказ берёт сам спектакль, между ходами, — останавливать его
+        ради правки не приходится, и занавес для этого не нужен (см.
+        take_order, run_debate_thread).
+
+        Ждать заказу недолго: идущий ход не тянет ради него ни новых поисков,
+        ни новых попыток — сказанное уже сказано (см. ollama_api.ask_model).
+        """
+        problem = self.check_order(kind, **payload)
+        if problem:
+            return self.note_feed_refusal(problem)
+        # Заказ один: второй поверх первого — это не очередь, а гонка
+        if self.feed_order is not None:
+            problem = self.take_order()
+            if problem:
+                return problem
+        self.feed_order = {"kind": str(kind or ""), **payload}
+        if not self.running:
+            return self.take_order()
+        # Спектакль идёт: заказ принят, но сделает его он сам. Сказать об этом
+        # надо сразу — иначе нажатие выглядит как «ничего не произошло»
+        accepted = {"edit": "✍️ Правка реплики принята",
+                    "version": "↩️ Возврат прежних слов принят",
+                    "replay": "🔁 Переигровка принята"}
+        self.feed_note = {"text": ((accepted.get(self.feed_order["kind"])
+                                    or "Заказ ленте принят")
+                                   + ": сделаю сразу после этого хода"),
+                          "stamp": time.time(), "rebuild": False, "post": 0}
+        print(f"  ⏳ {self.feed_note['text']}")
+        return ""
+
+    def note_feed_refusal(self, problem: str) -> str:
+        """Отказ по заказу ленты — и словами, и состоянием.
+
+        Состоянием — потому что заказ мог быть сделан и в другой вкладке,
+        и на чужом ходу: там ответа на нажатие не видно, и молчание выглядело бы
+        как «нажал, а ничего не произошло» (см. feed_note, web.feed_payload).
+        """
+        self.feed_note = {"text": f"⚠️ {problem}", "stamp": time.time(),
+                          "rebuild": False, "post": 0}
+        print(f"  ⚠️  Заказ ленты не сделан: {problem}")
+        return problem
+
+    def check_order(self, kind: str, **payload) -> str:
+        """Можно ли сделать заказ, ничего не меняя: беда — словами, пусто — можно.
+
+        Нужна заказам, пришедшим на ходу: делает их спектакль позже, между
+        ходами, и отказ должен быть слышен сразу, а не после чужого хода
+        (см. order_feed). Заодно это единственное место, где сказано, что
+        править и возвращать можно только слова человека, а у модели есть
+        только переигровка: прямые вызовы (edit_post, revert_version) ходят
+        через ту же дверь.
+        """
+        kind = str(kind or "")
+        post_id = payload.get("post_id")
+        if kind == "edit":
+            _post, problem = self.post_to_edit(post_id, payload.get("content"))
+            return problem
+        if kind == "version":
+            index = self.index_of(post_id)
+            if index is None:
+                return f"реплики №{post_id} в ленте нет"
+            if self.posts[index].get("model_used") != "human":
+                return ("вернуть прежние слова можно реплике человека: "
+                        "у модели её переигрывают")
+            return self.version_pick(post_id, payload.get("version"))[2]
+        if kind == "replay":
+            return self.replay_scope(post_id, payload.get("scope"),
+                                     payload.get("version"))[2]
+        return f"неизвестно, что делать с лентой: «{kind}»"
+
+    def post_to_edit(self, post_id, content) -> tuple:
+        """Реплика человека, которую правят: (реплика, беда) — без единой правки."""
+        index = self.index_of(post_id)
+        if index is None:
+            return None, f"реплики №{post_id} в ленте нет"
+        post = self.posts[index]
+        if post.get("model_used") != "human":
+            return None, "править можно реплику человека: у модели её переигрывают"
+        said = str(content or "").strip()
+        if not said and not post.get("attachments"):
+            return None, "пустая реплика: сказать нечего"
+        return post, ""
+
+    def take_order(self) -> str:
+        """Сделать заказ ленты, если он есть: беда — словами, пусто — сделано.
+
+        Зовут это двое: веб-поток, когда спектакль не идёт (см. order_feed),
+        и сам спектакль, между ходами (см. run_debate_thread). Переигровка
+        здесь не играется: её план ложится в replay_next, и играет заново тот,
+        кто ведёт спектакль, — иначе в ленту писали бы двое.
+        """
+        order, self.feed_order = self.feed_order, None
+        if not order:
+            return ""
+        kind = str(order.get("kind") or "")
+        post_id = order.get("post_id")
+        focus, problem = 0, ""
+        if kind == "edit":
+            post, problem = self.edit_post(post_id, order.get("content"))
+            note = "✍️ Реплика человека изменена"
+            focus = int((post or {}).get("id") or 0)
+        elif kind == "version":
+            post, problem = self.revert_version(post_id, order.get("version"))
+            note = "↩️ Реплике вернули прежние слова"
+            focus = int((post or {}).get("id") or 0)
+        elif kind == "replay":
+            plan, focus, problem = self.plan_feed_replay(post_id, order.get("scope"),
+                                                        order.get("version"))
+            note = "🔁 Сказанное играется заново"
+            if not problem:
+                self.replay_next = plan
+        else:
+            return f"неизвестно, что делать с лентой: «{kind}»"
+        if problem:
+            return self.note_feed_refusal(problem)
+        return self.note_feed_done(note, focus)
+
+    def note_feed_done(self, note: str, post_id=0) -> str:
+        """Сделанный заказ ленты — словами и состоянием.
+
+        Странице это нужно дважды: и ответом на нажатие (как всплывающее
+        сообщение прямо сейчас), и состоянием — заказ мог быть сделан в другой
+        вкладке. Собирает она ленту заново и открывает ход той реплики, за которую
+        взялись (см. feed_note, page.rebuildFeed)
+        """
+        self.feed_note = {"text": note, "stamp": time.time(),
+                          "rebuild": True, "post": int(post_id or 0)}
+        print(f"  🎬 {note}" + (f": реплика №{post_id}" if post_id else ""))
+        return ""
+
+    def take_replay_next(self):
+        """Переигровка, посчитанная заказом (None — никакой): берут её один раз."""
+        plan, self.replay_next = self.replay_next, None
+        return plan
+
+    def version_pick(self, post_id, version) -> tuple:
+        """Выбранные прежние слова реплики: (реплика, номер версии, беда).
+
+        Ничего не меняет — по этому заказ ленты принимается сразу, а сами слова
+        переключаются уже тогда, когда лента свободна (см. take_order).
+        """
+        index = self.index_of(post_id)
+        if index is None:
+            return None, None, f"реплики №{post_id} в ленте нет"
+        post = self.posts[index]
+        versions = list(post.get("versions") or [])
+        try:
+            pick = int(version)
+        except (TypeError, ValueError):
+            pick = -1
+        if not 0 <= pick < len(versions):
+            return None, None, (f"прежних слов у реплики №{post_id} столько нет: "
+                                f"просят версию №{pick + 1}, а их {len(versions)}")
+        if not str(versions[pick].get("content") or "").strip():
+            return None, None, "в этой версии слов не было — сказать нечего"
+        return post, pick, ""
+
+    def switch_words(self, post: dict, pick: int) -> str:
+        """Поставить реплике слова из её летописи: беда — словами.
+
+        Нынешние слова при этом не пропадают: они ложатся в ту же летопись —
+        тем же порядком, что и при правке. Список растёт только вперёд, и ДАМП
+        читает его так же (см. parse_dump), поэтому по версиям можно ходить
+        в обе стороны, а в файле остаются обе записи (см. dump_new_version).
+        """
+        versions = list(post.get("versions") or [])
+        if not 0 <= int(pick) < len(versions):
+            return (f"прежних слов у реплики №{post.get('id')} столько нет: "
+                    f"просят версию №{int(pick) + 1}, а их {len(versions)}")
+        was = versions[int(pick)]
+        if not str(was.get("content") or "").strip():
+            return "в этой версии слов не было — сказать нечего"
+        post["versions"] = remember_version(post)
+        post["content"] = str(was.get("content") or "")
+        post["content_html"] = text.markdown_to_html(post["content"])
+        self.conversation_history = self.history_from_posts()
+        dump_new_version(post)
+        return ""
+
+    def replay_aim(self, post_id, scope: str = "post") -> int:
+        """Номер реплики, с которой начнётся переигровка (0 — не нашлось).
+
+        Нужен странице: после переигровки показывают именно эту реплику,
+        с раскрытым ходом (см. page.openTurnWhenArrives).
+        """
+        scope = str(scope or "post").strip().lower()
+        if scope == "show":
+            return int(self.posts[0].get("id") or 0) if self.posts else 0
+        index = self.index_of(post_id)
+        if index is None:
+            return 0
+        if scope in ("round", "act"):
+            act = int(self.posts[index].get("round") or 0)
+            index = next((place for place, one in enumerate(self.posts)
+                          if int(one.get("round") or 0) == act), index)
+        return int(self.posts[index].get("id") or 0)
+
+    def plan_feed_replay(self, post_id, scope=None, version=None) -> tuple:
+        """План переигровки по заказу: (план, главная реплика, беда).
+
+        Без версии это обычная переигровка — реплики, акта или всего спектакля
+        (см. replay_plan_for). С версией переигрывают с прежних слов: слова
+        берутся из летописи реплики, и она сама ложится первой (см.
+        switch_words). У реплики модели заново отвечает она же, а у реплики
+        человека — тот, кто отвечал после: за человека говорит модель, и её
+        ответ и переигрывается. Если после реплики человека никто не отвечал,
+        переигрывать нечего — спектакль просто продолжают.
+
+        Прежние слова ничего не теряют: они остаются в «прежних» (см. add_post,
+        held_versions), а в ленте встаёт новый ответ — и переключается на него
+        страница.
+
+        Ленту здесь не обрывают: заказ может прийти и на чужом ходу, и слова
+        выбранной версии видны в ней сразу — а оборвёт её тот, кто и вправду
+        начнёт переигровку (см. replay_show, replay_plan_for).
+        """
+        problem = self.check_order("replay", post_id=post_id, scope=scope,
+                                  version=version)
+        if problem:
+            return None, 0, problem
+        # Показывать надо ту реплику, за которую взялись: у переигровки с версии
+        # это она сама — и у модели, и у человека (см. page.openTurnWhenArrives)
+        focus = (int(post_id or 0) if version is not None
+                 else self.replay_aim(post_id, scope))
+        if version is not None:
+            owner, pick, _problem = self.version_pick(post_id, version)
+            problem = self.switch_words(owner, pick)
+            if problem:
+                return None, 0, problem
+        plan, _held, problem = self.replay_plan_for(post_id, scope, version,
+                                                   hold=False)
+        if problem:
+            return None, 0, problem
+        return plan, focus, ""
+
     def edit_post(self, post_id, content) -> tuple:
         """Изменить реплику человека: слова другие, а место — то же.
 
@@ -3862,15 +4179,10 @@ class DebateSession:
 
         Возвращает (реплика, беда): беда не пустая — править нечего.
         """
-        index = self.index_of(post_id)
-        if index is None:
-            return None, f"реплики №{post_id} в ленте нет"
-        post = self.posts[index]
-        if post.get("model_used") != "human":
-            return None, "править можно реплику человека: у модели её переигрывают"
+        post, problem = self.post_to_edit(post_id, content)
+        if problem:
+            return None, problem
         said = str(content or "").strip()
-        if not said and not post.get("attachments"):
-            return None, "пустая реплика: сказать нечего"
         # Прежние слова остаются летописью — и в ДАМПе, и в ленте: к ним можно
         # вернуться (см. version_view, revert_version)
         post["versions"] = remember_version(post)
@@ -3897,34 +4209,18 @@ class DebateSession:
 
         Возвращает (реплика, беда): беда не пустая — возвращать нечего.
         """
-        index = self.index_of(post_id)
-        if index is None:
-            return None, f"реплики №{post_id} в ленте нет"
-        post = self.posts[index]
-        if post.get("model_used") != "human":
-            return None, ("вернуть прежние слова можно реплике человека: "
-                          "у модели её переигрывают")
-        versions = list(post.get("versions") or [])
-        try:
-            version_index = int(version_index)
-        except (TypeError, ValueError):
-            version_index = -1
-        if not 0 <= version_index < len(versions):
-            return None, (f"прежних слов у реплики №{post_id} столько нет: "
-                          f"просят версию №{version_index + 1}, а их {len(versions)}")
-        was = versions[version_index]
-        # Нынешние слова ложатся в летопись — тем же порядком, что и при правке:
-        # список растёт только вперёд, и ДАМП читает его так же (см. parse_dump).
-        # Вернувшаяся версия в нём остаётся: эти слова реплика и вправду
-        # говорила прежде — просто теперь они и есть реплика
-        post["versions"] = remember_version(post)
-        post["content"] = str(was.get("content") or "")
-        post["content_html"] = text.markdown_to_html(post["content"])
-        self.conversation_history = self.history_from_posts()
-        dump_new_version(post)
-        print(f"↩️  Реплика человека №{post['id']} вернулась к версии "
-              f"{version_index + 1}: {len(post['content'])} знаков")
-        return post, ""
+        problem = self.check_order("version", post_id=post_id, version=version_index)
+        if problem:
+            return None, problem
+        picked, pick, _problem = self.version_pick(post_id, version_index)
+        if _problem:
+            return None, _problem
+        problem = self.switch_words(picked, pick)
+        if problem:
+            return None, problem
+        print(f"↩️  Реплика человека №{picked['id']} вернулась к версии "
+              f"{pick + 1}: {len(picked['content'])} знаков")
+        return picked, ""
 
     def new_show(self):
         """«Новый спектакль»: новые имена и характеры, настройки, сцена и тема — те же."""
@@ -5701,6 +5997,24 @@ def report_topic_picture(participants: list) -> None:
               f"картинок не читает ни одна модель состава")
 
 
+def merged_held(first: dict, second: dict) -> dict:
+    """Отложенное двух переигровок — одним: без потерь и без повторов.
+
+    Каждая переигровка откладывает свою часть ленты (см. hold_from), и части
+    эти пересекаются: вторая переигровка могла начаться и раньше, и позже
+    первой. Соединяем по номеру реплики: под одним номером лежит одна и та же
+    реплика, и вторая запись вернее первой — она считалась позже.
+    """
+    posts = {}
+    for one in (first or {}).get("posts") or []:
+        posts[int(one.get("id") or 0)] = one
+    for one in (second or {}).get("posts") or []:
+        posts[int(one.get("id") or 0)] = one
+    turns = dict((first or {}).get("turns") or {})
+    turns.update((second or {}).get("turns") or {})
+    return {"posts": [posts[key] for key in sorted(posts)], "turns": turns}
+
+
 def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = None):
     """
     Играет спектакль акт за актом, пока режиссёр не опустит занавес.
@@ -5781,9 +6095,33 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
     def enough() -> bool:
         """Сказано ли уже всё переигранное: по числу реплик, а не по акту."""
         return bool(replay) and len(session.posts) - again_base >= again_left
-    
+
+    def serve_order() -> bool:
+        """Заказ ленты, если он есть: True — заказана переигровка.
+
+        Зовётся между ходами: под идущим ходом лента занята, и правку из другого
+        потока встала бы посреди незаконченной записи (см. session.take_order).
+        Сделанный заказ тут же виден и странице: она узнаёт о нём состоянием
+        (см. session.feed_note, status_payload).
+        """
+        if session.feed_order is None:
+            return False
+        problem = session.take_order()
+        if problem:
+            print(f"  ⚠️  Заказ ленты не сделан: {problem}")
+        if session.replay_next is None:
+            return False
+        print("  ⏹  Заказана переигровка — этот ход уступает ей место")
+        return True
+
     try:
         while True:
+            # Заказы ленты (правка, возврат версии, переигровка) разбираются
+            # между ходами: спектакль из-за них не останавливают (см.
+            # session.order_feed)
+            if serve_order():
+                again_done = True
+                break
             # Переигранное сказано — занавес: следующей была бы уже вторая
             # половина спектакля, а её никто не просил (см. replay_plan_for)
             if enough():
@@ -5807,6 +6145,11 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
                               if one.get("display_name") == replay.get("name")), 0)
             
             for participant in act_cast[first:]:
+                # И посреди акта — тот же разбор заказов: правку просят, когда
+                # удобно режиссёру, а не к концу круга
+                if serve_order():
+                    again_done = True
+                    break
                 # И посреди акта — тем же счётом: переигранное могло кончиться
                 # на любом месте очереди
                 if enough():
@@ -5854,6 +6197,18 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
                             session.waiting_for_human = False
                             break
                         
+                        # Правку ленты можно заказать и пока ждём человека:
+                        # делать её, кроме нас, некому, а ход от неё не пропадает
+                        if (session.feed_order is not None
+                                and session.feed_order.get("kind") != "replay"):
+                            serve_order()
+                            continue
+                        # Заказанная переигровка — другое дело: она забирает
+                        # ленту себе, и этот ход ей уступает (см. serve_order)
+                        if serve_order():
+                            again_done = True
+                            break
+
                         current_message = session.moderator_message
                         if current_message is not None:
                             session.waiting_for_human = False
@@ -5889,7 +6244,7 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
                             session.current_action = None
                             break
                     
-                    if session.moderator_finished:
+                    if session.moderator_finished or again_done:
                         break
                 else:
                     # В памяти оставляем только того, кто сейчас говорит
@@ -5916,10 +6271,18 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
         print(f"❌ Спектакль прерван из-за ошибки: {e}")
         traceback.print_exc()
     finally:
+        # Заказ, пришедший к самому концу спектакля, не теряется: делать его
+        # больше некому, а лента свободна (см. session.take_order)
+        if session.feed_order is not None:
+            serve_order()
+        # Заказанная на ходу переигровка: занавес не опускается — сказанное
+        # играется заново, и уже другим потоком (см. session.order_feed).
+        # Отложенное тогда нужно ей: возвращать его сейчас — значит задвоить ленту
+        next_plan = session.take_replay_next()
         # Отложенное возвращается в ленту — и при ошибке тоже: переигранное уже
         # заняло свои номера, а всё, чего переигровка не коснулась, спектаклю
         # терять незачем (см. return_held)
-        if replay:
+        if replay and not next_plan:
             back = session.return_held(replay.get("held") or {})
             print(f"  ↩️  Переигровка кончена, прежних реплик вернулось: {back}")
             # Вернувшееся возвращается и зрителю: страница узнаёт о репликах
@@ -5930,13 +6293,29 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
             if back and on_post:
                 for post in session.posts[-back:]:
                     on_post(post)
-        # Всегда завершаем спектакль явно, при любом выходе из цикла - в том
-        # числе при ошибке, чтобы клиент разблокировал кнопки.
-        session.finished = True
-        session.running = False
         session.current_participant = None
         session.current_action = None
-        
-        if settings.UNLOAD_AFTER_DEBATE:
-            for model in show_model_names():
-                ollama_api.unload_model(model)
+        if next_plan:
+            # Переигровку заказали на ходу: спектакль не опускает занавес,
+            # а играет сказанное заново (см. session.order_feed). Лента
+            # откладывается здесь же — заказ приходит планом, а не обрывом
+            # (см. replay_show), и первым делом с ней прощается нынешний круг
+            print("  🔁 Переигровка на ходу: спектакль играет заново, не останавливаясь")
+            session.replay_show(next_plan)
+            next_plan["held"] = merged_held(replay.get("held") if replay else None,
+                                           next_plan.get("held"))
+            thread = threading.Thread(target=run_debate_thread,
+                                      args=(session.topic or topic,),
+                                      kwargs={"on_post": on_post, "on_draft": on_draft,
+                                              "replay": next_plan})
+            thread.daemon = True
+            thread.start()
+        else:
+            # Всегда завершаем спектакль явно, при любом выходе из цикла - в том
+            # числе при ошибке, чтобы клиент разблокировал кнопки.
+            session.finished = True
+            session.running = False
+            
+            if settings.UNLOAD_AFTER_DEBATE:
+                for model in show_model_names():
+                    ollama_api.unload_model(model)

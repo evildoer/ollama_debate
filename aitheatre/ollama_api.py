@@ -1333,6 +1333,14 @@ def ask_model(model: str, messages: list, participant_name: str, options: dict =
         # Режиссёр завершил спектакль - не тратим время на новые поиски
         if show_session is not None and show_session.moderator_finished and content and content.strip():
             return content, search_count, search_queries
+
+        # Ленте заказана правка или переигровка — ход на этом не обрывается
+        # (сказанное уже сказано), но и новых поисков с попытками ради него
+        # не затеваем: заказ должен дождаться только конца этого слова
+        # (см. show.DebateSession.order_feed, take_order)
+        if (show_session is not None and show_session.feed_order is not None
+                and content and content.strip()):
+            return content, search_count, search_queries
         
         # Если нужен принудительный поиск - передаём tool_choice="any".
         # И то же самое делаем на самом первом запросе хода: искать надо

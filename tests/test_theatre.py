@@ -9722,20 +9722,29 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("playRestored", restore)
         self.assertIn("updatePanel();", restore)
 
-    def test_the_curtain_offers_to_finish_the_returned_play(self):
-        """Доиграть прежний спектакль можно из пульта — и только когда есть что доигрывать.
+    def test_the_curtain_always_offers_to_finish_the_said_play(self):
+        """Доиграть можно всё, что сказано: и прежний спектакль, и свой же занавес.
 
-        Кнопка живёт под занавесом и зависит от того, что лента вернулась из ДАМПа
-        (см. playRestored): продолжать пустую сцену или только что сыгранный
-        спектакль нечем, а старт обязан попросить продолжение у сервера.
+        Кнопка живёт под занавесом и зависит от ленты, а не от того, вернулась ли
+        она из ДАМПа (см. canContinuePlay): только что отыгранный спектакль
+        продолжается так же, как прежний, а старт обязан попросить продолжение
+        у сервера. Раньше доиграть можно было только возвращённое, и после своего
+        же занавеса спектакль приходилось сохранять и грузить обратно.
         """
         source = page.HTML_TEMPLATE
         self.assertIn('id="continueBtn"', source)
         self.assertIn("function continueShow", source)
         panel = self._function("updatePanel")
-        self.assertIn("playRestored", panel,
-                      "кнопка должна зависеть от того, что это прежний спектакль")
+        self.assertIn("canContinuePlay(showFinished, storyLength)", panel,
+                      "кнопка должна зависеть от сказанного, а не от прежнего возврата")
         self.assertIn("canContinue", panel)
+        # И сама граница проверяется настоящим node: доиграть можно только
+        # под занавесом и только когда есть что продолжать
+        self.assertEqual(self._run_page(("canContinuePlay",),
+                                        "canContinuePlay(false, 3)",
+                                        "canContinuePlay(true, 0)",
+                                        "canContinuePlay(true, 2)"),
+                         [False, False, True])
         start = self._function("startDebate")
         self.assertIn("resumePlay", start, "старт должен уметь попросить продолжение")
         self.assertIn("continue", start)
@@ -9750,9 +9759,9 @@ class TestPageScript(unittest.TestCase):
         status = self._function("applyStatus")
         flags = status[status.index("showFinished = !!data.finished;"):
                        status.index("if (data.waiting_for_human)")]
-        self.assertIn("playRestored", flags,
-                      "признак прежнего спектакля ставится вместе с остальными флагами")
-        self.assertLess(flags.index("playRestored"), flags.index("updatePanel();"),
+        self.assertIn("storyLength", flags,
+                      "сколько сказано — из того же состояния, что и занавес")
+        self.assertLess(flags.index("storyLength"), flags.index("updatePanel();"),
                         "флаги должны стоять до отрисовки пульта")
 
     def test_the_page_rebuilds_the_feed_for_the_second_asking(self):
@@ -10046,7 +10055,69 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("переиграна", model_html)
         self.assertNotIn("revertVersion(5, 0)", model_html,
                          "у реплики модели предлагают правку, которой у неё нет")
+        # И у каждой версии — своя кнопка переигровки: слова не заменяют реплику,
+        # а становятся тем, с чего отвечают заново (см. page.replayVersion)
+        self.assertIn("onclick=\"replayVersion(5, 0)\"", model_html,
+                      "переиграть с прежних слов у реплики модели нечем")
+        self.assertIn("переиграть с этих слов", human_html)
         self.assertEqual(words, "версия версии версий версий версия")
+
+    def test_the_finished_show_changes_faces_like_the_running_one(self):
+        """Аватарку можно сменить и под занавесом: лента-то никуда не делась.
+
+        Раньше выбор значка в составе правил только форму, если спектакль не шёл
+        (см. facesOnStage): под занавесом значок не менялся ни в ленте, ни на
+        сервере — ровно так и выглядела жалоба «у завершённого спектакля аватарки
+        не меняются».
+        """
+        branch = self._function("chooseEmoji")
+        self.assertIn("!facesOnStage(", branch,
+                      "смена значка в составе снова смотрит только на занавес")
+        self.assertNotIn("runningShow", branch)
+        self.assertEqual(self._run_page(("facesOnStage",),
+                                        "facesOnStage(false, false, 0)",
+                                        "facesOnStage(false, true, 3)",
+                                        "facesOnStage(true, false, 0)",
+                                        "facesOnStage(false, false, 2)"),
+                         [False, True, True, True],
+                         "лица в ленте — это и сыгранный спектакль, и идущий")
+
+    def test_the_switch_to_a_reply_shows_its_turn(self):
+        """Переключив реплику, видно весь её ход: блок открывается сам.
+
+        В ленте «ход реплики» свёрнут, а открывают его как раз тогда, когда
+        реплику правили или переигрывали (см. page.openTurnWhenArrives): там и
+        запрос к модели, и размышления, и чем ход кончился. После переключения
+        версии его приходилось открывать заново руками.
+        """
+        source = page.HTML_TEMPLATE
+        self.assertIn("if (focus) openTurnWhenArrives(focus, 10);", source,
+                      "лента собирается заново, а ход реплики так и не открывается")
+        turn = self._function("openTurnWhenArrives")
+        self.assertIn("turn.open = true", turn)
+        self.assertIn("loadTurnBox(turn)", turn)
+        self.assertIn("scrollIntoView", turn)
+        # И отметка о заказе ленты сама говорит, какую реплику показывать:
+        # она приходит и ответом на нажатие, и состоянием (см. noteFeedChange)
+        note = self._function("noteFeedChange")
+        self.assertIn("rebuildFeed(info.post || undefined)", note)
+        self.assertIn("showFeedAlert(info.text)", note)
+
+    def test_the_show_is_replayed_whenever_there_is_said(self):
+        """Переигрывают когда угодно — и на ходу тоже.
+
+        Занавес для этого не нужен: заказ берёт сам спектакль, между ходами
+        (см. web.replay_said). Граница проверяется настоящим node.
+        """
+        self.assertEqual(self._run_page(("canReplaySaid",),
+                                        "canReplaySaid(0)",
+                                        "canReplaySaid(3)"),
+                         [False, True])
+        self.assertIn("const canReplay = canReplaySaid(storyLength);",
+                      page.HTML_TEMPLATE)
+        self.assertIn("Идущий ход договорит и уступит место переигровке",
+                      page.HTML_TEMPLATE,
+                      "о переигровке на ходу не сказано — выглядит как ничего")
 
 
 class TestRulesOnPause(unittest.TestCase):
@@ -10574,16 +10645,27 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertIn("fetch('/api/status?lastPostCount=0'", reload_source[:600],
                       "лента не перечитывается: опрос под занавесом стоит")
 
-    def test_the_replay_route_refuses_while_the_show_is_on(self):
-        """Под идущим спектаклем не переигрывают: сцена занята (см. web.replay_said)."""
+    def test_the_replay_route_takes_an_order_while_the_show_is_on(self):
+        """Под идущим спектаклем переигровку заказывают — он берёт её сам.
+
+        Останавливать спектакль ради переигровки не нужно: заказ ждёт в очереди
+        (см. show.order_feed), а лента до того остаётся целой — оборвать её
+        под идущим ходом значило бы писать в ленту вдвоём.
+        """
         self._play(1)
         self.session.running = True
+        starter = mock.Mock()
 
-        answer = self.client.post("/api/replay", json={"post_id": 1}).get_json()
+        with mock.patch.object(show, "run_debate_thread", starter):
+            answer = self.client.post("/api/replay", json={"post_id": 1}).get_json()
+        self.session.running = False
 
-        self.assertFalse(answer["success"])
-        self.assertIn("Завершить", answer["error"])
-        self.assertEqual(len(self.session.posts), 3, "лента всё-таки оборвана")
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertTrue(answer["queued"], "заказ должен быть принят, а не сыгран сразу")
+        self.assertEqual(starter.call_count, 0, "второй спектакль начат под идущим")
+        self.assertEqual(self.session.feed_order["kind"], "replay")
+        self.assertIn("принят", answer["feed_note"]["text"])
+        self.assertEqual(len(self.session.posts), 3, "лента оборвана под чужим ходом")
 
     def test_the_replay_route_raises_the_curtain_and_cuts_the_feed(self):
         """Маршрут переигровки обрывает ленту и пускает поток спектакля заново."""
@@ -10626,10 +10708,14 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertIn("/api/post/${postId}/edit", page.HTML_TEMPLATE,
                       "правка реплики на странице никуда не отправляется")
 
-    def test_the_replay_button_is_shown_only_under_the_curtain(self):
-        """«Переиграть спектакль» — под занавесом и только когда есть что переигрывать."""
+    def test_the_page_shows_replay_whenever_there_is_said(self):
+        """«Переиграть спектакль» — когда есть что переигрывать, а не под занавесом.
+
+        Занавес — не запрет: переигровку можно заказать и на ходу, её берёт сам
+        спектакль (см. web.replay_said). Граница проверяется настоящим node.
+        """
         self.assertIn('id="replayBtn"', page.HTML_TEMPLATE)
-        self.assertIn("const canReplay = !!showFinished && !!lastPostCount;",
+        self.assertIn("const canReplay = canReplaySaid(storyLength);",
                       page.HTML_TEMPLATE)
         self.assertIn("replayBtn.style.display = canReplay", page.HTML_TEMPLATE,
                       "кнопка переигровки не прячется под идущим спектаклем")
@@ -10766,12 +10852,16 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertFalse(answer["success"])
         self.assertIn("человека", answer["error"])
 
+        # На ходу возврат версии не отменяется: его берёт сам спектакль,
+        # между ходами — спектакль для этого не останавливают (см. show.order_feed)
         self.session.running = True
         answer = self.client.post(f"/api/post/{model_post['id']}/revert",
                                   json={"version": 0}).get_json()
         self.session.running = False
-        self.assertFalse(answer["success"])
-        self.assertIn("спектакль идёт", answer["error"])
+        self.assertFalse(answer["success"], "у модели прежних слов вернуть нельзя")
+        self.assertIn("человека", answer["error"])
+        self.assertIsNone(self.session.feed_order,
+                          "отказанный заказ не должен ждать в очереди")
 
     def test_the_page_carries_the_previous_words_block(self):
         """Блок «прежние слова» есть у реплики в ленте, и вернуть версию — тоже."""
@@ -10786,6 +10876,250 @@ class TestSayingItAgain(unittest.TestCase):
                       page.HTML_TEMPLATE,
                       "вернуть прежние слова из ленты нечем")
         self.assertIn("прежние слова", page.HTML_TEMPLATE)
+
+    # ---------------------------------- правка и переигровка без занавеса
+
+    def _stage_a_human(self) -> dict:
+        """Спектакль из двух реплик, где вторая — живая: на неё отвечали."""
+        self._play(1)
+        self.session.posts = self.session.posts[:1]
+        human = self._human("Живые слова.")
+        who = self.session.runtime_participants[1]
+        with mock.patch.object(ollama_api, "ask_model",
+                               mock.Mock(side_effect=self.answer)), \
+                mock.patch("time.sleep"):
+            self.session.handle_ai_turn(who, 1)
+        return human
+
+    def test_the_just_finished_play_is_continued_without_a_dump(self):
+        """Свой же отыгранный спектакль доигрывается сразу — без сохранения.
+
+        Доиграть можно не только то, что вернулось из ДАМПа: занавес — это
+        признак того, что спектакль кончился, а не запрет продолжать
+        (см. page.canContinuePlay). Раньше кнопка ждала возврата из архива,
+        и свой занавес приходилось переживать через сохранение и загрузку.
+        """
+        self._play(1)
+        self.session.finished = True
+        self.session.running = False
+        before = [p["content"] for p in self.session.posts]
+        starter = mock.Mock()
+
+        with mock.patch.object(show, "run_debate_thread", starter):
+            answer = self.client.post("/api/start",
+                                      json={"continue": True}).get_json()
+        self.session.running = False
+
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertTrue(answer["resumed"], "спектакль начат заново, а не продолжен")
+        self.assertEqual([p["content"] for p in self.session.posts], before,
+                         "прежние реплики пропали из ленты")
+        self.assertFalse(self.session.finished, "занавес так и остался опущен")
+        self.assertEqual(self.session.current_round, 1,
+                         "продолжение забыло, каким актом кончился спектакль")
+        self.assertEqual(starter.call_count, 1, "продолжение никто не начал")
+
+    def test_a_replay_ordered_on_the_run_is_taken_between_turns(self):
+        """Переигровку заказывают на ходу — и делает её сам спектакль.
+
+        Останавливать спектакль ради переигровки не нужно: между ходами он берёт
+        заказ, обрывает ленту и играет сказанное заново, не опуская занавес
+        (см. session.take_order, run_debate_thread). Прежнее «переигрывают только
+        под занавесом» и было тем запретом, из-за которого приходилось сначала
+        останавливаться.
+
+        И берётся он именно между ходами: сразу после заказа лента ещё в руках
+        идущего хода, и трогать её из чужого потока нельзя (см. session.order_feed).
+        """
+        self._play(1)
+        said_before = [p["content"] for p in self.session.posts]
+        self.session.running = True
+        starter = mock.Mock()
+        started = []
+        # Сам спектакль играется настоящим потоком: подменяется только тот,
+        # которого он поднимает для переигровки, — по нему и видно, что заказ
+        # взят, а не просто принят
+        real_run = show.run_debate_thread
+        # А конец у этого цикла должен быть при любом раскладе: заказ, сделанный
+        # не в свой час, заставлял бы спектакль играть дальше и дальше — прогон
+        # ждал бы конца спектакля, которого нет. Режиссёр тут сам тест: сыграв
+        # несколько ходов, он опускает занавес (см. session.moderator_finished)
+        spoken = []
+
+        def answer(*args, **kwargs):
+            said = self.answer(*args, **kwargs)
+            spoken.append(said)
+            if len(spoken) >= 4:
+                self.session.moderator_finished = True
+            return said
+
+        def fake_run(*args, **kwargs):
+            started.append(kwargs.get("replay"))
+            starter(*args, **kwargs)
+
+        with mock.patch.object(show, "run_debate_thread", fake_run), \
+                mock.patch.object(ollama_api, "ask_model",
+                                  mock.Mock(side_effect=answer)), \
+                mock.patch("time.sleep"):
+            self.assertEqual(self.session.order_feed("replay", post_id=2,
+                                                     scope="post"), "")
+            # Заказ — это ещё не сделанное дело: лента сейчас в руках идущего
+            # хода, и брать её себе значит писать в неё наперебой
+            self.assertIsNotNone(self.session.feed_order,
+                                 "заказ сделан сразу, под чужим ходом")
+            self.assertEqual([p["content"] for p in self.session.posts],
+                             said_before, "лента тронута под чужим ходом")
+            real_run(self.session.topic)
+            deadline = time.time() + 5
+            while not started and time.time() < deadline:
+                time.sleep(0.01)
+
+        self.assertTrue(self.session.running, "переигровка на ходу остановила спектакль")
+        self.assertFalse(self.session.finished)
+        self.assertEqual([p["id"] for p in self.session.posts], [1],
+                         "лента не оборвана перед переигранной репликой")
+        self.assertEqual(len(started), 1, "переигровку никто не играет")
+        self.assertEqual(started[0]["posts"], 1, "переигрывается не одна реплика")
+        self.assertEqual(started[0]["name"], "Второй")
+        self.session.running = False
+
+    def test_an_edit_ordered_on_the_run_waits_for_its_turn(self):
+        """Правку, заказанную на ходу, делает сам спектакль — между ходами.
+
+        Лента и ДАМП под идущим ходом его же: правка из другого потока встала бы
+        посреди незаконченной записи (см. session.order_feed). Заказ ждёт конца
+        хода, а спектакль останавливать для него не приходится.
+        """
+        human = self._stage_a_human()
+        show.start_dump(self.session.topic)
+        self.session.running = True
+
+        self.assertEqual(self.session.order_feed("edit", post_id=human["id"],
+                                                 content="Новые слова."), "")
+        self.assertIsNotNone(self.session.feed_order, "заказ не ждёт своей очереди")
+        self.assertEqual(self.session.posts[1]["content"], "Живые слова.",
+                         "лента правлена под идущим ходом")
+        self.assertIn("принят", self.session.feed_note["text"])
+
+        self.assertEqual(self.session.take_order(), "")
+        self.session.running = False
+
+        self.assertEqual(self.session.posts[1]["content"], "Новые слова.")
+        self.assertIsNone(self.session.feed_order, "заказ так и остался в очереди")
+        self.assertIn("изменена", self.session.feed_note["text"])
+        self.assertTrue(self.session.feed_note["rebuild"],
+                        "лента изменилась — её надо показать заново")
+        self.assertEqual(self.session.feed_note["post"], human["id"],
+                         "не сказано, какую реплику показывать")
+
+    def test_a_reply_is_played_again_from_its_old_words(self):
+        """Переиграть с прежних слов: слова берутся из летописи, ответ — новый.
+
+        Реплика прежних слов не теряет: её нынешние слова ложатся в «прежние»,
+        а в ленту встаёт новый ответ — и показывают именно его (см.
+        show.plan_feed_replay). Выбрать, с чего отвечать заново, до этого было
+        нечем: переигрывали только с нынешних слов.
+        """
+        self._play(1)
+        # У реплики №2 уже есть прежние слова: её однажды переиграли
+        self._again(self.session.replay_plan_for(2, "post")[0])
+        post = self.session.posts[1]
+        first_words = post["versions"][0]["content"]
+        now_words = post["content"]
+        self.assertNotIn(first_words, now_words)
+
+        plan, focus, problem = self.session.plan_feed_replay(2, "post", 0)
+
+        self.assertEqual(problem, "")
+        self.assertEqual(focus, 2, "показывать надо переигранную реплику")
+        self.assertEqual(plan["posts"], 1)
+        self.assertEqual(plan["name"], "Второй")
+        self.assertEqual(self.session.posts[1]["content"], first_words,
+                         "реплика осталась на нынешних словах — переигрывать не с чего")
+        self.assertEqual(self.session.posts[1]["versions"][-1]["content"], now_words,
+                         "нынешние слова пропали из летописи")
+
+        self._again(plan)
+
+        played = self.session.posts[1]
+        self.assertEqual(played["id"], 2, "реплика встала не на своё место")
+        self.assertNotIn(played["content"], (first_words, now_words),
+                         "пришёл прежний ответ: реплика не переиграна")
+        self.assertEqual([one["content"] for one in played["versions"]][-2:],
+                         [now_words, first_words],
+                         "выбранные или нынешние слова потерялись из летописи")
+
+    def test_the_answer_to_the_old_words_of_a_human_is_played_again(self):
+        """Переиграть с прежних слов реплики человека — заново отвечает модель.
+
+        За человека говорит модель, поэтому переигрывается её ответ: выбранные
+        слова человека встают в разговор, а тот, кто отвечает после, говорит
+        заново (см. show.replay_scope).
+        """
+        human = self._stage_a_human()
+        self.session.edit_post(human["id"], "Другие слова.")
+        old_answer = self.session.posts[2]["content"]
+
+        plan, focus, problem = self.session.plan_feed_replay(human["id"], "post", 0)
+
+        self.assertEqual(problem, "")
+        self.assertEqual(focus, human["id"], "показывать надо реплику человека")
+        self.assertEqual(self.session.posts[1]["content"], "Живые слова.",
+                         "слова человека не переключились на выбранные")
+        self.assertEqual(plan["name"], "Второй", "отвечает не тот, кто отвечал")
+
+        self._again(plan)
+
+        played = self.session.posts[2]
+        self.assertNotEqual(played["content"], old_answer, "отвечено прежними словами")
+        self.assertIn(old_answer, [one["content"] for one in played["versions"]],
+                      "прежний ответ не остался летописью")
+
+    def test_playing_again_from_the_last_words_says_there_is_nobody_to_answer(self):
+        """У последней реплики человека переигрывать нечего: отвечать некому.
+
+        Слова выбираются ради того, чтобы на них ответили заново, — а если
+        за репликой никого нет, то и переигрывать нечего, и слова человека
+        впустую не переключаются (см. show.replay_scope).
+        """
+        self._play(1)
+        self.session.posts = self.session.posts[:1]
+        human = self._human("Живые слова.")
+        self.session.edit_post(human["id"], "Другие слова.")
+
+        plan, focus, problem = self.session.plan_feed_replay(human["id"], "post", 0)
+
+        self.assertIsNone(plan)
+        self.assertEqual(focus, 0)
+        self.assertIn("никто не отвечал", problem)
+        self.assertEqual(self.session.posts[1]["content"], "Другие слова.",
+                         "слова переключили, хотя переигрывать нечего")
+
+    def test_the_state_tells_about_the_last_order_of_the_feed(self):
+        """О правке сказанного узнают состоянием, а не только ответом на нажатие.
+
+        Заказ ленты может прийти и из другой вкладки, и на чужом ходу — тогда его
+        делает сам спектакль, и рассказать об этом больше нечем (см.
+        web.feed_payload, page.noteFeedChange).
+        """
+        human = self._stage_a_human()
+        show.start_dump(self.session.topic)
+
+        # Нечего возвращать — и отказ тоже виден состоянием, а не пропадает
+        refused = self.client.post(f"/api/post/{human['id']}/revert",
+                                   json={"version": 0})
+        self.assertFalse(refused.get_json()["success"])
+        self.assertIn("прежних слов", refused.get_json()["feed_note"]["text"])
+
+        said = self.client.post(f"/api/post/{human['id']}/edit",
+                                json={"content": "Новые слова."}).get_json()
+        state = self.client.get("/api/status").get_json()
+
+        self.assertEqual(state["feed_note"]["text"], said["feed_note"]["text"])
+        self.assertTrue(state["feed_note"]["rebuild"],
+                        "лента изменилась — её надо показать заново")
+        self.assertEqual(state["feed_note"]["post"], human["id"])
+        self.assertFalse(state["order_pending"], "сделанный заказ так и висит в очереди")
 
 
 if __name__ == "__main__":

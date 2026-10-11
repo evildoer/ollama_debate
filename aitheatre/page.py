@@ -163,7 +163,7 @@ HTML_TEMPLATE = """
         .post-versions .version-words { white-space: pre-wrap; word-wrap: break-word; font-size: 14px; color: #555555;
                                         padding-left: 10px; border-left: 1px solid #e4dccb; }
         .post-versions .version-empty { color: #9a9a9a; font-style: italic; }
-        .post-versions .version-action { margin-top: 6px; }
+        .post-versions .version-action { margin-top: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
         body.dark .post-versions { background: #141210; border-left-color: #4a4230; }
         body.dark .post-versions summary { color: #9a8f78; }
         body.dark .post-versions .versions-hint { color: #7a7a7a; }
@@ -563,7 +563,7 @@ HTML_TEMPLATE = """
 
                     <div class="panel-section">
                         <div class="panel-heading"><span class="num">05</span><span class="name">Управление спектаклем</span></div>
-                        <div class="panel-note">«Завершить» опускает занавес, но не закрывает театр: после него можно собрать новый состав и играть дальше. Сервер останавливает «Покинуть театр».</div>
+                        <div class="panel-note">«Завершить» опускает занавес, но не закрывает театр и ничего не запрещает: сказанное можно доиграть, переиграть или поправить, а после — собрать новый состав и играть дальше. Занавес — это только признак, что спектакль кончился. Сервер останавливает «Покинуть театр».</div>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;">
                             <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
                             <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
@@ -573,8 +573,9 @@ HTML_TEMPLATE = """
                             <button class="btn btn-secondary" id="replayBtn" onclick="replayWholeShow()" style="display:none;"
                                     title="Ответить заново на всё сказанное — по нынешним теме, правилам и составу. Прежние ответы останутся в ДАМПе, а в ленте встанут новые">🔁 Переиграть спектакль</button>
                             <button class="btn btn-secondary" id="newBtn" onclick="newShow()" style="display:none;">🎭 Новый спектакль</button>
-                            <!-- Доиграть прежний спектакль: кнопка появляется только под занавесом
-                                 и только если лента — из ДАМПа прошлого запуска (см. playRestored) -->
+                            <!-- Доиграть прежний спектакль: кнопка появляется под занавесом,
+                                 если в ленте есть что продолжать, — и после своего занавеса,
+                                 и после возврата из ДАМПа (см. updatePanel) -->
                             <button class="btn btn-secondary" id="continueBtn" onclick="continueShow()" style="display:none;"
                                     title="Прежние реплики останутся в ленте и станут историей для моделей: акт и цена продолжатся, а ДАМП допишется">↩ Доиграть прежний</button>
                         </div>
@@ -669,6 +670,9 @@ HTML_TEMPLATE = """
         let sectionsPhase = null;      // фаза пульта: настройка / спектакль идёт / занавес
         let turnSectionState = null;   // раскрыт ли раздел «Ваша реплика» на этом ходу
         let lastPostCount = 0;
+        // Сколько реплик уже сказано: по нему решается, есть ли что доигрывать
+        // и переигрывать, — а не по статусу спектакля (см. canContinuePlay)
+        let storyLength = 0;
         // Занавес был не сейчас: лента вернулась из ДАМПа прошлого запуска
         // (см. show.session.restored). По этому признаку пульт предлагает доиграть
         let playRestored = false;
@@ -888,6 +892,9 @@ HTML_TEMPLATE = """
                     debateRunning = true;
                     showFinished = !!data.finished;
                     playRestored = !!data.restored;
+                    // Сколько реплик уже сказано: по нему решается, что можно
+                    // доиграть и переиграть (см. updatePanel)
+                    storyLength = Number(data.total_posts || 0);
 
                     setTopicDisplay(data.topic);
                     if (data.topic) document.getElementById('topicInput').value = data.topic;
@@ -1631,8 +1638,11 @@ HTML_TEMPLATE = """
             const person = spot.name ? cast.find(p => p.display_name === spot.name) : null;
             if (person) person.avatar_emoji = emoji;
             // В составе — только форма: спектакль поменяет состав целиком,
-            // и сохранится всё разом
-            if (typeof spot.index === 'number' && !runningShow()) {
+            // и сохранится всё разом. И только пока ленты нет вовсе: у сказанных
+            // реплик лицо видно, и его смена не должна ждать «Применить состав»
+            // — ни на ходу, ни под занавесом (см. facesOnStage, refreshAvatars)
+            if (typeof spot.index === 'number'
+                    && !facesOnStage(debateRunning, showFinished, storyLength)) {
                 closeEmojiPicker();
                 // Карточки собираются заново из состава, а набранное в поле имя
                 // в состав ещё не попало (его берут из полей, см. collectCast):
@@ -1770,6 +1780,7 @@ HTML_TEMPLATE = """
                     // их значило бы начать с чистого листа после согласия продолжить
                     // (см. show.start_show)
                     lastPostCount = data.total_posts || 0;
+                    storyLength = Number(data.total_posts || 0);
                     if (data.replay) {
                         // А ход, оборванный смертью процесса, театр переспросит и
                         // запишет тем же номером (см. show.replay_broken_turn):
@@ -1781,6 +1792,7 @@ HTML_TEMPLATE = """
                     }
                 } else {
                     lastPostCount = 0;
+                    storyLength = 0;
                     document.getElementById('posts').innerHTML = '';
                 }
                 // Тему в шапке берём из ответа сервера: он знает, с какой играет
@@ -1820,6 +1832,7 @@ HTML_TEMPLATE = """
             playRestored = false;
             finishRequested = false;
             lastPostCount = 0;
+            storyLength = 0;
             mySessionId = null;
             document.getElementById('posts').innerHTML = '';
             document.getElementById('statusBar').style.display = 'none';
@@ -1845,21 +1858,44 @@ HTML_TEMPLATE = """
                 .catch(err => console.error('Ошибка сброса:', err));
         }
         
+        // ── ЧТО МОЖНО ДЕЛАТЬ ───────────────────────────────────────────
+        // Статус спектакля — это только признак, чем он сейчас занят, а не запрет.
+        // Доиграть, переиграть и правят сказанное вне зависимости от занавеса;
+        // решает дело сама лента: пустую сцену продолжать нечего. Функции
+        // отдельные не для красоты: их границы проверяются в node — тем же
+        // кодом, что уедет в браузер
+        function canContinuePlay(finished, said) {
+            return !!finished && Number(said) > 0;
+        }
+
+        function canReplaySaid(said) {
+            return Number(said) > 0;
+        }
+
+        // Видны ли лица в ленте: спектакль играли или играют. По этому решается,
+        // менять значок сразу (лента — живая) или только править форму состава
+        // (см. chooseEmoji)
+        function facesOnStage(running, finished, said) {
+            return !!(running || finished || Number(said) > 0);
+        }
+
         // Кнопки пульта: до спектакля — настройка, во время — остановка, после занавеса —
-        // новый спектакль. «Завершить» доступна всё время спектакля: режиссёру не нужно
-        // ждать своей очереди, чтобы остановить действие.
+        // новый спектакль и «Доиграть». «Завершить» доступна всё время спектакля:
+        // режиссёру не нужно ждать своей очереди, чтобы остановить действие.
         function updatePanel() {
             const startBtn = document.getElementById('startBtn');
             const finishBtn = document.getElementById('finishBtn');
             const newBtn = document.getElementById('newBtn');
             const replayBtn = document.getElementById('replayBtn');
-            // Доиграть можно только то, что вернулось из ДАМПа: пустая сцена
-            // продолжать нечего (см. show.session.resumed)
             const continueBtn = document.getElementById('continueBtn');
-            const canContinue = showFinished && playRestored;
-            // Переигрывают только сказанное и только под занавесом: идущий
-            // спектакль занят сценой (см. web.replay_said)
-            const canReplay = !!showFinished && !!lastPostCount;
+            // Доиграть можно всё, что уже сказано: занавес — это признак, что
+            // спектакль кончился, а не запрет продолжать. Раньше кнопка ждала
+            // возврата из ДАМПа, и после своего же занавеса спектакль приходилось
+            // сохранять и грузить обратно, чтобы она появилась (см. show.start_show)
+            const canContinue = canContinuePlay(showFinished, storyLength);
+            // И переигрывают когда угодно: на ходу заказ берёт сам спектакль,
+            // между ходами (см. web.replay_said)
+            const canReplay = canReplaySaid(storyLength);
             if (replayBtn) replayBtn.style.display = canReplay ? 'inline-block' : 'none';
             const title = document.getElementById('controlPanelTitle');
             if (debateRunning && !showFinished) {
@@ -2887,11 +2923,17 @@ HTML_TEMPLATE = """
                     : '<div class="version-words version-empty">слов в этой версии не было</div>';
                 // Вернуть прежние слова — только у своей реплики: у модели за неё
                 // говорят заново, переигровкой (см. postActionsHtml)
-                const back = mine ? `<div class="version-action"><button class="post-action"`
+                const back = mine ? `<button class="post-action"`
                     + ` title="Вернуть реплике эти слова: место и номер останутся её же, а нынешние слова лягут в «прежние» — по версиям можно ходить в обе стороны"`
-                    + ` onclick="revertVersion(${post.id}, ${index})">↩ вернуть эти слова</button></div>` : '';
+                    + ` onclick="revertVersion(${post.id}, ${index})">↩ вернуть эти слова</button>` : '';
+                // И переиграть с этой версии: слова не заменяют реплику,
+                // а становятся тем, на что отвечают заново — новый ответ встанет
+                // в ленту, а всё прежнее останется в «прежних» (см. replayVersion)
+                const again = `<button class="post-action"`
+                    + ` title="Заставить ответить заново именно с этих слов: новый ответ встанет в ленту, а прежние слова останутся версиями"`
+                    + ` onclick="replayVersion(${post.id}, ${index})">🔁 переиграть с этих слов</button>`;
                 return `<div class="version-head">Версия ${index + 1} из ${versions.length} · ${head}</div>`
-                    + words + back;
+                    + words + `<div class="version-action">${again}${back}</div>`;
             }).join('');
             return `<details class="post-versions" data-post-id="${post.id}">`
                 + `<summary>🗂 прежние слова · ${versions.length} ${versionsWord(versions.length)}</summary>`
@@ -2976,26 +3018,33 @@ HTML_TEMPLATE = """
                 + `</div>`;
         }
 
-        // Переигрывают только под занавесом: идущий спектакль занят сценой
-        // (см. web.replay_said)
-        function replayAllowed() {
-            if (debateRunning && !showFinished) {
-                alert('Спектакль идёт: переигрывают под занавесом — сначала «⏹ Завершить спектакль».');
-                return false;
-            }
-            return true;
+        // Идущий спектакль переигровке не помеха: он берёт заказ сам, между
+        // ходами (см. web.replay_said). Сказать об этом надо заранее: идущий
+        // ход сначала договорит
+        function replayNote() {
+            return debateRunning && !showFinished
+                ? ' Идущий ход договорит и уступит место переигровке.' : '';
         }
 
         function replayPost(postId, scope) {
-            if (!replayAllowed()) return;
             const what = scope === 'round' ? 'акт целиком' : 'эту реплику';
-            if (!confirm(`Переиграть ${what}? Ответы придут заново — по нынешним теме, правилам и составу; прежние останутся в ДАМПе.`)) return;
+            if (!confirm(`Переиграть ${what}? Ответы придут заново — по нынешним теме, правилам и составу; прежние останутся в ДАМПе.` + replayNote())) return;
             sendReplay({post_id: postId, scope: scope || 'post'});
         }
 
+        // Переиграть с прежних слов — кнопкой в блоке «прежние слова»: слова
+        // берутся из летописи, а ответ приходит новый. Прежние слова от этого
+        // не пропадают — они ложатся в ту же летопись, и реплика сразу
+        // переключается на новый ответ (см. show.plan_feed_replay)
+        function replayVersion(postId, version) {
+            if (!confirm('Переиграть с этих слов? Нынешние слова останутся в «прежних», '
+                + 'а реплика скажет заново — по нынешним теме, правилам и составу.'
+                + replayNote())) return;
+            sendReplay({post_id: postId, scope: 'post', version: version});
+        }
+
         function replayWholeShow() {
-            if (!replayAllowed()) return;
-            if (!confirm('Переиграть весь спектакль с самого начала? Ответы придут заново — по нынешним теме, правилам и составу; прежние останутся в ДАМПе.')) return;
+            if (!confirm('Переиграть весь спектакль с самого начала? Ответы придут заново — по нынешним теме, правилам и составу; прежние останутся в ДАМПе.' + replayNote())) return;
             sendReplay({scope: 'show'});
         }
 
@@ -3008,20 +3057,73 @@ HTML_TEMPLATE = """
                     debateRunning = true;
                     showFinished = false;
                     finishRequested = false;
-                    // Ленту собираем заново, а не дорисовываем: переигранная реплика
-                    // встаёт на место прежней, а лишнее с ленты уходит
-                    rebuildFeed();
+                    // Ленту собирает отметка о заказе: она же несёт реплику,
+                    // на которой показывают раскрытый ход (см. noteFeedChange)
+                    noteFeedChange(data.feed_note, true);
                 })
                 .catch(err => { console.error('Переигровка:', err); alert('Переиграть не вышло: ' + err.message); });
         }
 
-        // Лента заново с сервера: примета того, что она уже не та, что была
-        function rebuildFeed() {
+        // ── ЗАКАЗЫ ЛЕНТЕ ───────────────────────────────────────────────
+        // Правку сказанного, возврат версии и переигровку можно заказать когда
+        // угодно. На ходу их делает сам спектакль, между ходами, и о сделанном
+        // рассказывает состоянием (см. show.feed_note, web.feed_payload):
+        // страница собирает ленту заново — заказ мог прийти и из другой вкладки
+        let lastFeedStamp = null;
+
+        function noteFeedChange(info, direct) {
+            if (!info || !info.stamp) return false;
+            const first = lastFeedStamp === null;
+            const fresh = first || info.stamp > lastFeedStamp;
+            lastFeedStamp = Math.max(lastFeedStamp || 0, info.stamp);
+            // Ответ на нажатие показываем всегда; пришедшее состоянием — только
+            // если оно новее виденного и не первое после открытия страницы: как
+            // и у записи пульта (см. saveWriteDecision)
+            if (!fresh && !direct) return false;
+            if (!direct && first) return false;
+            if (info.text) showFeedAlert(info.text);
+            if (info.rebuild) rebuildFeed(info.post || undefined);
+            return true;
+        }
+
+        // Отметка о заказе ленты — тем же местом, что и запись пульта: правка
+        // сказанного и запись настроек — одно и то же «что-то произошло»
+        function showFeedAlert(text) {
+            const box = document.getElementById('saveAlert');
+            if (!box) return;
+            box.innerHTML = '<div class="save-alert-head">🎬 Лента</div>'
+                + `<div class="save-alert-note">${escapeHtml(text)}</div>`
+                + `<div class="save-alert-hint">клик — скрыть; само уйдёт через ${SAVE_ALERT_MS / 1000} с</div>`;
+            box.classList.add('show');
+            if (saveAlertTimer) clearTimeout(saveAlertTimer);
+            saveAlertTimer = setTimeout(hideSaveAlert, SAVE_ALERT_MS);
+        }
+
+        // Лента заново с сервера: примета того, что она уже не та, что была.
+        // focus — реплика, которую после этого показывают: её ход раскрывается
+        // сам, потому что за неё и правят (см. openTurnWhenArrives)
+        function rebuildFeed(focus) {
             document.getElementById('posts').innerHTML = '';
             lastPostCount = 0;
             startPolling();
             updatePosts();
             updatePanel();
+            if (focus) openTurnWhenArrives(focus, 10);
+        }
+
+        // Показать реплику и раскрыть её ход: в ленте он свёрнут, а смотрят его
+        // именно после правки и переигровки — там весь разбор хода по этой
+        // реплике (см. postTurnHtml, show.turn_report). Лента собирается
+        // с сервера не мгновенно, поэтому ждём появления самой реплики
+        function openTurnWhenArrives(postId, tries) {
+            const box = document.querySelector(`.post[data-post="${postId}"]`);
+            if (!box) {
+                if ((tries || 0) > 0) setTimeout(() => openTurnWhenArrives(postId, tries - 1), 300);
+                return;
+            }
+            const turn = box.querySelector('.post-prompt');
+            if (turn) { turn.open = true; loadTurnBox(turn); }
+            box.scrollIntoView({block: 'nearest'});
         }
 
         // Лента заново — в ответе на само состояние: переигровка, начатая
@@ -3044,7 +3146,6 @@ HTML_TEMPLATE = """
         // «Пересказать» тут было бы неправдой: это не пересказ, а та же реплика
         // другими словами — и кнопка так и называется (см. postActionsHtml)
         function startEdit(postId) {
-            if (!replayAllowed()) return;
             const box = document.querySelector(`.post[data-post="${postId}"]`);
             if (!box || box.querySelector('.edit-box')) return;
             const text = box.querySelector('.post-text');
@@ -3086,8 +3187,10 @@ HTML_TEMPLATE = """
                 .then(data => {
                     if (!data.success) { alert('Не сохранилось: ' + (data.error || 'неизвестно почему')); return; }
                     // Текст в ленте рисует сервер — тот же, что прочитают модели:
-                    // поэтому лента собирается заново, а не правится на месте
-                    rebuildFeed();
+                    // поэтому лента собирается заново, а не правится на месте.
+                    // Ленту собирает отметка о заказе: она же несёт реплику,
+                    // на которой показывают раскрытый ход (см. noteFeedChange)
+                    noteFeedChange(data.feed_note, true);
                 })
                 .catch(err => { console.error('Правка реплики:', err); alert('Не сохранилось: ' + err.message); });
         }
@@ -3097,16 +3200,18 @@ HTML_TEMPLATE = """
         // тоже правка сказанного, и без него клик по «↩ вернуть» менял бы слова
         // молча, хотя человек мог просто разглядывать прежние версии
         function revertVersion(postId, version) {
-            if (!replayAllowed()) return;
-            if (!confirm('Вернуть реплике прежние слова? Место и номер останутся её же, а нынешние слова лягут в «прежние»; ДАМП допишется.')) return;
+            const later = (debateRunning && !showFinished)
+                ? ' Идущий ход договорит, а потом слова сменятся.' : '';
+            if (!confirm('Вернуть реплике прежние слова? Место и номер останутся её же, а нынешние слова лягут в «прежние»; ДАМП допишется.' + later)) return;
             fetch(`/api/post/${postId}/revert`, {method: 'POST', headers: {'Content-Type': 'application/json'},
                                                  body: JSON.stringify({version: version})})
                 .then(r => r.json())
                 .then(data => {
                     if (!data.success) { alert('Не вернулось: ' + (data.error || 'неизвестно почему')); return; }
                     // Слова в ленте рисует сервер — тот же, что прочитают модели:
-                    // поэтому лента собирается заново, а не правится на месте
-                    rebuildFeed();
+                    // поэтому лента собирается заново, а не правится на месте.
+                    // Ленту собирает отметка о заказе (см. noteFeedChange)
+                    noteFeedChange(data.feed_note, true);
                 })
                 .catch(err => { console.error('Возврат версии:', err); alert('Не вернулось: ' + err.message); });
         }
@@ -3367,6 +3472,12 @@ HTML_TEMPLATE = """
             humanTurn = !!data.waiting_for_human;
             // Запись пульта могла быть и не отсюда: о ней рассказывает состояние
             noteSettingsWrite(data.settings_write);
+            // Сколько реплик сказано: по нему решается, что можно доиграть
+            // и переиграть, — статус спектакля тут ни при чём (см. updatePanel)
+            storyLength = Number(data.total_posts || 0);
+            // И заказ ленты: он мог быть сделан и в другой вкладке, и на чужом
+            // ходу — тогда его сделал сам спектакль (см. show.feed_note)
+            noteFeedChange(data.feed_note);
             if (data.topic) setTopicDisplay(data.topic);
             // Приложенное к теме приходит с каждым состоянием: так его изменение
             // видно и в другой вкладке, и после возврата спектакля из архива

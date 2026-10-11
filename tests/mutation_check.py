@@ -1256,8 +1256,48 @@ BUGS = {
     ],
     "кнопка «Доиграть» снова не показывается под занавесом": [
         ("aitheatre/page.py",
-         "            const canContinue = showFinished && playRestored;",
+         "            const canContinue = canContinuePlay(showFinished, storyLength);",
          "            const canContinue = false;"),
+    ],
+    "доиграть снова можно только вернувшийся из ДАМПа спектакль": [
+        ("aitheatre/page.py",
+         "            return !!finished && Number(said) > 0;",
+         "            return !!finished && Number(said) > 0 && playRestored;"),
+    ],
+    "переигрывать снова можно только под занавесом": [
+        ("aitheatre/page.py",
+         "            return Number(said) > 0;",
+         "            return !!showFinished && Number(said) > 0;"),
+    ],
+    "переигровка на ходу снова отказывается, а не ждёт своей очереди": [
+        ("aitheatre/web.py",
+         '    problem = show.session.order_feed("replay", post_id=post_id, scope=scope,',
+         '    problem = ("спектакль идёт — переигрывают под занавесом" if show.session.running\n'
+         '               else "") or show.session.order_feed("replay", post_id=post_id, scope=scope,'),
+    ],
+    "заказ ленты на ходу снова делается сразу, под чужим ходом": [
+        ("aitheatre/show.py",
+         "        if not self.running:\n            return self.take_order()",
+         "        if True:\n            return self.take_order()"),
+    ],
+    "переигровка с прежних слов снова играет с нынешних": [
+        ("aitheatre/show.py",
+         "        if version is not None:\n            owner, pick, _problem = self.version_pick(post_id, version)",
+         "        if False:\n            owner, pick, _problem = self.version_pick(post_id, version)"),
+    ],
+    "лента снова обрывается в час заказа, а не в час переигровки": [
+        ("aitheatre/show.py",
+         '        plan, _held, problem = self.replay_plan_for(post_id, scope, version,\n'
+         '                                                   hold=False)\n'
+         "        if problem:\n"
+         "            return None, 0, problem\n"
+         '        return plan, focus, ""',
+         '        plan, _held, problem = self.replay_plan_for(post_id, scope, version,\n'
+         '                                                   hold=False)\n'
+         "        if problem:\n"
+         "            return None, 0, problem\n"
+         "        self.replay_show(plan)\n"
+         '        return plan, focus, ""'),
     ],
     "оборванный ход снова читается как молчание": [
         ("aitheatre/show.py",
@@ -1812,8 +1852,8 @@ BUGS = {
         ("aitheatre/show.py",
          '        if not any(one.get("display_name") == name\n'
          "                   for one in self.runtime_participants):\n"
-         '            return None, None, (f"места «{name}» больше нет в составе: "\n'
-         '                                f"переигрывать некому")\n',
+         '            return None, 0, (f"места «{name}» больше нет в составе: "\n'
+         '                             f"переигрывать некому")\n',
          ""),
     ],
     "переигранная реплика человека снова ложится в ДАМП без отметки": [
@@ -1854,8 +1894,17 @@ BUGS = {
     ],
     "переигрывание всего спектакля снова требует номера реплики": [
         ("aitheatre/show.py",
-         '        index = 0 if scope == "show" else self.index_of(post_id)\n',
-         "        index = self.index_of(post_id)\n"),
+         '        elif str(scope or "post").strip().lower() == "show":\n'
+         "            if not self.posts:\n"
+         '                return None, 0, "переигрывать нечего: лента пуста"\n'
+         "            index, count = 0, len(self.posts)\n",
+         '        elif str(scope or "post").strip().lower() == "show":\n'
+         "            if not self.posts:\n"
+         '                return None, 0, "переигрывать нечего: лента пуста"\n'
+         "            index = self.index_of(post_id)\n"
+         "            if index is None:\n"
+         '                return None, 0, f"реплики №{post_id} в ленте нет"\n'
+         "            count = len(self.posts)\n"),
     ],
     "вернувшееся снова никому не сообщают": [
         ("aitheatre/show.py",
@@ -1966,17 +2015,17 @@ BUGS = {
     ],
     "возврат версии снова не проверяет, есть ли такие прежние слова": [
         ("aitheatre/show.py",
-         "        if not 0 <= version_index < len(versions):",
+         "        if not 0 <= pick < len(versions):",
          "        if False:"),
     ],
     "вернуть прежние слова снова можно и реплике модели": [
         ("aitheatre/show.py",
-         '        if post.get("model_used") != "human":\n'
-         '            return None, ("вернуть прежние слова можно реплике человека: "\n'
-         '                          "у модели её переигрывают")',
-         '        if False:\n'
-         '            return None, ("вернуть прежние слова можно реплике человека: "\n'
-         '                          "у модели её переигрывают")'),
+         '            if self.posts[index].get("model_used") != "human":\n'
+         '                return ("вернуть прежние слова можно реплике человека: "\n'
+         '                        "у модели её переигрывают")',
+         '            if False:\n'
+         '                return ("вернуть прежние слова можно реплике человека: "\n'
+         '                        "у модели её переигрывают")'),
     ],
     "страница снова не строит блок прежних слов": [
         ("aitheatre/page.py",
@@ -1985,8 +2034,13 @@ BUGS = {
     ],
     "у реплики модели снова предлагают вернуть прежние слова": [
         ("aitheatre/page.py",
-         "                const back = mine ? `<div class=\"version-action\"><button class=\"post-action\"`",
-         "                const back = true ? `<div class=\"version-action\"><button class=\"post-action\"`"),
+         "                const back = mine ? `<button class=\"post-action\"`",
+         "                const back = true ? `<button class=\"post-action\"`"),
+    ],
+    "переиграть с прежних слов из блока «прежние слова» снова нечем": [
+        ("aitheatre/page.py",
+         "                    + ` onclick=\"replayVersion(${post.id}, ${index})\">🔁 переиграть с этих слов</button>`;",
+         "                    + '';"),
     ],
 }
 
@@ -2097,6 +2151,15 @@ def run_one_bug(title, patches):
     return verdict("caught" if caught else "blind", files, caught)
 
 
+# Сколько ждём ответа от процесса-исполнителя, в секундах. У бага, которого набор
+# не ловит, впереди целый прогон набора (десятки секунд и больше под нагрузкой),
+# а у пойманного — первые же тесты, так что срока с большим запасом хватает
+# и на то, и на другое. Нужен он ради другого: заготовка, набор на которой не
+# падает, а замирает, иначе держала бы весь прогон без конца и без единого слова
+# (см. run_together)
+WORKER_LIMIT = 600
+
+
 def run_together(bugs, workers=None):
     """Прогон багов сразу несколькими процессами: по одному багу на процесс.
 
@@ -2154,7 +2217,20 @@ def run_together(bugs, workers=None):
     # но работают они все сразу: место освободившегося сразу занимает следующий
     for index, (title, _patches) in enumerate(items):
         process = running.pop(index)
-        output = process.communicate()[0] or ""
+        try:
+            output = process.communicate(timeout=WORKER_LIMIT)[0] or ""
+        except subprocess.TimeoutExpired:
+            # Процесс молчит дольше срока — значит, копия с багом где-то замерла
+            # (набор ждёт потока, которого уже не будет). Прогон из-за одного
+            # такого бага не встаёт колом: он убивается, а о нём говорится
+            # теми же словами, что и о всяком неотвеченном баге (см. WORKER_LIMIT)
+            process.kill()
+            process.communicate()
+            results.append((title, [], "error",
+                            [f"процесс не ответил за {WORKER_LIMIT:g} с — "
+                             f"набор завис и был остановлен"], WORKER_LIMIT))
+            fill()
+            continue
         results.append(verdict_of(output, title, process.returncode))
         fill()
 
@@ -2229,6 +2305,10 @@ def main(wanted=(), full=False, workers=None):
     """Проверка заготовок: эталон, затем по багу. По умолчанию — быстро (см. шапку)."""
     started = time.time()
     ok = True
+    # Есть ли заготовки, о которых ничего не вышло узнать: процесс упал,
+    # ответил не про тот баг или вовсе замолчал (см. run_together). Это не
+    # «баг не пойман», и говорить о нем теми же словами значит сказать неправду
+    unchecked = False
     bugs = selected(wanted)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -2266,6 +2346,7 @@ def main(wanted=(), full=False, workers=None):
                         print(f"⚠️  {title}: не нашёл место в {relative} — проверка невозможна")
                         broken = True
                         ok = False
+                        unchecked = True
                         continue
                     changed[relative] = text.replace(old, new, 1)
                 if broken:
@@ -2293,10 +2374,16 @@ def main(wanted=(), full=False, workers=None):
                 else:
                     print(f"⚠️  {title}: {who[0]}")
                     ok = False
+                    unchecked = True
 
     print()
     print("-" * 68)
-    print("ИТОГ:", "все баги ловятся" if ok else "есть слепые места")
+    if ok:
+        print("ИТОГ: все баги ловятся")
+    elif unchecked:
+        print("ИТОГ: прогон не состоялся — про часть заготовок ничего не известно")
+    else:
+        print("ИТОГ: есть слепые места")
     print(f"Прогон занял {time.time() - started:.1f} с")
     return 0 if ok else 1
 
