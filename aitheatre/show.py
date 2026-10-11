@@ -3708,24 +3708,31 @@ class DebateSession:
         возвращается отложенное, потому что лента уже оборвана и вернуть её
         без переигровки нечем.
 
+        Номер реплики нужен не всему: реплику и акт с неё и начинают, а спектакль
+        целиком — с первого слова, и номера у него нет вовсе. Страница так и шлёт:
+        один лишь scope (см. page.replayWholeShow), поэтому требовать номер значило
+        бы отказывать в переигровке всему спектаклю.
+
         Возвращает (план, отложенное, беда): беда не пустая — переигрывать нечего.
         """
         scope = str(scope or "post").strip().lower()
-        index = self.index_of(post_id)
+        if scope not in ("post", "round", "act", "show"):
+            return None, None, f"неизвестно, что переигрывать: «{scope}»"
+        index = 0 if scope == "show" else self.index_of(post_id)
         if index is None:
             return None, None, f"реплики №{post_id} в ленте нет"
         if scope == "show":
-            index, count = 0, len(self.posts)
+            if not self.posts:
+                return None, None, "переигрывать нечего: лента пуста"
+            count = len(self.posts)
         elif scope in ("round", "act"):
             act = int(self.posts[index].get("round") or 0)
             index = next((place for place, one in enumerate(self.posts)
                           if int(one.get("round") or 0) == act), index)
             count = sum(1 for one in self.posts
                         if int(one.get("round") or 0) == act)
-        elif scope == "post":
-            count = 1
         else:
-            return None, None, f"неизвестно, что переигрывать: «{scope}»"
+            count = 1
         first = self.posts[index]
         name = first.get("display_name") or ""
         # С того, с кого играть, нужно начать — и он обязан быть на сцене. Место,
@@ -3769,7 +3776,7 @@ class DebateSession:
         self.replay_plan = None
 
     def restate_post(self, post_id, content) -> tuple:
-        """Пересказать реплику человека: слова другие, а место — то же.
+        """Изменить реплику человека: слова другие, а место — то же.
 
         Ответы, которые шли после неё, отвечали на прежние слова: чтобы модель
         ответила на новые, её реплику переигрывают (см. replay_plan_for). Сама
@@ -3794,7 +3801,7 @@ class DebateSession:
         self.conversation_history = self.history_from_posts()
         dump_replayed([int(post.get("id") or 0)])
         save_dump_entry(post)
-        print(f"✍️  Реплика человека №{post['id']} пересказана: "
+        print(f"✍️  Реплика человека №{post['id']} изменена: "
               f"{len(said)} знаков")
         return post, ""
 
@@ -5786,6 +5793,14 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
         if replay:
             back = session.return_held(replay.get("held") or {})
             print(f"  ↩️  Переигровка кончена, прежних реплик вернулось: {back}")
+            # Вернувшееся возвращается и зрителю: страница узнаёт о репликах
+            # событиями (см. publish_post), а об отложенном не сообщает никто —
+            # и вернувшиеся реплики ждали бы перезагрузки страницы: рассылка
+            # состояния идёт без реплик, а опрос к занавесу останавливается
+            # (см. applyStatus)
+            if back and on_post:
+                for post in session.posts[-back:]:
+                    on_post(post)
         # Всегда завершаем спектакль явно, при любом выходе из цикла - в том
         # числе при ошибке, чтобы клиент разблокировал кнопки.
         session.finished = True

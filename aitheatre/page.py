@@ -133,7 +133,7 @@ HTML_TEMPLATE = """
         .post-cut { color: #8a5a00; font-size: 15px; font-style: italic; border-left: 3px solid #e0c080; padding: 6px 0 6px 12px; }
         body.dark .post-cut { color: #d7b070; border-left-color: #5a4a20; }
         /* Что можно сделать со сказанным: переиграть реплику или акт целиком,
-           а свою — пересказать. Мелко и внизу реплики: это правка спектакля,
+           а свою — изменить. Мелко и внизу реплики: это правка спектакля,
            а не то, за чем пришёл зритель (см. show.replay_plan_for) */
         .post-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px;
                         padding-top: 10px; border-top: 1px dashed #cccccc; }
@@ -2908,8 +2908,8 @@ HTML_TEMPLATE = """
                     onclick="replayPost(${post.id})">🔁 эту реплику</button>`
                 + (act ? `<button class="post-action" title="${REPLAY_HINT} Акт целиком — все его реплики, с начала акта ${act}"
                     onclick="replayPost(${post.id}, 'round')">🔁 акт ${act}</button>` : '')
-                + (mine ? `<button class="post-action" title="Пересказать свою реплику: слова в ленте и в разговоре станут другими. Ответы после неё отвечали на прежние слова — их переигрывают отдельно"
-                    onclick="startRestate(${post.id})">✍️ пересказать</button>` : '')
+                + (mine ? `<button class="post-action" title="Изменить свою реплику: слова в ленте и в разговоре станут другими, а номер и место останутся теми же. Ответы после неё отвечали на прежние слова — их переигрывают отдельно"
+                    onclick="startRestate(${post.id})">✍️ изменить</button>` : '')
                 + `</div>`;
         }
 
@@ -2961,8 +2961,25 @@ HTML_TEMPLATE = """
             updatePanel();
         }
 
-        // Правка своей реплики — на месте самой реплики: слова человека — часть
-        // сцены, и править их в стороне от неё было бы странно
+        // Лента заново — в ответе на само состояние: переигровка, начатая
+        // в другой вкладке, эту не спрашивала. Досказать новое по номерам тут
+        // нельзя: переигранное встаёт под прежним номером и от уже показанного
+        // не отличается (см. addNewPosts). Спрашиваем ленту отдельным запросом,
+        // а не опросом: под занавесом он стоит (см. applyStatus), а рассылка
+        // по сокету реплик не носит — на ней одной лента осталась бы пустой
+        function reloadFeedFromServer() {
+            lastPostCount = 0;
+            document.getElementById('posts').innerHTML = '';
+            fetch('/api/status?lastPostCount=0', {cache: 'no-store'})
+                .then(r => r.json())
+                .then(applyStatus)
+                .catch(err => console.warn('Лента не перечиталась:', err));
+        }
+
+        // Изменение своей реплики — на месте самой реплики: слова человека — часть
+        // сцены, и менять их в стороне от неё было бы странно.
+        // «Пересказать» тут было бы неправдой: это не пересказ, а та же реплика
+        // другими словами — и кнопка так и называется (см. postActionsHtml)
         function startRestate(postId) {
             if (!replayAllowed()) return;
             const box = document.querySelector(`.post[data-post="${postId}"]`);
@@ -2973,7 +2990,7 @@ HTML_TEMPLATE = """
             holder.className = 'restate-box';
             holder.innerHTML = `<textarea spellcheck="false"></textarea>`
                 + `<div class="restate-actions">`
-                + `<button class="post-action" onclick="saveRestate(${postId})">💾 Пересказать</button>`
+                + `<button class="post-action" onclick="saveRestate(${postId})">💾 Изменить</button>`
                 + `<button class="post-action" onclick="cancelRestate(${postId})">Отмена</button>`
                 + `<span style="font-size:12px;color:#888;">Ctrl+Enter — сохранить. Ответы после этой реплики отвечали на прежние слова: их переигрывают отдельно.</span>`
                 + `</div>`;
@@ -3239,6 +3256,15 @@ HTML_TEMPLATE = """
                     loadCast().then(() => { updateSidebarParticipants(); updatePanel(); });
                     return;
                 }
+            }
+            // Лента стала короче той, что эта вкладка показала: её оборвали
+            // и играют заново — так делает переигровка, начатая в другом месте
+            // (см. /api/replay, page.sendReplay). Такую ленту собираем заново,
+            // а не дорисовываем; остальное сделает ответ на этот же запрос
+            if (typeof data.total_posts === 'number' && lastPostCount
+                && data.total_posts < lastPostCount) {
+                reloadFeedFromServer();
+                return;
             }
             const statusDiv = document.getElementById('statusBar');
             const statusPlaceholder = document.getElementById('statusPlaceholder');

@@ -10255,6 +10255,71 @@ class TestSayingItAgain(unittest.TestCase):
                          [p["content"] for p in self.session.posts],
                          "в ДАМПе не то, что в ленте")
 
+    def test_the_returned_replies_come_back_to_the_feed(self):
+        """Вернувшееся возвращается и на экран, а не только в память.
+
+        Страница узнаёт о репликах событием (см. publish_post), а отложенное
+        никому не сообщается: без этого вернувшиеся реплики увидел бы только
+        тот, кто перезагрузит страницу, — опрос к тому времени уже стоит
+        (с занавесом, см. applyStatus).
+        """
+        self._play(1)
+        plan, _held, _problem = self.session.replay_plan_for(2, "post")
+        told = []
+
+        self.session.replay_show(plan)
+        with mock.patch.object(ollama_api, "ask_model",
+                               mock.Mock(side_effect=self.answer)):
+            with mock.patch("time.sleep"):
+                show.run_debate_thread(self.session.topic, replay=plan,
+                                       on_post=told.append)
+
+        self.assertEqual([p["id"] for p in self.session.posts], [1, 2, 3],
+                         "переигровка потеряла чужие реплики")
+        self.assertEqual([p["id"] for p in told], [2, 3],
+                         "лента не услышала ни переигранного, ни вернувшегося")
+        self.assertEqual([p["content"] for p in told[1:]],
+                         [p["content"] for p in self.session.posts[2:]],
+                         "вернувшееся вернулось не тем, чем было")
+
+    def test_the_whole_show_plan_goes_without_a_post_number(self):
+        """Спектакль целиком играют и без номера реплики: ему не с чего начинаться.
+
+        У спектакля нет номера, и страница так и шлёт — один лишь scope
+        (см. page.replayWholeShow). Требовать номер значит отказывать
+        в переигровке всему спектаклю.
+        """
+        self._play(1)
+
+        plan, _held, problem = self.session.replay_plan_for(None, "show")
+
+        self.assertEqual(problem, "",
+                         "спектакль целиком без номера реплики не переигрывается")
+        self.assertEqual(plan["posts"], 3)
+        self.assertEqual(plan["round"], 1)
+        self.assertEqual(plan["name"], "Первый")
+        self.assertEqual(self.session.posts, [], "лента не оборвана начисто")
+
+    def test_the_replay_route_replays_the_whole_show_without_a_post_number(self):
+        """Кнопка пульта переигрывает весь спектакль — тем, что шлёт страница."""
+        self._play(1)
+        starter = mock.Mock()
+
+        with mock.patch.object(show, "run_debate_thread", starter):
+            answer = self.client.post("/api/replay", json={"scope": "show"}).get_json()
+
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertEqual(answer["posts"], 3)
+        self.assertEqual(self.session.posts, [], "лента не оборвана начисто")
+        self.assertEqual(starter.call_count, 1, "спектакль заново никто не начал")
+        self.session.running = False
+
+    def test_a_show_with_an_empty_feed_has_nothing_to_replay(self):
+        """Переигрывать на пустой сцене нечего — так и говорится, а не «№None»."""
+        _plan, _held, problem = self.session.replay_plan_for(None, "show")
+
+        self.assertIn("нечего", problem)
+
     def test_the_dump_keeps_both_sayings_of_the_same_reply(self):
         """В ДАМПе — и прежний ответ, и новый: летопись правится отметкой.
 
@@ -10353,7 +10418,7 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(len(play["posts"]), 3, "в ДАМПе задвоилась реплика")
 
     def test_a_human_reply_can_be_restated(self):
-        """Свою реплику можно пересказать: слова другие, а место — то же.
+        """Свою реплику можно изменить: слова другие, а место — то же.
 
         В ленте и в разговоре после этого стоят новые слова: по ним и строятся
         следующие ходы. Ответы, что шли после, отвечали на прежние — их
@@ -10379,7 +10444,7 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(play["posts"][0]["content"], "Сказано во второй раз.")
 
     def test_the_words_of_a_model_are_replayed_not_restated(self):
-        """Реплику модели правят переигровкой, а не пересказом — за неё говорят заново."""
+        """Реплику модели правят переигровкой, а не правкой слов — за неё говорят заново."""
         self._play(1)
 
         edited, problem = self.session.restate_post(1, "Что-нибудь своё")
@@ -10391,7 +10456,7 @@ class TestSayingItAgain(unittest.TestCase):
                          "правка всё-таки прошла")
 
     def test_the_empty_reply_of_a_human_stays_empty(self):
-        """Пересказать пустой репликой человека без картинок — значит стереть её."""
+        """Изменить пустой репликой человека без картинок — значит стереть её."""
         show.start_dump(self.session.topic)
         post = self._human("Уже сказано.")
 
@@ -10443,6 +10508,28 @@ class TestSayingItAgain(unittest.TestCase):
                          "вернулась не та реплика — или их задвоилось")
         self.assertEqual(len(self._dump()["posts"]), 1)
 
+    def test_a_feed_cut_elsewhere_is_gathered_again(self):
+        """Лента, оборванная переигровкой в другом месте, собирается заново.
+
+        Открытую вкладку о переигровке никто не спрашивал: переигранное встаёт
+        под прежним номером и от уже показанного не отличается (см. addNewPosts),
+        поэтому без этой приметы вкладка осталась бы с прежними словами, а под
+        занавесом ещё и не перечитала бы ленту — опрос к тому времени стоит.
+        Примета — сама лента: она стала короче той, что вкладка показала
+        (total_posts в /api/status).
+        """
+        source = page.HTML_TEMPLATE
+        start = source.index("function applyStatus(data)")
+        body = source[start:source.index("\n        function ", start + 10)]
+
+        self.assertIn("data.total_posts < lastPostCount", body,
+                      "укоротившаяся лента ничем не отличается от прежней")
+        self.assertIn("reloadFeedFromServer();", body,
+                      "лента, оборванная в другом месте, остаётся прежней")
+        reload_source = source[source.index("function reloadFeedFromServer()"):]
+        self.assertIn("fetch('/api/status?lastPostCount=0'", reload_source[:600],
+                      "лента не перечитывается: опрос под занавесом стоит")
+
     def test_the_replay_route_refuses_while_the_show_is_on(self):
         """Под идущим спектаклем не переигрывают: сцена занята (см. web.replay_said)."""
         self._play(1)
@@ -10483,7 +10570,7 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(len(self.session.posts), 3, "лента оборвана впустую")
 
     def test_the_page_carries_the_buttons_of_the_replay(self):
-        """В ленте у каждой реплики — свои кнопки: эту, акт целиком и пересказать."""
+        """В ленте у каждой реплики — свои кнопки: эту, акт целиком и изменить свою."""
         self.assertIn("${postActionsHtml(post)}", page.HTML_TEMPLATE,
                       "кнопок правки в реплике нет")
         for control in ("replayPost", "replayWholeShow", "startRestate",
@@ -10504,7 +10591,7 @@ class TestSayingItAgain(unittest.TestCase):
                       "кнопка переигровки не прячется под идущим спектаклем")
 
     def test_the_restate_route_gives_back_the_reply_as_it_was_said(self):
-        """Пересказанная реплика возвращается в том же виде, в каком её увидят модели."""
+        """Изменённая реплика возвращается в том же виде, в каком её увидят модели."""
         show.start_dump(self.session.topic)
         post = self._human("Прежние слова.")
 

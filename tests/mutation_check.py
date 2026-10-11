@@ -1826,7 +1826,7 @@ BUGS = {
          "            dump_replayed([len(self.posts) + 1])",
          "            dump_replayed([])"),
     ],
-    "пересказанная реплика снова ложится в ДАМП без отметки": [
+    "изменённая реплика снова ложится в ДАМП без отметки": [
         ("aitheatre/show.py",
          '        dump_replayed([int(post.get("id") or 0)])',
          "        dump_replayed([])"),
@@ -1836,6 +1836,32 @@ BUGS = {
          '        back = [one for one in held.get("posts") or []\n'
          '                if int(one.get("id") or 0) > last]',
          "        back = []"),
+    ],
+    "лента, оборванная в другом месте, снова остаётся прежней": [
+        ("aitheatre/page.py",
+         "            if (typeof data.total_posts === 'number' && lastPostCount\n"
+         "                && data.total_posts < lastPostCount) {\n"
+         "                reloadFeedFromServer();\n"
+         "                return;\n"
+         "            }\n",
+         "            if (false) {\n"
+         "                reloadFeedFromServer();\n"
+         "                return;\n"
+         "            }\n"),
+    ],
+    "переигрывание всего спектакля снова требует номера реплики": [
+        ("aitheatre/show.py",
+         '        index = 0 if scope == "show" else self.index_of(post_id)\n',
+         "        index = self.index_of(post_id)\n"),
+    ],
+    "вернувшееся снова никому не сообщают": [
+        ("aitheatre/show.py",
+         '            if back and on_post:\n'
+         '                for post in session.posts[-back:]:\n'
+         '                    on_post(post)\n',
+         '            if False and on_post:\n'
+         '                for post in session.posts[-back:]:\n'
+         '                    on_post(post)\n'),
     ],
     "в ДАМПе снова остаётся незаконченная запись и новая рядом": [
         ("aitheatre/show.py",
