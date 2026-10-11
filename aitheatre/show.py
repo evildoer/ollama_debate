@@ -585,6 +585,37 @@ def turn_summary_line(summary: dict) -> str:
     return " · ".join(parts)
 
 
+def report_words(report: dict) -> str:
+    """Итог спектакля словами — тем же счётом, что показывает страница.
+
+    Нужен консоли: занавес опускается и в ней, а «сколько сыграно и во что
+    обошлось» — первое, что спрашивают у отыгранного спектакля
+    (см. DebateSession.show_report, page.curtainReportHtml).
+    """
+    report = report or {}
+    parts = [f"реплик {report.get('posts', 0)}",
+             f"ходов {report.get('turns', 0)}",
+             f"актов {len(report.get('acts') or [])}"]
+    if report.get("again"):
+        parts.append(f"переиграно реплик {report['again']}")
+    if report.get("with_versions"):
+        parts.append(f"с прежними словами {report['with_versions']}")
+    if report.get("spent"):
+        parts.append(f"💰 {money(report['spent'])}")
+    return " · ".join(parts)
+
+
+def report_acts_words(report: dict) -> str:
+    """Цена спектакля по актам — второй строкой итога (см. report_words).
+
+    Пусто у спектакля без цен: у реплик человека хода на счёте нет вовсе,
+    и «акт 1 — 0 ₽» было бы не числом, а выдумкой.
+    """
+    return " · ".join(
+        f"акт {act.get('round')} — {money(act.get('spent'))}"
+        for act in (report or {}).get("acts") or [] if act.get("spent"))
+
+
 def cast_field(emoji, name, gender) -> str:
     """«🦊 Элина ♀» — кто говорил, одной строкой: в ленте у поста то же рядом.
 
@@ -3462,6 +3493,12 @@ class DebateSession:
         # переигровкой, а пустеет, как только переигровка кончилась (см.
         # return_held)
         self.held_versions = {}
+        # Сколько раз играли сказанное заново и какие реплики этим задеты: итог
+        # под занавесом говорит и об этом (см. show_report). Из ДАМПа не вернуть —
+        # там летопись версий, а не число заходов, — поэтому счёт только про этот
+        # запуск, а «реплик с прежними словами» считается по самой ленте
+        self.replays = 0
+        self.replayed_posts = set()
         # Сцена: места состава без имён, аватаров и личных инструкций — роли,
         # модели, порядок и числа. None значит «своей сцены нет»: места берутся
         # из PARTICIPANTS. Пульт правит состав, а сцена — это то, что от него
@@ -3590,6 +3627,10 @@ class DebateSession:
             # И переспрашивать нечего: оборванный ход был у прежнего спектакля,
             # а этот начинается с чистой ленты (см. plan_replay)
             self.replay_plan = None
+            # И переигровок у него не было ни одной: их счёт — про этот запуск
+            # (см. show_report, replay_show)
+            self.replays = 0
+            self.replayed_posts = set()
         else:
             # Прежние реплики — это и есть история для моделей: продолжение
             # не начинается с чистого листа, иначе модель отвечала бы не на то,
@@ -3900,6 +3941,19 @@ class DebateSession:
         plan_feed_replay, replay_plan_for): переигранное встаёт тем же номером,
         а прежнее ждёт в отложенном до конца переигровки (см. return_held).
         """
+        # Сколько раз играли заново и какие реплики — в счёт итога под занавесом
+        # (см. show_report). Номера переигранных — те же, что и были: их берём
+        # по месту обрыва ленты, а у плана, пришедшего заказом, лента уже
+        # обрезана — там то же самое лежит в отложенном (см. hold_from)
+        self.replays += 1
+        tail = (plan.get("held") or {}).get("posts")
+        if tail is None and plan.get("index") is not None:
+            tail = self.posts[int(plan["index"]):]
+        for one in list(tail or [])[:int(plan.get("posts") or 0)]:
+            self.replayed_posts.add(int(one.get("id") or 0))
+        # Обрыв ленты — после счёта: переигранные встанут теми же номерами,
+        # а сами прежние реплики ждут в отложенном до конца переигровки
+        # (см. return_held)
         if plan.get("held") is None and plan.get("index") is not None:
             plan["held"] = self.hold_from(int(plan["index"]))
         self.running = True
@@ -4221,6 +4275,50 @@ class DebateSession:
         print(f"↩️  Реплика человека №{picked['id']} вернулась к версии "
               f"{pick + 1}: {len(picked['content'])} знаков")
         return picked, ""
+
+    def show_report(self) -> dict:
+        """Итог спектакля: сколько сыграно, сколько заново и во что обошлось.
+
+        Считается по самой ленте, а не по памяти о ходе: реплика знает свой акт
+        и цену своего хода (см. summary["spent"]), поэтому итог переживает и
+        переигровку, и возврат спектакля из ДАМПа. Показывает его страница под
+        занавесом (см. page.curtainReportHtml) — вместе с ценой по актам.
+
+        Переигранное — двумя числами, потому что они про разное: «с прежними
+        словами» видно и в ленте, и в ДАМПе (у сыгранной заново реплики прежние
+        слова остаются летописью), а число заходов известно только про этот
+        запуск (см. replay_show): сам ДАМП о заходах молчит.
+        """
+        acts = {}
+        for post in self.posts:
+            number = int(post.get("round") or 0)
+            act = acts.setdefault(number, {"round": number, "turns": 0, "human": 0,
+                                           "spent": 0.0, "priced": 0})
+            if post.get("model_used") == "human":
+                act["human"] += 1
+            else:
+                act["turns"] += 1
+            # Цена хода — со счёта ключа, а не по тарифам (см. _note_money):
+            # у реплики человека её нет вовсе, и такой ход в счёт не идёт
+            spent = float(((post.get("turn") or {}).get("spent") or 0.0))
+            if spent:
+                act["spent"] += spent
+                act["priced"] += 1
+        for act in acts.values():
+            act["spent"] = round(act["spent"], 2)
+        return {
+            "posts": len(self.posts),
+            "turns": sum(act["turns"] for act in acts.values()),
+            "acts": [acts[number] for number in sorted(acts)],
+            "with_versions": sum(1 for post in self.posts
+                                 if list(post.get("versions") or [])),
+            "again": len(self.replayed_posts),
+            "replays": int(self.replays or 0),
+            # Что из сказанного знает свою цену: по этому видно, что итог
+            # по актам полный, а не «по тем ходам, где успели посчитать»
+            "priced": sum(act["priced"] for act in acts.values()),
+            "spent": round(float(self.spent or 0.0), 2),
+        }
 
     def new_show(self):
         """«Новый спектакль»: новые имена и характеры, настройки, сцена и тема — те же."""
@@ -6315,6 +6413,13 @@ def run_debate_thread(topic: str, on_post=None, on_draft=None, replay: dict = No
             # числе при ошибке, чтобы клиент разблокировал кнопки.
             session.finished = True
             session.running = False
+            # Занавес — и итог словами: это первое, что спрашивают у отыгранного
+            # спектакля. Страница показывает то же самое (см. show_report)
+            report = session.show_report()
+            print(f"  🎭 Итог: {report_words(report)}")
+            by_acts = report_acts_words(report)
+            if by_acts:
+                print(f"  💰 по актам: {by_acts}")
             
             if settings.UNLOAD_AFTER_DEBATE:
                 for model in show_model_names():

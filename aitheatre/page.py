@@ -164,7 +164,20 @@ HTML_TEMPLATE = """
                                         padding-left: 10px; border-left: 1px solid #e4dccb; }
         .post-versions .version-empty { color: #9a9a9a; font-style: italic; }
         .post-versions .version-action { margin-top: 6px; display: flex; gap: 10px; flex-wrap: wrap; }
+        /* Разница версии с нынешними словами: стороны рядом — слева то, на что
+           отвечали тогда, справа то, что стоит в ленте сейчас (см. versionDiffHtml) */
+        .post-versions .version-diff { margin-top: 6px; }
+        .post-versions .version-diff summary { font-size: 11px; letter-spacing: 1px; color: #9a8f78; opacity: 0.9; }
+        .post-versions .diff-sides { display: flex; gap: 14px; margin-top: 6px; }
+        .post-versions .diff-side { flex: 1 1 0; min-width: 0; }
+        .post-versions .diff-title { font-size: 11px; color: #9a9a9a; margin-bottom: 4px; }
+        .post-versions .diff-words { white-space: pre-wrap; word-wrap: break-word; font-size: 13px; color: #6a6a6a; }
+        .post-versions .diff-gone { color: #a4553a; text-decoration: line-through; }
+        .post-versions .diff-new { color: #2f6f3e; background: #eef6ee; border-radius: 3px; padding: 0 3px; }
         body.dark .post-versions { background: #141210; border-left-color: #4a4230; }
+        body.dark .post-versions .diff-words { color: #a6a6a6; }
+        body.dark .post-versions .diff-gone { color: #d98b6a; }
+        body.dark .post-versions .diff-new { color: #8fd6a0; background: #1c2a1e; }
         body.dark .post-versions summary { color: #9a8f78; }
         body.dark .post-versions .versions-hint { color: #7a7a7a; }
         body.dark .post-versions .version-head { color: #9a8f78; }
@@ -172,6 +185,15 @@ HTML_TEMPLATE = """
         /* Мысли модели: то, что она говорит сама с собой, пока не сказала вслух.
            Мелче и бледнее реплики: это не сказанное, а процесс. Свёрткой можно
            убрать их с глаз — но по умолчанию они видны, они уже оплачены */
+        /* Итог спектакля под занавесом: сколько сыграно, сколько заново и во что
+           обошлось по актам (см. curtainReportHtml, show.show_report) */
+        .curtain-report { margin: 8px 0 0 0; font-size: 12px; line-height: 1.5; }
+        .curtain-report .report-line { color: #555555; }
+        .curtain-report .report-act { color: #7a7a7a; }
+        .curtain-report .report-note { color: #9a9a9a; font-style: italic; }
+        body.dark .curtain-report .report-line { color: #bdbdbd; }
+        body.dark .curtain-report .report-act { color: #9a9a9a; }
+        body.dark .curtain-report .report-note { color: #7a7a7a; }
         .post-thinking { margin: 0 0 18px 0; padding: 10px 16px; border-left: 2px solid #cccccc; background: #fafafa; font-size: 15px; line-height: 1.6; color: #666666; font-style: italic; }
         .post-thinking summary { cursor: pointer; font-style: normal; font-size: 11px; text-transform: uppercase; letter-spacing: 2px; color: #888888; }
         .post-thinking[open] summary { margin-bottom: 8px; }
@@ -2555,6 +2577,58 @@ HTML_TEMPLATE = """
             return `<div style="font-size:12px;margin-top:6px;">${parts.join(' · ')}</div>`;
         }
 
+        // Итог спектакля под занавесом — занавес это не режим, а конец спектакля,
+        // и у него есть итог: сколько сыграно, сколько заново и во что обошлось
+        // по актам (см. show.show_report). Считает его сервер по самой ленте,
+        // а не по памяти о ходе: поэтому итог тот же и у спектакля, вернувшегося
+        // из ДАМПа. Доиграть после него по-прежнему можно (см. canContinuePlay)
+        function curtainReportHtml(report) {
+            if (!report || !report.posts) return '';
+            const acts = report.acts || [];
+            const head = [pluralText(report.turns, 'ход', 'хода', 'ходов')];
+            // Реплик больше, чем ходов, только когда на сцене говорил человек:
+            // повторять то же число дважды значит говорить ни о чём
+            if (report.posts !== report.turns) {
+                head.push(pluralText(report.posts, 'реплика', 'реплики', 'реплик'));
+            }
+            head.push(pluralText(acts.length, 'акт', 'акта', 'актов'));
+            const lines = [`<div class="report-line">${head.join(' · ')}</div>`];
+            // «Заново» — два разных числа: сколько реплик этим задеты (видно
+            // и по ленте, и в ДАМПе) и сколько было заходов (знает только этот
+            // запуск — см. show.show_report)
+            const again = [];
+            if (report.again) {
+                again.push(pluralText(report.again, 'реплика сыграна заново',
+                                      'реплики сыграны заново',
+                                      'реплик сыграно заново'));
+            }
+            if (report.replays > 1) {
+                again.push(`переигрывали ${pluralText(report.replays, 'раз', 'раза', 'раз')}`);
+            }
+            if (again.length) lines.push(`<div class="report-act">🔁 ${again.join(' · ')}</div>`);
+            if (report.with_versions) {
+                // После «у» слова стоят в родительном: «у 1 реплики», «у 2 реплик»
+                lines.push('<div class="report-act">🗂 прежние слова есть у '
+                    + `${pluralText(report.with_versions, 'реплики', 'реплик', 'реплик')}</div>`);
+            }
+            // Цена — по актам: у реплики человека хода на счёте нет вовсе, и «0 ₽»
+            // было бы не числом, а выдумкой (см. show.show_report)
+            acts.forEach(act => {
+                const parts = [act.human
+                    ? `${pluralText(act.turns, 'ход', 'хода', 'ходов')} и ${pluralText(act.human, 'реплика', 'реплики', 'реплик')} человека`
+                    : pluralText(act.turns, 'ход', 'хода', 'ходов')];
+                if (act.spent) parts.push(moneyText(act.spent));
+                lines.push(`<div class="report-act">Акт ${act.round} — ${parts.join(' · ')}</div>`);
+            });
+            // Ходы без цены — не ноль, а «неизвестно»: без ключа или на местной
+            // модели счёта нет, и молчать об этом значило бы выдавать часть за всё
+            if (report.priced < report.turns) {
+                lines.push('<div class="report-note">цена известна у '
+                    + `${report.priced} из ${report.turns} ходов</div>`);
+            }
+            return `<div class="curtain-report">${lines.join('')}</div>`;
+        }
+
         // Сколько длилось — словами: «2 мин 15 с». Секунды до десятых здесь
         // не нужны: это мера ожидания, а не измерение
         function durationText(seconds) {
@@ -2891,14 +2965,96 @@ HTML_TEMPLATE = """
                 + `<div class="prompt-body"></div></details>`;
         }
 
-        // Склонение слова «версия»: число бывает любым, а «2 версий» читается
-        // как опечатка
+        // Форма слова при числе: «3 версии», «5 версий», «1 версия». Число бывает
+        // любым, а «2 версий» читается как опечатка, поэтому правило одно на всю
+        // страницу — версии, ходы, реплики, акты (см. pluralText)
+        function pluralForm(count, one, few, many) {
+            const total = Math.max(0, Math.round(Number(count) || 0));
+            const hundreds = total % 100, tens = total % 10;
+            if (hundreds > 10 && hundreds < 20) return many;
+            if (tens === 1) return one;
+            if (tens >= 2 && tens <= 4) return few;
+            return many;
+        }
+
         function versionsWord(count) {
-            const many = count % 100, few = count % 10;
-            if (many > 10 && many < 20) return 'версий';
-            if (few === 1) return 'версия';
-            if (few >= 2 && few <= 4) return 'версии';
-            return 'версий';
+            return pluralForm(count, 'версия', 'версии', 'версий');
+        }
+
+        // Число вместе со словом: «2 акта», «5 ходов» — так говорит итог
+        // под занавесом (см. curtainReportHtml)
+        function pluralText(count, one, few, many) {
+            const total = Math.max(0, Math.round(Number(count) || 0));
+            return `${total} ${pluralForm(total, one, few, many)}`;
+        }
+
+        // Слова реплики — по словам, а не по знакам: перестановка двух слов
+        // не должна выглядеть как «вся реплика другая» (см. versionDiff)
+        function versionWords(value) {
+            return String(value || '').split(/\\s+/).filter(Boolean);
+        }
+
+        // Что изменилось между прежними и нынешними словами реплики: общее
+        // остаётся на месте, ушедшее и пришедшее — отдельно. Сравнение обычное,
+        // по общему ядру слов: реплики короткие, а сложного разбора тут никто
+        // не читал бы (см. versionDiffHtml)
+        function versionDiff(before, after) {
+            const was = versionWords(before), now = versionWords(after);
+            const rows = was.length, cols = now.length;
+            const same = [];
+            for (let row = 0; row <= rows; row++) same.push(new Array(cols + 1).fill(0));
+            for (let row = rows - 1; row >= 0; row--) {
+                for (let col = cols - 1; col >= 0; col--) {
+                    same[row][col] = was[row] === now[col]
+                        ? same[row + 1][col + 1] + 1
+                        : Math.max(same[row + 1][col], same[row][col + 1]);
+                }
+            }
+            const left = [], right = [];
+            let row = 0, col = 0;
+            while (row < rows && col < cols) {
+                if (was[row] === now[col]) {
+                    left.push({kind: 'same', text: was[row]});
+                    right.push({kind: 'same', text: now[col]});
+                    row++;
+                    col++;
+                } else if (same[row + 1][col] >= same[row][col + 1]) {
+                    left.push({kind: 'gone', text: was[row++]});
+                } else {
+                    right.push({kind: 'new', text: now[col++]});
+                }
+            }
+            while (row < rows) left.push({kind: 'gone', text: was[row++]});
+            while (col < cols) right.push({kind: 'new', text: now[col++]});
+            return {left, right,
+                    gone: left.filter(one => one.kind === 'gone').length,
+                    added: right.filter(one => one.kind === 'new').length};
+        }
+
+        // Сторона разницы: совпавшие слова без пометок, ушедшие зачёркнуты,
+        // пришедшие подсвечены — одними и теми же пометками на обеих сторонах
+        function diffWordsHtml(words) {
+            return (words || []).map(one => one.kind === 'same'
+                ? escapeHtml(one.text)
+                : `<span class="diff-${one.kind === 'gone' ? 'gone' : 'new'}">`
+                    + `${escapeHtml(one.text)}</span>`).join(' ');
+        }
+
+        // Разница версии с нынешними словами — сторонами, а не одной строкой
+        // правки: у этих двух текстов разный смысл — «на это модель отвечала»
+        // и «а это сказано сейчас» (см. postVersionsHtml)
+        function versionDiffHtml(version, post) {
+            const diff = versionDiff(version.content || '', post.content || '');
+            // Слова те же — это и есть нынешняя реплика: показывать нечего
+            if (!diff.gone && !diff.added) return '';
+            return '<details class="version-diff"><summary>'
+                + `🔍 что изменилось: ушло ${diff.gone}, пришло ${diff.added}</summary>`
+                + '<div class="diff-sides">'
+                + '<div class="diff-side"><div class="diff-title">на эти слова отвечали</div>'
+                + `<div class="diff-words">${diffWordsHtml(diff.left)}</div></div>`
+                + '<div class="diff-side"><div class="diff-title">нынешние слова</div>'
+                + `<div class="diff-words">${diffWordsHtml(diff.right)}</div></div>`
+                + '</div></details>';
         }
 
         // Прежние слова реплики — свёрнутым блоком: реплика правилась или
@@ -2932,8 +3088,10 @@ HTML_TEMPLATE = """
                 const again = `<button class="post-action"`
                     + ` title="Заставить ответить заново именно с этих слов: новый ответ встанет в ленту, а прежние слова останутся версиями"`
                     + ` onclick="replayVersion(${post.id}, ${index})">🔁 переиграть с этих слов</button>`;
+                // И рядом с прежними словами — чем они отличаются от нынешних
+                const differ = versionDiffHtml(one, post);
                 return `<div class="version-head">Версия ${index + 1} из ${versions.length} · ${head}</div>`
-                    + words + `<div class="version-action">${again}${back}</div>`;
+                    + words + differ + `<div class="version-action">${again}${back}</div>`;
             }).join('');
             return `<details class="post-versions" data-post-id="${post.id}">`
                 + `<summary>🗂 прежние слова · ${versions.length} ${versionsWord(versions.length)}</summary>`
@@ -3528,7 +3686,10 @@ HTML_TEMPLATE = """
                     ? '<div style="font-size:12px;margin-top:6px;font-style:italic;">🗒 прежний спектакль, возвращённый из ДАМПа'
                         + phaseLine + '</div>'
                     : '';
-                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>' + restored + curtain;
+                // Итог — сразу под словом «Занавес»: у конца спектакля есть числа,
+                // и спрашивают о них именно тут (см. curtainReportHtml)
+                const report = curtainReportHtml(data.play_report);
+                statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;">🎭 Занавес</div>' + report + curtain + restored;
                 setTurnState('finished');
                 document.getElementById('finishBtn').style.display = 'none';
                 // «Покинуть театр» оставляем: занавес больше не закрывает сервер,

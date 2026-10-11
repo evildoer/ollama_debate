@@ -1285,6 +1285,31 @@ BUGS = {
          "        if version is not None:\n            owner, pick, _problem = self.version_pick(post_id, version)",
          "        if False:\n            owner, pick, _problem = self.version_pick(post_id, version)"),
     ],
+    "итог спектакля снова считает цену не по актам": [
+        ("aitheatre/show.py",
+         '            act["spent"] += spent',
+         '            act["spent"] += 0.0'),
+    ],
+    "итог снова забывает про сыгранное заново": [
+        ("aitheatre/show.py",
+         '            "again": len(self.replayed_posts),',
+         '            "again": 0,'),
+    ],
+    "занавес снова молчит об итоге спектакля": [
+        ("aitheatre/page.py",
+         "                const report = curtainReportHtml(data.play_report);",
+         "                const report = '';"),
+    ],
+    "разница версии с нынешними словами снова не показывается": [
+        ("aitheatre/page.py",
+         "                const differ = versionDiffHtml(one, post);",
+         "                const differ = '';"),
+    ],
+    "в разнице версий снова помечают и совпавшие слова": [
+        ("aitheatre/page.py",
+         "            return (words || []).map(one => one.kind === 'same'",
+         "            return (words || []).map(one => true"),
+    ],
     "лента снова обрывается в час заказа, а не в час переигровки": [
         ("aitheatre/show.py",
          '        plan, _held, problem = self.replay_plan_for(post_id, scope, version,\n'

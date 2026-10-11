@@ -10038,7 +10038,9 @@ class TestPageScript(unittest.TestCase):
         never = json.dumps(plain, ensure_ascii=False)
 
         out = self._run_page(
-            ("escapeHtml", "versionsWord", "postVersionsHtml"),
+            ("escapeHtml", "versionsWord", "pluralForm", "pluralText",
+             "versionWords", "versionDiff", "diffWordsHtml", "versionDiffHtml",
+             "postVersionsHtml"),
             f"postVersionsHtml({said})",
             f"postVersionsHtml({answered})",
             f"postVersionsHtml({never})",
@@ -10118,6 +10120,131 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("Идущий ход договорит и уступит место переигровке",
                       page.HTML_TEMPLATE,
                       "о переигровке на ходу не сказано — выглядит как ничего")
+
+
+    def test_the_curtain_report_names_what_the_show_cost(self):
+        """Итог под занавесом — числами: ходы, заново и цена по актам.
+
+        Занавес — не режим, а конец спектакля, и у него есть итог: считает его
+        сервер по ленте (см. show.show_report), а страница называет словами
+        (см. curtainReportHtml). Проверяется в node — тем же кодом, что уедет
+        в браузер.
+        """
+        report = {"posts": 5, "turns": 4, "with_versions": 2, "again": 1,
+                  "replays": 3, "priced": 4, "spent": 3.71,
+                  "acts": [{"round": 1, "turns": 2, "human": 0, "spent": 1.24,
+                            "priced": 2},
+                           {"round": 2, "turns": 2, "human": 1, "spent": 2.47,
+                            "priced": 2}]}
+        out = self._run_page(
+            ("escapeHtml", "pluralForm", "pluralText", "moneyText",
+             "curtainReportHtml"),
+            f"curtainReportHtml({json.dumps(report, ensure_ascii=False)})",
+            f"curtainReportHtml({json.dumps(dict(report, priced=3), ensure_ascii=False)})",
+            "curtainReportHtml(null)",
+            "curtainReportHtml({posts: 0, turns: 0, acts: []})")
+
+        html = out[0]
+        self.assertIn("4 хода", html)
+        self.assertIn("5 реплик", html, "реплик больше, чем ходов: говорил человек")
+        self.assertIn("2 акта", html)
+        self.assertIn("1 реплика сыграна заново", html)
+        self.assertIn("переигрывали 3 раза", html)
+        self.assertIn("прежние слова есть у 2 реплик", html)
+        self.assertIn("Акт 1 — 2 хода · 1,24 ₽", html)
+        self.assertIn("Акт 2 — 2 хода и 1 реплика человека · 2,47 ₽", html)
+        self.assertNotIn("цена известна", html, "все ходы с ценой — предупреждать не о чем")
+        # Цена есть не у каждого хода — так и сказано: «все ходы» было бы неправдой
+        self.assertIn("цена известна у 3 из 4 ходов", out[1])
+        self.assertEqual(out[2], "", "пустое состояние — не итог")
+        self.assertEqual(out[3], "", "спектакль без реплик итога не имеет")
+
+    def test_the_curtain_shows_the_report_of_the_show(self):
+        """Занавес на странице показывает итог — и доиграть после него можно.
+
+        Итог — не модальное окно и не отдельная страница: он там же, где слово
+        «Занавес» (см. applyStatus). А переигровка и продолжение от него
+        не зависят: занавес ничего не запирает (см. canContinuePlay).
+        """
+        source = page.HTML_TEMPLATE
+        self.assertIn("function curtainReportHtml", source)
+        status = self._function("applyStatus")
+        self.assertIn("curtainReportHtml(data.play_report)", status,
+                      "занавес молчит об итоге спектакля")
+        self.assertIn("data.play_report", status)
+        continue_btn = self._function("updatePanel")
+        self.assertIn("canContinuePlay", continue_btn,
+                      "продолжение после итога должно остаться")
+
+    def test_the_old_words_show_what_changed(self):
+        """Разница версии с нынешними словами — сторонами и с пометками.
+
+        У блока «прежние слова» спрашивают не только «что было», но и «чем это
+        отличается от того, что стоит сейчас»: версия говорит, на что модель
+        отвечала тогда (см. versionDiffHtml, show.version_view).
+        """
+        out = self._run_page(
+            ("escapeHtml", "versionWords", "versionDiff", "diffWordsHtml",
+             "versionDiffHtml"),
+            "versionDiff('кот сидел на окне', 'кот лежал на окне').gone",
+            "versionDiff('кот сидел на окне', 'кот лежал на окне').added",
+            "versionDiff('кот сидел', 'кот сидел').gone",
+            "versionDiff('кот сидел', 'кот сидел').added",
+            "versionDiffHtml({content: 'кот сидел на окне'},"
+            " {content: 'кот лежал на окне'})",
+            "versionDiffHtml({content: 'кот сидел'}, {content: 'кот сидел'})",
+            "diffWordsHtml(versionDiff('кот сидел на окне',"
+            " 'кот лежал на окне').left)")
+
+        self.assertEqual(out[:4], [1, 1, 0, 0],
+                         "разница считается не по словам, а по всему тексту")
+        diff, empty, side = out[4], out[5], out[6]
+        self.assertIn("что изменилось: ушло 1, пришло 1", diff)
+        self.assertIn("на эти слова отвечали", diff)
+        self.assertIn("нынешние слова", diff)
+        self.assertIn('<span class="diff-gone">сидел</span>', diff)
+        self.assertIn('<span class="diff-new">лежал</span>', diff)
+        self.assertEqual(empty, "", "слова те же — показывать нечего")
+        # На стороне «было» помечено только ушедшее: общие слова — без пометок
+        self.assertEqual(side.count("class=\"diff-"), 1,
+                         "помечено должно быть ровно ушедшее слово")
+        self.assertTrue(side.startswith("кот ") and side.endswith(" на окне"),
+                        f"общие слова потерялись: {side}")
+
+    def test_the_previous_words_block_shows_the_difference(self):
+        """В блоке «прежние слова» рядом с версией — чем она отличается.
+
+        Версия и нынешние слова стоят в одной реплике, и сравнить их можно только
+        глазами, переключаясь туда-сюда: разница собирается там же, где сама
+        версия, — и только когда слова и вправду другие (см. versionDiffHtml).
+        """
+        post = {"id": 4, "model_used": "human", "content": "Вторые слова",
+                "versions": [{"content": "Первые слова",
+                              "content_html": "<p>Первые слова</p>",
+                              "round": 2, "timestamp": "21:04",
+                              "display_name": "Элина", "why": "изменена"}]}
+        same = {"id": 5, "model_used": "human", "content": "Живые слова",
+                "versions": [{"content": "Живые слова",
+                              "content_html": "<p>Живые слова</p>",
+                              "round": 1, "timestamp": "21:01",
+                              "display_name": "Элина", "why": "изменена"}]}
+
+        out = self._run_page(
+            ("escapeHtml", "versionsWord", "pluralForm", "pluralText",
+             "versionWords", "versionDiff", "diffWordsHtml", "versionDiffHtml",
+             "postVersionsHtml"),
+            f"postVersionsHtml({json.dumps(post, ensure_ascii=False)})",
+            f"postVersionsHtml({json.dumps(same, ensure_ascii=False)})")
+
+        html, unchanged = out
+        # Общее слово («слова») остаётся на месте: ушло одно и пришло одно
+        self.assertIn("🔍 что изменилось: ушло 1, пришло 1", html)
+        self.assertIn('<span class="diff-gone">Первые</span>', html)
+        self.assertIn('<span class="diff-new">Вторые</span>', html)
+        self.assertIn("вернуть эти слова", html,
+                      "кнопки версий из блока не должны пропасть")
+        self.assertNotIn("🔍 что изменилось", unchanged,
+                         "версия совпала с нынешними словами — разницы нет")
 
 
 class TestRulesOnPause(unittest.TestCase):
@@ -11094,6 +11221,79 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertIn("никто не отвечал", problem)
         self.assertEqual(self.session.posts[1]["content"], "Другие слова.",
                          "слова переключили, хотя переигрывать нечего")
+
+    def test_the_report_counts_the_show_by_acts(self):
+        """Итог спектакля — по самой ленте: ходы, прежние слова и цена по актам.
+
+        Занавес — это конец спектакля, и у него есть итог. Считается он по ленте,
+        а не по памяти о ходе: реплика знает свой акт и цену своего хода
+        (post["turn"]), поэтому итог тот же и у переигранного спектакля,
+        и у вернувшегося из ДАМПа (см. show.show_report).
+
+        Цена хода приходит со счёта ключа, а здесь она выставлена прямо в летописи
+        реплик — там же, где её читает итог: за сам счёт отвечает
+        test_the_price_of_a_turn_comes_from_the_balance_not_from_tariffs.
+        """
+        self._play(2)
+        human = self._human("Живые слова.", round_num=2)
+        show.start_dump(self.session.topic)
+        self.session.edit_post(human["id"], "Другие слова.")
+        for post in self.session.posts:
+            if post["model_used"] != "human":
+                post["turn"] = {"spent": 1.0 if int(post.get("round") or 0) == 1
+                                else 2.0}
+        self.session.spent = 7.0
+
+        report = self.session.show_report()
+
+        self.assertEqual(report["posts"], 7, "реплик в ленте")
+        self.assertEqual(report["turns"], 6, "ходов — реплики моделей")
+        self.assertEqual([act["round"] for act in report["acts"]], [1, 2])
+        self.assertEqual([act["turns"] for act in report["acts"]], [3, 3])
+        self.assertEqual([act["human"] for act in report["acts"]], [0, 1],
+                         "реплика человека должна быть в своём акте")
+        self.assertEqual([act["spent"] for act in report["acts"]], [3.0, 6.0],
+                         "цена акта — сумма цен его ходов")
+        self.assertEqual(report["priced"], 6, "ходов с ценой")
+        self.assertEqual(report["with_versions"], 1,
+                         "прежние слова есть у одной реплики: её правили")
+        self.assertEqual(report["spent"], 7.0)
+
+    def test_the_report_remembers_how_often_the_show_was_played_again(self):
+        """«Заново» — два разных числа: сколько реплик и сколько было заходов.
+
+        Реплик с прежними словами видно и по ленте, и в ДАМПе, а число заходов
+        знает только память этого запуска: сам ДАМП о них молчит (см. replay_show,
+        show_report). Поэтому в итоге они и стоят порознь.
+        """
+        self._play(1)
+        plan, _held, problem = self.session.replay_plan_for(2, "post")
+        self.assertEqual(problem, "")
+
+        self._again(plan)
+        report = self.session.show_report()
+
+        self.assertEqual(report["replays"], 1, "заход не посчитан")
+        self.assertEqual(report["again"], 1, "переигранная реплика не посчитана")
+        self.assertGreaterEqual(report["with_versions"], 1,
+                                "прежние слова переигранной реплики не попали в итог")
+
+    def test_the_state_carries_the_report_of_the_play(self):
+        """Итог уезжает состоянием: им и живёт занавес на странице.
+
+        Считает его сервер по ленте (см. show.show_report, web.status_payload),
+        а страница называет словами — и та же самая сводка нужна ей и после
+        перезагрузки страницы, а не только в ответ на занавес.
+        """
+        self._play(1)
+        self.session.finished = True
+        self.session.running = False
+
+        state = self.client.get("/api/status").get_json()
+
+        self.assertEqual(state["play_report"], self.session.show_report())
+        self.assertEqual(state["play_report"]["posts"], 3)
+        self.assertEqual(state["play_report"]["turns"], 3)
 
     def test_the_state_tells_about_the_last_order_of_the_feed(self):
         """О правке сказанного узнают состоянием, а не только ответом на нажатие.

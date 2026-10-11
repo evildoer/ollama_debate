@@ -153,6 +153,10 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         # между ходами, и страница узнаёт о сделанном только так
         # (см. feed_payload, show.feed_note)
         **feed_payload(),
+        # Итог спектакля: под занавесом страница показывает его своими словами —
+        # сколько сыграно, сколько заново и во что обошлось по актам
+        # (см. show.DebateSession.show_report, page.curtainReportHtml)
+        "play_report": show.session.show_report(),
     }
     # Для внешних клиентов (и для события подключения) — те же поля, но реплики целиком
     if with_posts:
