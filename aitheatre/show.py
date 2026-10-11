@@ -2658,7 +2658,8 @@ def finish_meaning(reason: str = "") -> str:
 
 # Поля сообщения, которые не текст, а другое: у протокола инструментов их три,
 # и как раз они оказываются у сообщения там, где текста нет вовсе
-_MESSAGE_FIELDS = ("tool_calls", "function_call", "tool_name", "tool_call_id")
+_MESSAGE_FIELDS = ("images", "tool_calls", "function_call", "tool_name",
+                   "tool_call_id")
 
 
 def _calls_summary(calls) -> str:
@@ -2690,6 +2691,11 @@ def message_fields(msg: dict) -> list:
         if key in ("tool_calls", "function_call"):
             calls = value if isinstance(value, list) else [value]
             found.append(f"`{key}` = {len(calls)} вызов(ов): {_calls_summary(calls)}")
+        elif key == "images":
+            # Считаются сами картинки, а не их данные: в записи и в отчёте
+            # нужен след «уехала картинка», а не мегабайты base64 (см. _message_view)
+            count = len(value) if isinstance(value, (list, tuple)) else int(value or 0)
+            found.append(f"`{key}` = {count} — приложено к этой реплике")
         else:
             found.append(f"`{key}` = {value}")
     return found
@@ -2714,7 +2720,12 @@ def message_note(msg: dict) -> str:
                 else "это ответ инструмента поиска, и тела текста в нём нет")
         return head + (f" — {'; '.join(fields)}" if fields else "")
     if filled:
-        return ""
+        # Картинка — не текст, и сама она в записи не видна: по этой строке
+        # читающий знает, что реплика уехала модели вместе с приложенным
+        # (см. _format_history)
+        pictures = len(msg.get("images") or [])
+        return (f"к этой реплике приложено картинок: {pictures} — уехали вместе с ней"
+                if pictures else "")
     if not fields:
         return ("тела текста нет и других полей тоже — приложение отправило пустое "
                 "сообщение (это уже наша ошибка, а не хитрость протокола)")
@@ -2740,6 +2751,10 @@ def _message_view(msg: dict) -> dict:
         "name": str(msg.get("name", "") or ""),
         "tokens": text.estimate_tokens(content),
         "content": content,
+        # Сколько картинок уехало с этим сообщением: сами данные в отчёт
+        # не кладутся — они весят мегабайты, — а след «уехала картинка» нужен
+        # и в отчёте хода, и в ДАМПе (см. message_note, _format_history)
+        "images": len(msg.get("images") or []),
         "note": message_note(msg),
     }
 

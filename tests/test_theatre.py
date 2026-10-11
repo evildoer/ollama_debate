@@ -2670,6 +2670,51 @@ class TestTurnReport(unittest.TestCase):
         self.assertIn("ответ инструмента поиска", written,
                       "у найденного тоже должно быть сказано, что это такое")
 
+    def test_the_request_says_the_picture_went_with_the_replica(self):
+        """Уехала ли картинка — видно и в отчёте хода, и в ДАМПе.
+
+        Снимок запроса — это то, чем модель отвечала: картинка в нём не текст,
+        и без своей строки не видно ни того, что она уехала, ни того, что
+        модель получила её впервые (см. _message_view, message_note). Сами
+        данные картинки в отчёт не кладутся — только их число.
+        """
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+        for name, value in (("UPLOAD_DIR", folder), ("DUMP_FILE", dump)):
+            patcher = mock.patch.object(settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        picture, error = show.save_upload(
+            "схема.png", "data:image/png;base64,"
+            + base64.b64encode(PNG_SIGN).decode("ascii"))
+        self.assertEqual(error, "", "картинка обязана приниматься")
+        self.addCleanup(show._dump_reset)
+        show.start_dump(self.session.topic)
+        self.session.add_post("Живой", "human", "Смотрите, что нашёл.", 1,
+                              dump=False, attachments=[picture])
+
+        post = self._turn()
+        written = dump.read_text(encoding="utf-8")
+
+        self.assertIn("приложено картинок: 1", written,
+                      "в ДАМПе нет следа уехавшей картинки")
+        # Сами данные в отчёт не едут — только их число: картинка весит
+        # мегабайты, а ДАМП пишется и читается по ходу
+        view = show._message_view({"role": "user", "content": "Слова.",
+                                   "images": ["данные картинки"]})
+        self.assertEqual(view["images"], 1,
+                         "в отчёт уехали сами данные картинки, а не их число")
+        # А у реплики без слов, но с картинкой — названо поле: текста нет,
+        # и без этого у сообщения было бы одно «0 токенов текста»
+        silent = show._message_view({"role": "user", "content": "",
+                                    "images": ["data:image/png;base64,AAAA"]})
+        self.assertEqual(silent["images"], 1)
+        self.assertIn("`images` = 1", silent["note"],
+                      "у реплики без слов картинка не названа")
+        # А у реплики в ленте — только сводка хода: картинки в неё не едут
+        self.assertNotIn("images", post["turn"],
+                         "в сводку реплики попали картинки")
+
     def test_the_price_of_a_turn_comes_from_the_balance_not_from_tariffs(self):
         """Цена хода — разница остатков на ключе: тарифов мы не знаем, счёт знает шлюз.
 
@@ -7881,6 +7926,58 @@ class TestThePictureIsShownOnce(PicturesTest):
         self.assertTrue([m for m in seen if m.get("images")],
                         "модель, которая картинку не видела, осталась без неё")
         self.assertNotIn("уже показана", self.joined(seen))
+
+    def test_a_new_replica_with_a_picture_goes_to_those_who_have_not_seen_it(self):
+        """Картинка из новой реплики уезжает тому, кто её ещё не видел.
+
+        Реплика человека с картинкой появляется и на ходу, и отвечает тот, чей
+        ход ещё не наступил, — в его запросе картинка есть (см. _format_history).
+        Отвечавшая модель её уже видела и получит строку о ней.
+        """
+        self.with_picture()
+        first = self.spoken()
+
+        self.assertTrue([m for m in first if m.get("images")],
+                        "новая реплика с картинкой не дошла до модели")
+        self.turn()
+
+        other = [one for one in ai_participants(self.session)
+                 if one["display_name"] != self.person["display_name"]][0]
+        seen = self.session.build_messages_for_ai(other, 2)
+
+        self.assertTrue([m for m in seen if m.get("images")],
+                        "не отвечавшая модель осталась без картинки")
+        self.assertNotIn("уже показана", self.joined(seen),
+                         "чужой ответ выдан за её собственный")
+
+    def test_a_picture_attached_by_an_edit_goes_to_the_models_too(self):
+        """Картинку можно приложить и правкой реплики — модели её не проглотят.
+
+        Правка меняет и приложенное к реплике (см. show.edit_post), а помнит
+        о показанном адрес (см. images_shown): прежде не показанный уезжает
+        картинкой, а увиденный однажды — только строкой о себе.
+        """
+        self.addCleanup(show._dump_reset)
+        human = self.session.add_post("Живой", "human", "Сначала без картинки.", 1,
+                                      dump=False)
+        self.assertEqual([m for m in self.spoken() if m.get("images")], [],
+                         "картинка взялась до правки")
+        self.turn()
+
+        self.session.edit_post(human["id"], "Сначала без картинки.",
+                               [self.picture])
+
+        again = self.spoken()
+        self.assertTrue([m for m in again if m.get("images")],
+                        "картинка из правки не уехала модели")
+        self.assertNotIn("уже показана", self.joined(again),
+                         "о картинке сказали как о показанной, а её не показывали")
+        # Увидела — второй раз за неё не платят
+        self.turn()
+        later = self.spoken()
+        self.assertEqual([m for m in later if m.get("images")], [],
+                         "за ту же картинку заплатили второй раз")
+        self.assertIn("уже показана", self.joined(later))
 
 
 class TestThePictureOnTheTheme(PicturesTest):

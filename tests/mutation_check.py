@@ -2038,6 +2038,17 @@ BUGS = {
          "                versions[key] = remember_version(post)",
          "                versions[key] = []"),
     ],
+    "отчёт о ходе снова молчит об уехавшей картинке": [
+        ("aitheatre/show.py",
+         '        "images": len(msg.get("images") or []),',
+         '        "images": 0,'),
+    ],
+    "в реплике без слов снова не видно, что с ней уехала картинка": [
+        ("aitheatre/show.py",
+         '        return (f"к этой реплике приложено картинок: {pictures} — уехали вместе с ней"\n'
+         '                if pictures else "")',
+         '        return ""'),
+    ],
     "продолженный спектакль снова пишет ту же картинку в ДАМП": [
         ("aitheatre/show.py",
          '            if not _DUMP.get("pictures_seen"):\n'
