@@ -41,6 +41,7 @@ import copy
 import http.client
 import http.server
 import importlib
+import inspect
 import io
 import json
 import os
@@ -10018,8 +10019,10 @@ class TestPageScript(unittest.TestCase):
 
         Версии едут вместе с репликой (см. show.version_view): у реплики без
         прежних слов блока нет вовсе, а у переигранной — своя строка на каждую
-        версию. Вернуть прежние слова предлагается только у своей реплики:
-        у модели за неё говорят заново (см. show.replay_plan_for).
+        версию. Вернуть эти слова предлагается в нём любой реплике: у своей так
+        возвращают её же прежние слова, а у ответа модели — выбирают лучший
+        из её ответов (см. show.revert_version). Переигрывать с прежних слов
+        нечем и не нужно: заново отвечают нынешними словами.
         """
         mine = {"id": 4, "model_used": "human", "content": "Вторые слова",
                 "versions": [{"content": "Первые слова",
@@ -10055,14 +10058,39 @@ class TestPageScript(unittest.TestCase):
         self.assertIn("onclick=\"revertVersion(4, 0)\"", human_html,
                       "вернуть прежние слова из ленты нечем")
         self.assertIn("переиграна", model_html)
-        self.assertNotIn("revertVersion(5, 0)", model_html,
-                         "у реплики модели предлагают правку, которой у неё нет")
-        # И у каждой версии — своя кнопка переигровки: слова не заменяют реплику,
-        # а становятся тем, с чего отвечают заново (см. page.replayVersion)
-        self.assertIn("onclick=\"replayVersion(5, 0)\"", model_html,
-                      "переиграть с прежних слов у реплики модели нечем")
-        self.assertIn("переиграть с этих слов", human_html)
+        # У ответа модели так выбирают лучший из её ответов, а не переспрашивают
+        # заново: заново отвечают с нынешних слов кнопкой «🔁 эту реплику»
+        self.assertIn("onclick=\"revertVersion(5, 0)\"", model_html,
+                      "вернуть прежний ответ модели нечем")
+        self.assertNotIn("replayVersion", human_html + model_html,
+                         "в блоке прежних слов снова переигрывают с них самих")
+        self.assertNotIn("переиграть с этих слов", human_html + model_html,
+                         "кнопка переигровки с прежних слов вернулась в блок")
         self.assertEqual(words, "версия версии версий версий версия")
+
+    def test_the_buttons_in_the_feed_are_chosen_by_the_speaker(self):
+        """Кнопки в ленте — по говорящему: своё правят, за ответ модели отвечают.
+
+        Переигрывать саму реплику человека нечего: свои слова правят кнопкой
+        «✍️ изменить», а заново отвечают у ответа модели кнопкой «🔁 эту
+        реплику» (см. show.replay_scope). Акт целиком переигрывают с любой
+        реплики: он не реплика, а всё, что было сыграно в нём.
+        """
+        mine = json.dumps({"id": 4, "model_used": "human", "round": 1})
+        model = json.dumps({"id": 5, "model_used": "local-one", "round": 1})
+        human_html, model_html = self._run_page(
+            ("postActionsHtml",), f"postActionsHtml({mine})",
+            f"postActionsHtml({model})", constants=("REPLAY_HINT",))
+
+        self.assertNotIn("replayPost(4)", human_html,
+                         "свою реплику снова предлагают переиграть")
+        self.assertIn("startEdit(4)", human_html, "свою реплику нечем править")
+        self.assertIn("replayPost(5)", model_html, "ответ модели нечем переиграть")
+        self.assertNotIn("startEdit(5)", model_html,
+                         "у ответа модели предлагают правку, которой у него нет")
+        for html in (human_html, model_html):
+            self.assertIn(", 'round')", html,
+                          "акт с реплики не переигрывается")
 
     def test_the_finished_show_changes_faces_like_the_running_one(self):
         """Аватарку можно сменить и под занавесом: лента-то никуда не делась.
@@ -10727,18 +10755,21 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertIn("состав", problem)
         self.assertEqual(len(self.session.posts), 3, "лента оборвана впустую")
 
+
     def test_a_replayed_reply_of_a_human_stands_in_the_dump_once(self):
         """Переигранное слово человека тоже ложится в ДАМП с отметкой, а не рядом.
 
         У модели отметку пишет сам ход (см. handle_ai_turn), а живая реплика
         приходит через add_post — и там о переигровке надо сказать отдельно,
         иначе в файле оказались бы две записи об одной реплике (и в ленте — две).
+        Сама по себе реплика человека не переигрывается — её слово входит в акт
+        или спектакль, сыгранный заново (см. replay_scope).
         """
         show.start_dump(self.session.topic)
         self._human("Сказано в первый раз.")
         # Переигровка обрывает ленту на прежнем месте (см. hold_from): своё слово
         # человек говорит заново — тем же номером и на том же месте
-        plan, _held, problem = self.session.replay_plan_for(1, "post")
+        plan, _held, problem = self.session.replay_plan_for(None, "show")
         self.assertEqual(problem, "")
         self.session.replay_show(plan)
 
@@ -10823,7 +10854,13 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(len(self.session.posts), 3, "лента оборвана впустую")
 
     def test_the_page_carries_the_buttons_of_the_replay(self):
-        """В ленте у каждой реплики — свои кнопки: эту, акт целиком и изменить свою."""
+        """В ленте у каждой реплики — свои кнопки: эту, акт целиком и изменить свою.
+
+        Кнопок ровно по говорящему: свою реплику правят («✍️ изменить»), а заново
+        просят ответить у ответа модели («🔁 эту реплику») — переспрашивать у себя
+        своё же нечего (см. show.replay_scope). Акт целиком переигрывают с любой
+        реплики: он не реплика, а всё, что было сыграно в нём.
+        """
         self.assertIn("${postActionsHtml(post)}", page.HTML_TEMPLATE,
                       "кнопок правки в реплике нет")
         for control in ("replayPost", "replayWholeShow", "startEdit",
@@ -10956,11 +10993,14 @@ class TestSayingItAgain(unittest.TestCase):
                          "в ДАМПе летопись версий другая, чем в ленте")
 
     def test_the_revert_route_says_what_is_missing(self):
-        """Возвращать нечего или некому — так и говорится, без намёков.
+        """Возвращать нечего — так и говорится, без намёков.
 
-        Прежних слов может не быть вовсе (реплику не меняли), номер версии
-        может быть не тот, а у реплики модели правки нет: за неё говорят
-        заново — переигровкой.
+        Прежних слов может не быть вовсе (реплику не меняли и не переигрывали),
+        а номер версии может быть не тот. Доступен возврат и ответу модели:
+        им выбирают лучший из её ответов (см. show.revert_version).
+
+        На ходу возврат версии не отменяется: его берёт сам спектакль, между
+        ходами — спектакль для этого не останавливают (см. show.order_feed).
         """
         show.start_dump(self.session.topic)
         post = self._human("Сказано однажды.")
@@ -10976,19 +11016,26 @@ class TestSayingItAgain(unittest.TestCase):
         model_post = self.session.posts[1]
         answer = self.client.post(f"/api/post/{model_post['id']}/revert",
                                   json={"version": 0}).get_json()
-        self.assertFalse(answer["success"])
-        self.assertIn("человека", answer["error"])
+        self.assertFalse(answer["success"], "вернули версию, которой нет")
+        self.assertIn("прежних слов", answer["error"])
+        self.assertIsNone(self.session.feed_order,
+                          "отказанный заказ не должен ждать в очереди")
 
-        # На ходу возврат версии не отменяется: его берёт сам спектакль,
-        # между ходами — спектакль для этого не останавливают (см. show.order_feed)
+        # А у переигранного ответа модели прежние слова есть — и заказ на ходу
+        # не отказывают: его берёт сам спектакль, между ходами
+        plan, _held, problem = self.session.replay_plan_for(model_post["id"], "post")
+        self.assertEqual(problem, "")
+        self._again(plan)
         self.session.running = True
         answer = self.client.post(f"/api/post/{model_post['id']}/revert",
                                   json={"version": 0}).get_json()
         self.session.running = False
-        self.assertFalse(answer["success"], "у модели прежних слов вернуть нельзя")
-        self.assertIn("человека", answer["error"])
-        self.assertIsNone(self.session.feed_order,
-                          "отказанный заказ не должен ждать в очереди")
+        self.assertTrue(answer["success"], answer.get("error"))
+        self.assertTrue(answer["queued"], "заказ на ходу сделан сразу, под чужим ходом")
+        self.assertEqual(self.session.take_order(), "")
+        self.assertEqual(self.session.posts[1]["content"],
+                         self.session.posts[1]["versions"][0]["content"],
+                         "вернулись не те слова, что просили")
 
     def test_the_page_carries_the_previous_words_block(self):
         """Блок «прежние слова» есть у реплики в ленте, и вернуть версию — тоже."""
@@ -11139,13 +11186,14 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(self.session.feed_note["post"], human["id"],
                          "не сказано, какую реплику показывать")
 
-    def test_a_reply_is_played_again_from_its_old_words(self):
-        """Переиграть с прежних слов: слова берутся из летописи, ответ — новый.
+    def test_the_show_is_played_again_only_with_the_current_words(self):
+        """Переигрывают нынешние слова: выбирать «с каких» больше нечего.
 
-        Реплика прежних слов не теряет: её нынешние слова ложатся в «прежние»,
-        а в ленту встаёт новый ответ — и показывают именно его (см.
-        show.plan_feed_replay). Выбрать, с чего отвечать заново, до этого было
-        нечем: переигрывали только с нынешних слов.
+        Кнопка «🔁 переиграть с этих слов» делала третье дело об одном и том же:
+        слова из летописи вставали в разговор, а соседние ответы отвечали уже
+        на другое — в ленте от этого был бардак. Прежние слова — это выбор
+        лучшего ответа (см. revert_version), а заново отвечают нынешними словами
+        (см. show.replay_scope). Поэтому у переигровки и версии не спрашивают.
         """
         self._play(1)
         # У реплики №2 уже есть прежние слова: её однажды переиграли
@@ -11155,16 +11203,24 @@ class TestSayingItAgain(unittest.TestCase):
         now_words = post["content"]
         self.assertNotIn(first_words, now_words)
 
-        plan, focus, problem = self.session.plan_feed_replay(2, "post", 0)
+        self.assertEqual(
+            list(inspect.signature(self.session.plan_feed_replay).parameters),
+            ["post_id", "scope"], "у переигровки снова выбирают версию")
+        self.assertEqual(
+            list(inspect.signature(self.session.replay_plan_for).parameters),
+            ["post_id", "scope", "hold"], "у переигровки снова выбирают версию")
+
+        plan, focus, problem = self.session.plan_feed_replay(2, "post")
 
         self.assertEqual(problem, "")
         self.assertEqual(focus, 2, "показывать надо переигранную реплику")
         self.assertEqual(plan["posts"], 1)
         self.assertEqual(plan["name"], "Второй")
-        self.assertEqual(self.session.posts[1]["content"], first_words,
-                         "реплика осталась на нынешних словах — переигрывать не с чего")
-        self.assertEqual(self.session.posts[1]["versions"][-1]["content"], now_words,
-                         "нынешние слова пропали из летописи")
+        self.assertEqual(self.session.posts[1]["content"], now_words,
+                         "сначала слова подменили, а потом уж переигрывают")
+        self.assertEqual([one["content"] for one in self.session.posts[1]["versions"]],
+                         [first_words],
+                         "сама по себе переигровка версий не плодит")
 
         self._again(plan)
 
@@ -11172,55 +11228,68 @@ class TestSayingItAgain(unittest.TestCase):
         self.assertEqual(played["id"], 2, "реплика встала не на своё место")
         self.assertNotIn(played["content"], (first_words, now_words),
                          "пришёл прежний ответ: реплика не переиграна")
-        self.assertEqual([one["content"] for one in played["versions"]][-2:],
-                         [now_words, first_words],
-                         "выбранные или нынешние слова потерялись из летописи")
+        self.assertEqual([one["content"] for one in played["versions"]],
+                         [first_words, now_words],
+                         "прежний ответ не остался летописью")
 
-    def test_the_answer_to_the_old_words_of_a_human_is_played_again(self):
-        """Переиграть с прежних слов реплики человека — заново отвечает модель.
+    def test_the_human_reply_is_not_played_again(self):
+        """Свою реплику не переигрывают: её правят, а заново отвечает сосед.
 
-        За человека говорит модель, поэтому переигрывается её ответ: выбранные
-        слова человека встают в разговор, а тот, кто отвечает после, говорит
-        заново (см. show.replay_scope).
+        У реплики человека заново отвечать нечего: свои слова правят кнопкой
+        «✍️ изменить», а переспрашивают у ответа модели — кнопкой «🔁 эту
+        реплику» у него (см. show.replay_scope). Переигровка акта с реплики
+        человека при этом работает: там она просто начало акта, и заново идёт
+        всё, что было сказано после неё.
         """
         human = self._stage_a_human()
-        self.session.edit_post(human["id"], "Другие слова.")
-        old_answer = self.session.posts[2]["content"]
 
-        plan, focus, problem = self.session.plan_feed_replay(human["id"], "post", 0)
-
-        self.assertEqual(problem, "")
-        self.assertEqual(focus, human["id"], "показывать надо реплику человека")
-        self.assertEqual(self.session.posts[1]["content"], "Живые слова.",
-                         "слова человека не переключились на выбранные")
-        self.assertEqual(plan["name"], "Второй", "отвечает не тот, кто отвечал")
-
-        self._again(plan)
-
-        played = self.session.posts[2]
-        self.assertNotEqual(played["content"], old_answer, "отвечено прежними словами")
-        self.assertIn(old_answer, [one["content"] for one in played["versions"]],
-                      "прежний ответ не остался летописью")
-
-    def test_playing_again_from_the_last_words_says_there_is_nobody_to_answer(self):
-        """У последней реплики человека переигрывать нечего: отвечать некому.
-
-        Слова выбираются ради того, чтобы на них ответили заново, — а если
-        за репликой никого нет, то и переигрывать нечего, и слова человека
-        впустую не переключаются (см. show.replay_scope).
-        """
-        self._play(1)
-        self.session.posts = self.session.posts[:1]
-        human = self._human("Живые слова.")
-        self.session.edit_post(human["id"], "Другие слова.")
-
-        plan, focus, problem = self.session.plan_feed_replay(human["id"], "post", 0)
+        plan, focus, problem = self.session.plan_feed_replay(human["id"], "post")
 
         self.assertIsNone(plan)
         self.assertEqual(focus, 0)
-        self.assertIn("никто не отвечал", problem)
-        self.assertEqual(self.session.posts[1]["content"], "Другие слова.",
-                         "слова переключили, хотя переигрывать нечего")
+        self.assertIn("реплику человека", problem)
+        self.assertIn("правят", problem)
+        self.assertEqual(self.session.posts[1]["content"], "Живые слова.",
+                         "ленту тронули, хотя переигрывать нечего")
+
+        # Акт — не реплика: там с человека начинается целый акт
+        plan, focus, problem = self.session.plan_feed_replay(human["id"], "round")
+
+        self.assertEqual(problem, "")
+        self.assertEqual(focus, self.session.posts[0]["id"],
+                         "акт начали не с его первой реплики")
+        self.assertEqual(plan["posts"], len(self.session.posts))
+        self.assertEqual(plan["name"], self.session.posts[0]["display_name"])
+
+    def test_the_best_answer_of_a_model_is_chosen_from_its_previous_ones(self):
+        """Лучший ответ модели выбирают возвратом её прежних слов.
+
+        Заново отвечают кнопкой «🔁 эту реплику», и новый ответ может выйти хуже
+        прежнего: тогда у ответа в «прежних словах» стоит «↩ вернуть эти слова»,
+        и реплика говорит то, что было сказано раньше (см. show.revert_version).
+        Нынешний ответ при этом ложится в летопись — по версиям можно ходить
+        в обе стороны, а в ДАМПе остаются обе записи.
+        """
+        self._play(1)
+        was = self.session.posts[1]["content"]
+        plan, _held, problem = self.session.replay_plan_for(2, "post")
+        self.assertEqual(problem, "")
+        self._again(plan)
+        again = self.session.posts[1]["content"]
+        self.assertNotEqual(again, was, "ответ пришёл прежний — выбирать не из чего")
+
+        post, problem = self.session.revert_version(2, 0)
+
+        self.assertEqual(problem, "")
+        self.assertEqual(post["content"], was, "прежний ответ не вернулся")
+        self.assertEqual([one["content"] for one in post["versions"]],
+                         [was, again], "летопись версий идёт не тем порядком")
+        self.assertEqual(self.session.posts[1]["content"], was)
+        self.assertEqual(self.session.conversation_history[1]["content"], was,
+                         "модели прочитали бы не то, что стоит в ленте")
+        play = self._dump()
+        self.assertEqual([one["content"] for one in play["posts"][1]["versions"]],
+                         [was, again], "в ДАМПе летопись версий другая, чем в ленте")
 
     def test_the_report_counts_the_show_by_acts(self):
         """Итог спектакля — по самой ленте: ходы, прежние слова и цена по актам.

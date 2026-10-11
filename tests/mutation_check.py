@@ -1271,19 +1271,19 @@ BUGS = {
     ],
     "переигровка на ходу снова отказывается, а не ждёт своей очереди": [
         ("aitheatre/web.py",
-         '    problem = show.session.order_feed("replay", post_id=post_id, scope=scope,',
+         '    problem = show.session.order_feed("replay", post_id=post_id, scope=scope)',
          '    problem = ("спектакль идёт — переигрывают под занавесом" if show.session.running\n'
-         '               else "") or show.session.order_feed("replay", post_id=post_id, scope=scope,'),
+         '               else "") or show.session.order_feed("replay", post_id=post_id, scope=scope)'),
     ],
     "заказ ленты на ходу снова делается сразу, под чужим ходом": [
         ("aitheatre/show.py",
          "        if not self.running:\n            return self.take_order()",
          "        if True:\n            return self.take_order()"),
     ],
-    "переигровка с прежних слов снова играет с нынешних": [
+    "переигрывают снова и саму реплику человека": [
         ("aitheatre/show.py",
-         "        if version is not None:\n            owner, pick, _problem = self.version_pick(post_id, version)",
-         "        if False:\n            owner, pick, _problem = self.version_pick(post_id, version)"),
+         '        if scope == "post" and self.posts[index].get("model_used") == "human":',
+         "        if False:"),
     ],
     "итог спектакля снова считает цену не по актам": [
         ("aitheatre/show.py",
@@ -1312,17 +1312,17 @@ BUGS = {
     ],
     "лента снова обрывается в час заказа, а не в час переигровки": [
         ("aitheatre/show.py",
-         '        plan, _held, problem = self.replay_plan_for(post_id, scope, version,\n'
-         '                                                   hold=False)\n'
+         '        plan, _held, problem = self.replay_plan_for(post_id, scope, hold=False)\n'
          "        if problem:\n"
          "            return None, 0, problem\n"
-         '        return plan, focus, ""',
-         '        plan, _held, problem = self.replay_plan_for(post_id, scope, version,\n'
-         '                                                   hold=False)\n'
+         "        # Показывать надо ту реплику, за которую взялись (см. page.openTurnWhenArrives)\n"
+         '        return plan, self.replay_aim(post_id, scope), ""',
+         '        plan, _held, problem = self.replay_plan_for(post_id, scope, hold=False)\n'
          "        if problem:\n"
          "            return None, 0, problem\n"
          "        self.replay_show(plan)\n"
-         '        return plan, focus, ""'),
+         "        # Показывать надо ту реплику, за которую взялись (см. page.openTurnWhenArrives)\n"
+         '        return plan, self.replay_aim(post_id, scope), ""'),
     ],
     "оборванный ход снова читается как молчание": [
         ("aitheatre/show.py",
@@ -1919,11 +1919,11 @@ BUGS = {
     ],
     "переигрывание всего спектакля снова требует номера реплики": [
         ("aitheatre/show.py",
-         '        elif str(scope or "post").strip().lower() == "show":\n'
+         '        if scope == "show":\n'
          "            if not self.posts:\n"
          '                return None, 0, "переигрывать нечего: лента пуста"\n'
          "            index, count = 0, len(self.posts)\n",
-         '        elif str(scope or "post").strip().lower() == "show":\n'
+         '        if scope == "show":\n'
          "            if not self.posts:\n"
          '                return None, 0, "переигрывать нечего: лента пуста"\n'
          "            index = self.index_of(post_id)\n"
@@ -2043,29 +2043,31 @@ BUGS = {
          "        if not 0 <= pick < len(versions):",
          "        if False:"),
     ],
-    "вернуть прежние слова снова можно и реплике модели": [
+    "вернуть прежние слова снова можно только реплике человека": [
         ("aitheatre/show.py",
-         '            if self.posts[index].get("model_used") != "human":\n'
-         '                return ("вернуть прежние слова можно реплике человека: "\n'
-         '                        "у модели её переигрывают")',
-         '            if False:\n'
-         '                return ("вернуть прежние слова можно реплике человека: "\n'
-         '                        "у модели её переигрывают")'),
+         '            return self.version_pick(post_id, payload.get("version"))[2]',
+         '            index = self.index_of(post_id)\n'
+         '            if index is not None and self.posts[index].get("model_used") != "human":\n'
+         '                return "вернуть прежние слова можно реплике человека"\n'
+         '            return self.version_pick(post_id, payload.get("version"))[2]'),
     ],
     "страница снова не строит блок прежних слов": [
         ("aitheatre/page.py",
          "            if (!versions.length) return '';",
          "            if (true) return '';"),
     ],
-    "у реплики модели снова предлагают вернуть прежние слова": [
+    "в прежних словах ответа модели снова нет возврата": [
         ("aitheatre/page.py",
-         "                const back = mine ? `<button class=\"post-action\"`",
-         "                const back = true ? `<button class=\"post-action\"`"),
+         "                const back = `<button class=\"post-action\"`",
+         "                const back = post.model_used === 'human' ? `<button class=\"post-action\"`"),
+        ("aitheatre/page.py",
+         "                    + ` onclick=\"revertVersion(${post.id}, ${index})\">↩ вернуть эти слова</button>`;",
+         "                    + ` onclick=\"revertVersion(${post.id}, ${index})\">↩ вернуть эти слова</button>` : '';"),
     ],
-    "переиграть с прежних слов из блока «прежние слова» снова нечем": [
+    "в ленте снова переигрывают и саму реплику человека": [
         ("aitheatre/page.py",
-         "                    + ` onclick=\"replayVersion(${post.id}, ${index})\">🔁 переиграть с этих слов</button>`;",
-         "                    + '';"),
+         "            const again = mine ? '' : `<button class=\"post-action\" title=\"${REPLAY_HINT}\"",
+         "            const again = `<button class=\"post-action\" title=\"${REPLAY_HINT}\""),
     ],
 }
 

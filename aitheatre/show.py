@@ -3831,7 +3831,7 @@ class DebateSession:
         self.held_versions = {}
         return len(back)
 
-    def replay_scope(self, post_id, scope=None, version=None) -> tuple:
+    def replay_scope(self, post_id, scope=None) -> tuple:
         """Что переигрывается: (место в ленте, сколько реплик, беда).
 
         Реплика — одна (та же, тем же участником, в том же акте), акт — весь акт
@@ -3840,10 +3840,12 @@ class DebateSession:
         сказано, — и если место из состава убрали, акт от этого короче не станет
         (участник просто пропустит свой ход, см. run_debate_thread).
 
-        Версия — переигровка с прежних слов реплики (см. version_pick): у реплики
-        модели заново отвечает она же, а у реплики человека — тот, кто отвечал
-        после: за человека говорит модель, и её ответ и переигрывается. Если после
-        реплики человека никто не отвечал, переигрывать нечего.
+        Переигрывают всегда нынешние слова — и только ответы модели: свои слова
+        правят (см. edit_post), а из прежних ответов модели выбирают лучший
+        (см. revert_version). Переиграть «с этих слов» было бы третьим делом
+        об одном и том же, и в ленте от него оставался бы бардак: слова из
+        летописи вставали бы в разговор, а соседние ответы отвечали бы уже
+        на другое.
 
         Ничего не меняет — по этому заказ ленты принимается или отклоняется сразу
         (см. check_order), а лента обрывается уже перед самой переигровкой
@@ -3851,24 +3853,12 @@ class DebateSession:
 
         Возвращает (место, реплик, беда): беда не пустая — переигрывать нечего.
         """
-        if version is not None:
-            owner, _pick, problem = self.version_pick(post_id, version)
-            if problem:
-                return None, 0, problem
-            index = self.index_of(owner.get("id"))
-            if owner.get("model_used") == "human":
-                if index + 1 >= len(self.posts):
-                    return None, 0, ("за этой репликой никто не отвечал — "
-                                     "переигрывать нечего, спектакль можно просто "
-                                     "продолжить")
-                index += 1
-            count = 1
-        elif str(scope or "post").strip().lower() == "show":
+        scope = str(scope or "post").strip().lower()
+        if scope == "show":
             if not self.posts:
                 return None, 0, "переигрывать нечего: лента пуста"
             index, count = 0, len(self.posts)
         else:
-            scope = str(scope or "post").strip().lower()
             if scope not in ("post", "round", "act"):
                 return None, 0, f"неизвестно, что переигрывать: «{scope}»"
             index = self.index_of(post_id)
@@ -3882,6 +3872,14 @@ class DebateSession:
                             if int(one.get("round") or 0) == act)
             else:
                 count = 1
+        # Реплику человека саму заново не играют: переспрашивать у неё нечего —
+        # свои слова правят (см. edit_post), а отвечать заново просят у ответа
+        # модели кнопкой «🔁 эту реплику». Акт и спектакль — другое дело: там
+        # реплика человека просто начало, и с неё переигрывают всё, что после
+        # (см. page.postActionsHtml)
+        if scope == "post" and self.posts[index].get("model_used") == "human":
+            return None, 0, ("переигрывать реплику человека нечего: её слова "
+                             "правят, а заново отвечают у ответа модели")
         name = self.posts[index].get("display_name") or ""
         # С того, с кого играть, нужно начать — и он обязан быть на сцене. Место,
         # ушедшее из состава (или переименованное), начало бы переигровку
@@ -3893,8 +3891,7 @@ class DebateSession:
                              f"переигрывать некому")
         return index, count, ""
 
-    def replay_plan_for(self, post_id, scope=None, version=None,
-                        hold: bool = True) -> tuple:
+    def replay_plan_for(self, post_id, scope=None, hold: bool = True) -> tuple:
         """Чем играть сказанное заново: с какого места лента обрывается и сколько.
 
         План — то, чем играют заново (см. run_debate_thread); вместе с планом
@@ -3913,7 +3910,7 @@ class DebateSession:
 
         Возвращает (план, отложенное, беда): беда не пустая — переигрывать нечего.
         """
-        index, count, problem = self.replay_scope(post_id, scope, version)
+        index, count, problem = self.replay_scope(post_id, scope)
         if problem:
             return None, None, problem
         first = self.posts[index]
@@ -4034,9 +4031,9 @@ class DebateSession:
         Нужна заказам, пришедшим на ходу: делает их спектакль позже, между
         ходами, и отказ должен быть слышен сразу, а не после чужого хода
         (см. order_feed). Заодно это единственное место, где сказано, что
-        править и возвращать можно только слова человека, а у модели есть
-        только переигровка: прямые вызовы (edit_post, revert_version) ходят
-        через ту же дверь.
+        править можно только слова человека, а возвращать прежние слова и 
+        переигрывать — любой реплике: прямые вызовы (edit_post,
+        revert_version) ходят через ту же дверь.
         """
         kind = str(kind or "")
         post_id = payload.get("post_id")
@@ -4044,16 +4041,12 @@ class DebateSession:
             _post, problem = self.post_to_edit(post_id, payload.get("content"))
             return problem
         if kind == "version":
-            index = self.index_of(post_id)
-            if index is None:
-                return f"реплики №{post_id} в ленте нет"
-            if self.posts[index].get("model_used") != "human":
-                return ("вернуть прежние слова можно реплике человека: "
-                        "у модели её переигрывают")
+            # Вернуть прежние слова можно любой реплике: у реплики человека так
+            # возвращают её прежние слова, а у ответа модели — выбирают лучший
+            # из её ответов (см. revert_version, switch_words)
             return self.version_pick(post_id, payload.get("version"))[2]
         if kind == "replay":
-            return self.replay_scope(post_id, payload.get("scope"),
-                                     payload.get("version"))[2]
+            return self.replay_scope(post_id, payload.get("scope"))[2]
         return f"неизвестно, что делать с лентой: «{kind}»"
 
     def post_to_edit(self, post_id, content) -> tuple:
@@ -4092,8 +4085,7 @@ class DebateSession:
             note = "↩️ Реплике вернули прежние слова"
             focus = int((post or {}).get("id") or 0)
         elif kind == "replay":
-            plan, focus, problem = self.plan_feed_replay(post_id, order.get("scope"),
-                                                        order.get("version"))
+            plan, focus, problem = self.plan_feed_replay(post_id, order.get("scope"))
             note = "🔁 Сказанное играется заново"
             if not problem:
                 self.replay_next = plan
@@ -4183,43 +4175,24 @@ class DebateSession:
                           if int(one.get("round") or 0) == act), index)
         return int(self.posts[index].get("id") or 0)
 
-    def plan_feed_replay(self, post_id, scope=None, version=None) -> tuple:
+    def plan_feed_replay(self, post_id, scope=None) -> tuple:
         """План переигровки по заказу: (план, главная реплика, беда).
 
-        Без версии это обычная переигровка — реплики, акта или всего спектакля
-        (см. replay_plan_for). С версией переигрывают с прежних слов: слова
-        берутся из летописи реплики, и она сама ложится первой (см.
-        switch_words). У реплики модели заново отвечает она же, а у реплики
-        человека — тот, кто отвечал после: за человека говорит модель, и её
-        ответ и переигрывается. Если после реплики человека никто не отвечал,
-        переигрывать нечего — спектакль просто продолжают.
+        Переигрывают реплику, акт целиком или весь спектакль — по нынешним
+        словам (см. replay_plan_for, replay_scope). Прежние ответы при этом
+        никуда не деваются: они остаются в «прежних» (см. add_post,
+        held_versions), а в ленте встаёт новый ответ — и страница переключается
+        на него (см. page.openTurnWhenArrives).
 
-        Прежние слова ничего не теряют: они остаются в «прежних» (см. add_post,
-        held_versions), а в ленте встаёт новый ответ — и переключается на него
-        страница.
-
-        Ленту здесь не обрывают: заказ может прийти и на чужом ходу, и слова
-        выбранной версии видны в ней сразу — а оборвёт её тот, кто и вправду
-        начнёт переигровку (см. replay_show, replay_plan_for).
+        Ленту здесь не обрывают: заказ может прийти и на чужом ходу, и сказанное
+        должно быть видно в ней до самого конца этого хода — а оборвёт её тот,
+        кто и вправду начнёт переигровку (см. replay_show).
         """
-        problem = self.check_order("replay", post_id=post_id, scope=scope,
-                                  version=version)
+        plan, _held, problem = self.replay_plan_for(post_id, scope, hold=False)
         if problem:
             return None, 0, problem
-        # Показывать надо ту реплику, за которую взялись: у переигровки с версии
-        # это она сама — и у модели, и у человека (см. page.openTurnWhenArrives)
-        focus = (int(post_id or 0) if version is not None
-                 else self.replay_aim(post_id, scope))
-        if version is not None:
-            owner, pick, _problem = self.version_pick(post_id, version)
-            problem = self.switch_words(owner, pick)
-            if problem:
-                return None, 0, problem
-        plan, _held, problem = self.replay_plan_for(post_id, scope, version,
-                                                   hold=False)
-        if problem:
-            return None, 0, problem
-        return plan, focus, ""
+        # Показывать надо ту реплику, за которую взялись (см. page.openTurnWhenArrives)
+        return plan, self.replay_aim(post_id, scope), ""
 
     def edit_post(self, post_id, content) -> tuple:
         """Изменить реплику человека: слова другие, а место — то же.
@@ -4258,8 +4231,10 @@ class DebateSession:
         версиям можно ходить в обе стороны, а в ДАМПе остаются обе записи
         (см. dump_new_version).
 
-        Только для реплики человека: за модель говорят заново — её
-        переигрывают (см. replay_plan_for).
+        У ответа модели это выбор лучшего из её ответов: переигранная реплика
+        помнит прежние, и вернуть можно любую — а переигрывать заново и не надо,
+        ответ уже был сказан (см. replay_plan_for). У реплики человека то же
+        самое возвращает его же слова, сказанные раньше.
 
         Возвращает (реплика, беда): беда не пустая — возвращать нечего.
         """
@@ -4272,7 +4247,8 @@ class DebateSession:
         problem = self.switch_words(picked, pick)
         if problem:
             return None, problem
-        print(f"↩️  Реплика человека №{picked['id']} вернулась к версии "
+        who = "человека" if picked.get("model_used") == "human" else "модели"
+        print(f"↩️  Реплика {who} №{picked['id']} вернулась к версии "
               f"{pick + 1}: {len(picked['content'])} знаков")
         return picked, ""
 

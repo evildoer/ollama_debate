@@ -684,15 +684,14 @@ def replay_said():
     ответить заново по тому, что настроено сейчас, а не по тому, что было
     при первой попытке.
 
-    Тело: {"post_id": 2, "scope": "post", "version": 0}. Версия — переиграть
-    с прежних слов этой реплики, а не с нынешних (см. show.plan_feed_replay).
+    Тело: {"post_id": 2, "scope": "post"}. Переигрывают нынешние слова, и только
+    у ответов модели: свои слова правят, а из прежних ответов модели выбирают
+    лучший (см. show.replay_scope, /api/post/<id>/revert).
     """
     data = request.get_json(silent=True) or {}
     post_id = data.get("post_id")
     scope = str(data.get("scope") or "post")
-    version = data.get("version")
-    problem = show.session.order_feed("replay", post_id=post_id, scope=scope,
-                                      version=version)
+    problem = show.session.order_feed("replay", post_id=post_id, scope=scope)
     if problem:
         return refuse_order(problem)
     plan = show.session.take_replay_next()
@@ -759,8 +758,9 @@ def revert_post(post_id):
     (блок «прежние слова»). Это та же правка, что и /api/post/<id>/edit, только
     слова берутся не из формы, а из летописи: место и номер реплики остаются
     её же, а нынешние слова ложатся в летопись — поэтому по версиям можно
-    ходить и назад, и вперёд. Реплику модели так не вернуть: за неё говорят
-    заново, переигровкой (см. /api/replay).
+    ходить и назад, и вперёд. У **ответа модели** это выбор лучшего из её ответов:
+    переигранная реплика помнит прежние, и любую из них можно вернуть, а заново
+    переспрашивать нечего — ответ уже был сказан (см. /api/replay).
 
     На ходу заказ берёт сам спектакль, между ходами, — занавес для возврата
     версии не нужен (см. show.order_feed).

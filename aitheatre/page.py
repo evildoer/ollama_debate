@@ -3064,7 +3064,6 @@ HTML_TEMPLATE = """
         function postVersionsHtml(post) {
             const versions = post.versions || [];
             if (!versions.length) return '';
-            const mine = post.model_used === 'human';
             const body = versions.map((one, index) => {
                 // Летопись растёт только вперёд: в ней остаются и те слова,
                 // к которым реплика вернулась, — поэтому у прежней версии,
@@ -3077,21 +3076,17 @@ HTML_TEMPLATE = """
                 const words = one.content
                     ? `<div class="version-words">${one.content_html || escapeHtml(one.content)}</div>`
                     : '<div class="version-words version-empty">слов в этой версии не было</div>';
-                // Вернуть прежние слова — только у своей реплики: у модели за неё
-                // говорят заново, переигровкой (см. postActionsHtml)
-                const back = mine ? `<button class="post-action"`
-                    + ` title="Вернуть реплике эти слова: место и номер останутся её же, а нынешние слова лягут в «прежние» — по версиям можно ходить в обе стороны"`
-                    + ` onclick="revertVersion(${post.id}, ${index})">↩ вернуть эти слова</button>` : '';
-                // И переиграть с этой версии: слова не заменяют реплику,
-                // а становятся тем, на что отвечают заново — новый ответ встанет
-                // в ленту, а всё прежнее останется в «прежних» (см. replayVersion)
-                const again = `<button class="post-action"`
-                    + ` title="Заставить ответить заново именно с этих слов: новый ответ встанет в ленту, а прежние слова останутся версиями"`
-                    + ` onclick="replayVersion(${post.id}, ${index})">🔁 переиграть с этих слов</button>`;
+                // Вернуть эти слова можно любой реплике: у своей так возвращают
+                // её же прежние слова, а у ответа модели — выбирают лучший из её
+                // ответов (см. show.revert_version). Переигрывать заново нечего:
+                // слова уже сказаны, а заново отвечают кнопкой «🔁 эту реплику»
+                const back = `<button class="post-action"`
+                    + ` title="Вернуть реплике эти слова: место и номер останутся её же, а нынешние слова лягут в «прежние» — по ним можно ходить в обе стороны. У ответа модели так выбирают лучший из её ответов"`
+                    + ` onclick="revertVersion(${post.id}, ${index})">↩ вернуть эти слова</button>`;
                 // И рядом с прежними словами — чем они отличаются от нынешних
                 const differ = versionDiffHtml(one, post);
                 return `<div class="version-head">Версия ${index + 1} из ${versions.length} · ${head}</div>`
-                    + words + differ + `<div class="version-action">${again}${back}</div>`;
+                    + words + differ + `<div class="version-action">${back}</div>`;
             }).join('');
             return `<details class="post-versions" data-post-id="${post.id}">`
                 + `<summary>🗂 прежние слова · ${versions.length} ${versionsWord(versions.length)}</summary>`
@@ -3166,14 +3161,18 @@ HTML_TEMPLATE = """
         function postActionsHtml(post) {
             const act = Number(post.round || 0);
             const mine = post.model_used === 'human';
-            return `<div class="post-actions">`
-                + `<button class="post-action" title="${REPLAY_HINT}"
-                    onclick="replayPost(${post.id})">🔁 эту реплику</button>`
-                + (act ? `<button class="post-action" title="${REPLAY_HINT} Акт целиком — все его реплики, с начала акта ${act}"
-                    onclick="replayPost(${post.id}, 'round')">🔁 акт ${act}</button>` : '')
-                + (mine ? `<button class="post-action" title="Изменить свою реплику: слова в ленте и в разговоре станут другими, а номер и место останутся теми же. Ответы после неё отвечали на прежние слова — их переигрывают отдельно"
-                    onclick="startEdit(${post.id})">✍️ изменить</button>` : '')
-                + `</div>`;
+            // Переигрывают только ответы модели: у своей реплики вместо этого
+            // «изменить» — свои слова правят, а не переспрашивают (см.
+            // show.post_to_edit). Переиграть её саму значило бы просить модель
+            // ответить на те же слова — то же самое, только через ход спектакля
+            const again = mine ? '' : `<button class="post-action" title="${REPLAY_HINT}"
+                    onclick="replayPost(${post.id})">🔁 эту реплику</button>`;
+            // Акт — не реплика: его переигрывают целиком с любой из них
+            const round = act ? `<button class="post-action" title="${REPLAY_HINT} Акт целиком — все его реплики, с начала акта ${act}"
+                    onclick="replayPost(${post.id}, 'round')">🔁 акт ${act}</button>` : '';
+            const edit = mine ? `<button class="post-action" title="Изменить свою реплику: слова в ленте и в разговоре станут другими, а номер и место останутся теми же. Ответы после неё отвечали на прежние слова — их переигрывают отдельно"
+                    onclick="startEdit(${post.id})">✍️ изменить</button>` : '';
+            return `<div class="post-actions">${again}${round}${edit}</div>`;
         }
 
         // Идущий спектакль переигровке не помеха: он берёт заказ сам, между
@@ -3188,17 +3187,6 @@ HTML_TEMPLATE = """
             const what = scope === 'round' ? 'акт целиком' : 'эту реплику';
             if (!confirm(`Переиграть ${what}? Ответы придут заново — по нынешним теме, правилам и составу; прежние останутся в ДАМПе.` + replayNote())) return;
             sendReplay({post_id: postId, scope: scope || 'post'});
-        }
-
-        // Переиграть с прежних слов — кнопкой в блоке «прежние слова»: слова
-        // берутся из летописи, а ответ приходит новый. Прежние слова от этого
-        // не пропадают — они ложатся в ту же летопись, и реплика сразу
-        // переключается на новый ответ (см. show.plan_feed_replay)
-        function replayVersion(postId, version) {
-            if (!confirm('Переиграть с этих слов? Нынешние слова останутся в «прежних», '
-                + 'а реплика скажет заново — по нынешним теме, правилам и составу.'
-                + replayNote())) return;
-            sendReplay({post_id: postId, scope: 'post', version: version});
         }
 
         function replayWholeShow() {
