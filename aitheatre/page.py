@@ -214,6 +214,14 @@ HTML_TEMPLATE = """
         .btn-secondary { background: #ffffff; color: #000000; }
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        /* Выбор шрифта — списком, а не перебором по кнопке: шрифтов два десятка,
+           и щёлкать по кругу до нужного — не выбор, а наказание. Подпись и сам
+           список стоят в строке, как кнопки рядом (см. footer), а имена в списке
+           те же, что в FONT_CHOICES: подпись берётся из одного места с текстом */
+        .font-pick { font-family: var(--theatre-font); font-size: 14px; letter-spacing: 1px; text-transform: uppercase; }
+        select.font-pick { padding: 11px 12px; border: 1px solid #000000; background: #ffffff; color: #000000;
+                           font-size: 14px; font-family: inherit; letter-spacing: 1px; cursor: pointer;
+                           margin-right: 15px; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
         .sidebar-title { font-family: var(--theatre-head-font); font-size: 14px; font-weight: 700; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
         /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
@@ -823,8 +831,10 @@ HTML_TEMPLATE = """
                 <div class="footer">
                     <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                     <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
-                    <button class="btn btn-secondary" id="fontBtn" onclick="toggleFont()" title="Шрифт текста — перебором по всему списку шрифтов. Название выбранного — на самой кнопке, выбор помнится">✒️ Текст: Georgia</button>
-                    <button class="btn btn-secondary" id="headBtn" onclick="toggleHeads()" title="Шрифт заголовков и значащих строк — тот же список, что и у текста, но жирным. Название выбранного — на самой кнопке, выбор помнится">🔠 Заголовки: Georgia</button>
+                    <label class="font-pick" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
+                    <select class="font-pick" id="fontPick" onchange="pickFont(this.value)" title="Шрифт текста: выберите из списка. Выбор помнится, как тема"></select>
+                    <label class="font-pick" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
+                    <select class="font-pick" id="headPick" onchange="pickHeads(this.value)" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится"></select>
                     <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
             </div>
@@ -2656,30 +2666,43 @@ HTML_TEMPLATE = """
         ];
         const FONT_STATE = {font: 0, heads: 0};
 
+        // Оба списка страницы заполняются из того же FONT_CHOICES: второй перечень
+        // имён, написанный в разметке руками, разошёлся бы с первым на первой правке,
+        // и в выборе стоял бы шрифт, которого в правилах уже нет
+        function fillPicks() {
+            for (const [what, id] of [['font', 'fontPick'], ['heads', 'headPick']]) {
+                const pick = document.getElementById(id);
+                if (!pick) continue;
+                pick.innerHTML = FONT_CHOICES.map((one, at) =>
+                    '<option value="' + at + '">' + escapeHtml(one.name) + '</option>').join('');
+            }
+        }
+
         // Переменная ставится одна — на тело страницы, — а берут её сразу все
         // правила (см. --theatre-font): подменять шрифт в каждом месте было бы
-        // правкой в двадцати, и первая же новая кнопка осталась бы при прежнем
+        // правкой в двадцати, и первый же новый выбор остался бы при прежнем
+        // Список при этом показывает выбранное: иначе он врал бы о том, что видно
         function applyChoice(what) {
             const chosen = FONT_CHOICES[FONT_STATE[what]];
             document.body.style.setProperty(what === 'font' ? '--theatre-font' : '--theatre-head-font',
                                             chosen.stack);
-            const btn = document.getElementById(what === 'font' ? 'fontBtn' : 'headBtn');
-            if (btn) {
-                btn.textContent = (what === 'font' ? '✒️ Текст: ' : '🔠 Заголовки: ') + chosen.name;
-            }
+            const pick = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
+            if (pick) pick.value = String(FONT_STATE[what]);
         }
 
-        function nextChoice(what) {
-            FONT_STATE[what] = (FONT_STATE[what] + 1) % FONT_CHOICES.length;
+        // В памяти страницы лежит ИМЯ выбранного шрифта, а не его номер в списке:
+        // список со временем меняется, и номер в нём значил бы уже другое (см. atChoice)
+        function choose(what, at) {
+            FONT_STATE[what] = at;
             applyChoice(what);
             try {
                 localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',
-                                     FONT_CHOICES[FONT_STATE[what]].name);
+                                     FONT_CHOICES[at].name);
             } catch (e) {}
         }
 
-        function toggleFont() { nextChoice('font'); }
-        function toggleHeads() { nextChoice('heads'); }
+        function pickFont(value) { choose('font', Number(value)); }
+        function pickHeads(value) { choose('heads', Number(value)); }
 
         // Цветные полосы ролей в ленте: оформление, а не смысл, поэтому его можно
         // выключить. Класс стоит на самом теле страницы — оформление постов тогда
@@ -2730,6 +2753,7 @@ HTML_TEMPLATE = """
                 font = localStorage.getItem('theatreFont');
                 heads = localStorage.getItem('theatreHeads');
             } catch (e) {}
+            fillPicks();
             FONT_STATE.font = atChoice(font);
             FONT_STATE.heads = atChoice(heads);
             applyChoice('font');

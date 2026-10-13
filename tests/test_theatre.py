@@ -4336,25 +4336,34 @@ class TestRoleMarks(unittest.TestCase):
     FOREIGN_WORK = ("Izis",)
 
     def test_the_font_chooser_is_wired_and_remembered(self):
-        """Шрифт текста выбирается кнопкой, берётся из файла рядом и помнится.
+        """Шрифт текста выбирается из списка, берётся из файла рядом и помнится.
 
         Шрифт подставляется переменной (см. --theatre-font), а не правкой в каждом
-        правиле: иначе новая кнопка или поле снова остались бы при Georgia.
+        правиле: иначе новый список или поле снова остались бы при Georgia.
         Моноширинные и математические шрифты при этом не трогаются — это не проза.
         В списке — ИМЕНА шрифтов: «стандартный» ничего не говорит тому, кто ищет
         именно Georgia, а имя ещё и лежит в памяти страницы, поэтому выбор
         переживает перезагрузку.
         """
-        self.assertIn('id="fontBtn"', self.page)
-        self.assertIn('onclick="toggleFont()"', self.page)
+        # Выбор — списком, а не перебором по кнопке: два десятка шрифтов по кругу
+        # не выбирают, а листают, и нужный оказывается случайно
+        self.assertIn('id="fontPick"', self.page)
+        self.assertIn('onchange="pickFont(this.value)"', self.page)
+        self.assertNotIn("toggleFont", self.page,
+                         "шрифт снова выбирается перебором по кнопке")
         self.assertIn("const FONT_CHOICES = [", self.page)
         for name in self.FONTS:
             self.assertIn(f"{{name: '{name}', stack:", self.page,
                           f"в списке шрифтов текста нет {name}")
-        # Перебором по всему списку: у кнопки не два состояния, а сколько шрифтов
-        # нашлось (см. nextChoice)
-        self.assertIn("FONT_STATE[what] = (FONT_STATE[what] + 1) % FONT_CHOICES.length;",
-                      self.page)
+        # Оба списка страницы заполняются из того же FONT_CHOICES (см. fillPicks):
+        # перечень имён, написанный в разметке руками, разошёлся бы с правилами,
+        # и в выборе стоял бы шрифт, которого у страницы уже нет
+        self.assertIn("[['font', 'fontPick'], ['heads', 'headPick']]", self.page,
+                      "списки текста и заголовков заполняются не общим перечнем")
+        self.assertIn("pick.innerHTML = FONT_CHOICES.map((one, at) =>", self.page,
+                      "в списке стоят имена не из FONT_CHOICES")
+        self.assertIn("+ escapeHtml(one.name) +", self.page,
+                      "в списке вместо имени шрифта что-то другое")
         # Выбор ставит переменную на тело страницы, а берут её сразу все правила
         # (см. --theatre-font): подменять шрифт в каждом месте было бы правкой
         # в двадцати, и первая же новая кнопка осталась бы при прежнем
@@ -4363,12 +4372,16 @@ class TestRoleMarks(unittest.TestCase):
                       "выбор шрифта ни на что не влияет: переменная не ставится")
         self.assertIn("                                            chosen.stack);", self.page,
                       "переменной подставляется не выбранный шрифт")
-        self.assertIn("if (btn) {\n", self.page)
-        self.assertIn("btn.textContent = (what === 'font' ? '✒️ Текст: ' : '🔠 Заголовки: ') + chosen.name;",
-                      self.page, "на кнопке стоит не имя выбранного шрифта")
+        # Выбранное показывается в самом списке: иначе список врал бы о том,
+        # какой шрифт сейчас у страницы (см. applyChoice)
+        self.assertIn("if (pick) pick.value = String(FONT_STATE[what]);", self.page,
+                      "список шрифтов не показывает выбранное")
+        # Список — это и есть выбор: щелчок по нему обязан дойти до правил и до памяти
+        self.assertIn("function pickFont(value) { choose('font', Number(value)); }", self.page)
+        self.assertIn("function pickHeads(value) { choose('heads', Number(value)); }", self.page)
         self.assertIn("localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',",
                       self.page, "выбор шрифта нечем запомнить")
-        self.assertIn("FONT_CHOICES[FONT_STATE[what]].name);", self.page,
+        self.assertIn("FONT_CHOICES[at].name);", self.page,
                       "запоминается не имя выбранного шрифта")
         self.assertIn("FONT_STATE.font = atChoice(font);", self.page,
                       "страница снова открывается не тем шрифтом, что выбрали")
@@ -4390,8 +4403,10 @@ class TestRoleMarks(unittest.TestCase):
         значение переменной подставляется на том же элементе, где она объявлена,
         поэтому в :root она подставила бы Georgia навсегда.
         """
-        self.assertIn('id="headBtn"', self.page)
-        self.assertIn('onclick="toggleHeads()"', self.page)
+        self.assertIn('id="headPick"', self.page)
+        self.assertIn('onchange="pickHeads(this.value)"', self.page)
+        self.assertNotIn("toggleHeads", self.page,
+                         "заголовки снова выбираются перебором по кнопке")
         # Второго перечня нет: «как текст» из выбора ушло, а имена шрифтов у обеих
         # кнопок одни и те же (см. FONT_CHOICES)
         self.assertNotIn("HEAD_CHOICES", self.page,

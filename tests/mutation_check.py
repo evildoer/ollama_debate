@@ -689,15 +689,15 @@ BUGS = {
     ],
     "запоминается снова не имя выбранного шрифта": [
         ("aitheatre/page.py",
-         "                                     FONT_CHOICES[FONT_STATE[what]].name);",
+         "                                     FONT_CHOICES[at].name);",
          "                                     FONT_CHOICES[FONT_STATE[what]].stack);"),
     ],
-    "на кнопке снова не имя выбранного шрифта": [
+    "в списке шрифтов снова не видно выбранного": [
         ("aitheatre/page.py",
-         "                btn.textContent = (what === 'font' ? '✒️ Текст: ' : '🔠 Заголовки: ') + chosen.name;",
-         "                btn.textContent = '✒️ Текст: выбранный'; "),
+         "            if (pick) pick.value = String(FONT_STATE[what]);",
+         "            if (false) pick.value = String(FONT_STATE[what]);"),
     ],
-    "кнопка шрифта снова ни на что не влияет": [
+    "выбор шрифта снова ни на что не влияет": [
         ("aitheatre/page.py",
          "                                            chosen.stack);",
          "                                            'Georgia, serif');"),
@@ -743,6 +743,16 @@ BUGS = {
         ("aitheatre/page.py",
          "            {name: 'Onest', stack: \"'Onest', Georgia, 'Times New Roman', Times, serif\"},",
          "            {name: 'Онест', stack: \"'Onest', Georgia, 'Times New Roman', Times, serif\"},"),
+    ],
+    "щелчок в списке шрифтов снова ничего не выбирает": [
+        ("aitheatre/page.py",
+         "        function pickFont(value) { choose('font', Number(value)); }",
+         "        function pickFont(value) { }"),
+    ],
+    "список шрифтов снова заполняется не именами": [
+        ("aitheatre/page.py",
+         "                    '<option value=\"' + at + '\">' + escapeHtml(one.name) + '</option>').join('');",
+         "                    '<option value="' + at + '">шрифт</option>').join('');"),
     ],
     "выбор заголовков снова не возвращается": [
         ("aitheatre/page.py",
