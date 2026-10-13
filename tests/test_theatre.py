@@ -4381,20 +4381,21 @@ class TestRoleMarks(unittest.TestCase):
                       self.page, "строки списка снова набраны системным шрифтом")
         self.assertIn('<span class="font-pick-sample">Когда ты зайдёшь</span>', self.page,
                       "рядом с именем шрифта нет образца строки")
-        # Выбор стоит внизу САЙДБАРА, а не в подвале страницы: сайдбар приклеен
-        # к верху и виден всегда, поэтому смену шрифта видно там же, где выбор, —
-        # из подвала страницы на текст не посмотришь, туда уходят и смотрят
-        # на пустоту (см. .font-pick-block)
-        self.assertLess(self.page.index('<div class="sidebar">'),
+        # Выбор стоит внизу ЛЕВОЙ КОЛОНКИ, а не в подвале страницы: колонка
+        # приклеена к верху и видна всегда, поэтому смену шрифта видно там же,
+        # где выбор, — а из подвала страницы на текст не посмотришь, туда уходят
+        # и смотрят на пустоту (см. .rail и .control-block)
+        self.assertIn('<div class="rail">', self.page, "левая колонка пропала")
+        self.assertLess(self.page.index('<div class="rail">'),
                         self.page.index('id="fontPick"'),
-                        "выбор шрифта снова уехал в подвал страницы")
+                        "выбор шрифта снова уехал из левой колонки")
         self.assertLess(self.page.index('id="fontPick"'),
-                        self.page.index('id="avatarModal"'),
-                        "выбор шрифта стоит не в сайдбаре")
-        self.assertIn('<div class="sidebar-section font-pick-block">', self.page,
-                      "блок шрифтов перестал быть разделом сайдбара")
-        self.assertIn(".font-pick-block { position: sticky; bottom: 0;", self.page,
-                      "блок шрифтов уезжает под список участников вместе с прокруткой")
+                        self.page.index('<div class="main-content">'),
+                        "выбор шрифта стоит не в колонке перед лентой")
+        self.assertIn('<div class="sidebar-section control-block">', self.page,
+                      "управление перестало быть отдельным разделом колонки")
+        self.assertIn(".control-block { position: sticky; bottom: 0;", self.page,
+                      "управление уезжает под статус вместе с прокруткой")
         # Выбор ставит переменную на тело страницы, а берут её сразу все правила
         # (см. --theatre-font): подменять шрифт в каждом месте было бы правкой
         # в двадцати, и первая же новая кнопка осталась бы при прежнем
@@ -4430,31 +4431,48 @@ class TestRoleMarks(unittest.TestCase):
         self.assertNotIn("font-family: Georgia", self.page,
                          "где-то шрифт прописан прямо, а не взят из --theatre-font")
 
-    def test_the_whole_theatre_control_lives_in_the_sidebar(self):
-        """Всё управление театром — в одном месте: внизу сайдбара, а не в подвале.
+    def test_the_status_and_the_controls_live_in_the_left_rail(self):
+        """Состояние театра и управление им — в левой колонке, а не в подвале.
 
-        Подвал страницы для управления не годится: сайдбар приклеен к верху
-        и виден всегда, а в подвал уходят и смотрят на пустоту. Кнопки стоят
-        в том же разделе, что и списки шрифтов (см. .font-pick-block), ниже
-        списков и столбиком: сайдбар узкий, в строку они не влезут.
+        Подвал страницы для этого не годится: в подвал уходят и смотрят
+        на пустоту, а колонка приклеена к верху и видна всегда. В правом
+        сайдбаре остаётся то, что читают во время спектакля (кто играет, о чём
+        договорились), — иначе управление уезжало бы под длинный список
+        участников. Кнопки стоят в своём разделе колонки (см. .control-block),
+        ниже списков шрифтов и столбиком: колонка узкая, в строку они не влезут.
         """
         self.assertNotIn('<div class="footer">', self.page, "подвал страницы вернулся")
         self.assertNotIn(".footer {", self.page, "оформление подвала осталось в стилях")
         self.assertNotIn("body.dark .footer", self.page,
                          "тёмная сцена снова помнит про подвал")
-        self.assertIn('<div class="sidebar-section font-pick-block">', self.page)
-        # Кнопки — внутри раздела сайдбара, а не где-то ниже страницы
-        start = self.page.index('<div class="sidebar-section font-pick-block">')
-        block = self.page[start:self.page.index('id="avatarModal"')]
-        for button in ('id="fontPick"', 'id="headPick"', 'id="rolesBtn"',
-                       'id="themeBtn"', 'id="leaveBtn"'):
-            self.assertIn(button, block, f"{button} снова не в управлении театром")
-        self.assertLess(self.page.index('id="fontPickList"'),
-                        self.page.index('id="themeBtn"'),
+        # Левая колонка: статус, память видеокарты и всё управление театром
+        self.assertIn('<div class="rail">', self.page, "левая колонка пропала совсем")
+        rail = self.page[self.page.index('<div class="rail">'):
+                         self.page.index('<div class="main-content">')]
+        for section in ('>Статус<', 'Память GPU', 'control-block', 'id="fontPick"',
+                        'id="headPick"', 'id="rolesBtn"', 'id="themeBtn"', 'id="leaveBtn"'):
+            self.assertIn(section, rail, f"{section} снова не в левой колонке")
+        self.assertLess(rail.index('id="fontPickList"'), rail.index('id="themeBtn"'),
                         "кнопки управления стоят выше списков шрифтов")
-        self.assertIn(".font-pick-block .btn { display: block; width: 100%;", self.page,
-                      "кнопки управления в сайдбаре снова стоят в строку")
-        # В тёмной сцене список перекрашивается вместе с сайдбаром: иначе белые
+        # …а в правом сайдбаре — только то, что читают
+        sidebar = self.page[self.page.index('<div class="sidebar">'):
+                            self.page.index('</div>\n    </div>')]
+        for gone in ('>Статус<', 'Память GPU', 'control-block', 'id="fontPick"',
+                     'id="leaveBtn"'):
+            self.assertNotIn(gone, sidebar, f"{gone} снова остался в правом сайдбаре")
+        self.assertIn('>Персонажи<', sidebar, "в правом сайдбаре пропали персонажи")
+        # Колонка слева от ленты, приклеена к верху и отбита линией справа
+        self.assertIn("<div class=\"rail\">", self.page)
+        self.assertLess(self.page.index('<div class="rail">'),
+                        self.page.index('<div class="sidebar">'),
+                        "колонка стоит справа от ленты, а не слева")
+        self.assertIn(".rail { width: 320px; background: #ffffff; border-right: 1px solid #000000;",
+                      self.page, "левая колонка не приклеена к верху или потеряла линию")
+        self.assertIn("body.dark .rail, body.dark .sidebar, body.dark .participant-card {",
+                      self.page, "тёмная сцена не перекрашивает левую колонку")
+        self.assertIn(".control-block .btn { display: block; width: 100%;", self.page,
+                      "кнопки управления в колонке снова стоят в строку")
+        # В тёмной сцене список перекрашивается вместе с колонкой: иначе белые
         # строки и белый фон висели бы над тёмной страницей. Смотрим не на одни
         # селекторы, а на сам фон: селекторы могут остаться на месте, а цвет — нет
         self.assertIn("body.dark .font-pick-btn, body.dark .font-pick-list, body.dark .font-pick-row {",

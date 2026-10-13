@@ -791,15 +791,20 @@ BUGS = {
          "                    escapeHtml(one.name) +",
          "                    'шрифт' +"),
     ],
-    "блок шрифтов снова перестал быть разделом сайдбара": [
+    "управление снова перестало быть отдельным разделом колонки": [
         ("aitheatre/page.py",
-         '            <div class="sidebar-section font-pick-block">',
+         '            <div class="sidebar-section control-block">',
          '            <div class="sidebar-section">'),
     ],
-    "блок шрифтов снова уезжает под прокрутку сайдбара": [
+    "управление снова уезжает под прокрутку колонки": [
         ("aitheatre/page.py",
-         "        .font-pick-block { position: sticky; bottom: 0; background: inherit;",
-         "        .font-pick-block { position: static; bottom: 0; background: inherit;"),
+         "        .control-block { position: sticky; bottom: 0; background: inherit;",
+         "        .control-block { position: static; bottom: 0; background: inherit;"),
+    ],
+    "состояние театра и управление снова уехали в правый сайдбар": [
+        ("aitheatre/page.py",
+         '        <div class="rail">',
+         '        <div class="sidebar">'),
     ],
     "выбор заголовков снова не возвращается": [
         ("aitheatre/page.py",

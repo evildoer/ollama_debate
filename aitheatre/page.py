@@ -189,6 +189,15 @@ HTML_TEMPLATE = """
         body { --theatre-head-font: var(--theatre-font); }
         body { font-family: var(--theatre-font); background: #ffffff; min-height: 100vh; color: #000000; line-height: 1.6; font-size: 16px; }
         .layout { display: flex; min-height: 100vh; }
+        /* Колонок две, и разведены они по смыслу, а не по красоте: слева —
+           состояние театра и управление им (идёт ли спектакль, сколько занято
+           памяти, шрифт, тема, выход), справа — то, что читают во время
+           спектакля (кто играет, о чём договорились). В одном сайдбаре они
+           мешали друг другу: управление уезжало под длинный список участников.
+           Место слева при этом пустовало: лента идёт полосой по центру
+           (см. .container), и по краям оставались поля. Колонка приклеена
+           к верху и видна всегда — поэтому «идёт ли» видно с любой прокрутки */
+        .rail { width: 320px; background: #ffffff; border-right: 1px solid #000000; padding: 40px 30px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
         .main-content { flex: 1; padding: 40px 60px; }
         .sidebar { width: 320px; background: #ffffff; border-left: 1px solid #000000; padding: 40px 30px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
         .container { width: 55%; margin: 0 auto; }
@@ -223,18 +232,18 @@ HTML_TEMPLATE = """
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
         /* Всё управление театром — шрифт текста, шрифт заголовков, цвет ролей,
-           тёмная сцена и выход — стоит внизу САЙДБАРА, а не в подвале страницы,
-           и это не про красоту: сайдбар приклеен к верху и виден всегда, поэтому
-           смену шрифта видно там же, где выбор, — а из подвала страницы на текст
+           тёмная сцена и выход — стоит внизу ЛЕВОЙ КОЛОНКИ, а не в подвале
+           страницы: колонка приклеена к верху и видна всегда, поэтому смену
+           шрифта видно там же, где выбор, — а из подвала страницы на текст
            не посмотришь, туда уходят и смотрят на пустоту. Блок прилипает к низу
-           сайдбара (position: sticky): список участников и правила бывают
-           длинными, и управление иначе уезжало бы под них вместе с прокруткой */
-        .font-pick-block { position: sticky; bottom: 0; background: inherit;
+           колонки (position: sticky): статус и память видеокарты бывают длинными,
+           и управление иначе уезжало бы под них вместе с прокруткой */
+        .control-block { position: sticky; bottom: 0; background: inherit;
                            border-top: 1px solid #000000; border-bottom: none;
                            margin-bottom: 0; padding-bottom: 24px; }
-        /* Кнопки и подписи в сайдбаре стоят столбиком: он узкий, и в строку
-           они не влезут */
-        .font-pick-block .btn { display: block; width: 100%; margin: 0 0 10px 0;
+        /* Кнопки и подписи в колонке стоят столбиком: колонка узкая,
+           и в строку они не влезут */
+        .control-block .btn { display: block; width: 100%; margin: 0 0 10px 0;
                                 padding: 11px 12px; font-size: 14px; text-align: center; }
         .font-pick-label { display: block; font-family: var(--theatre-font); font-size: 13px;
                            letter-spacing: 2px; text-transform: uppercase; color: #000000;
@@ -607,7 +616,7 @@ HTML_TEMPLATE = """
            в светлой теме, где всё белое и разделяют только линии. Стоит задать им другой
            фон — и блоки выглядят «отрезанными» по бокам, а текст упирается в край плашки */
         body.dark .header, body.dark .card, body.dark .post,
-        body.dark .sidebar, body.dark .participant-card { background: #0d0d0d; border-color: #3a3a3a; }
+        body.dark .rail, body.dark .sidebar, body.dark .participant-card { background: #0d0d0d; border-color: #3a3a3a; }
         /* Плашки с внутренними отступами подсветить можно: текст в них не упирается в край */
         body.dark .status-bar { background: #171717; border-left-color: #e8e8e8; }
         body.dark .modal-content { border-color: #3a3a3a; }
@@ -621,7 +630,7 @@ HTML_TEMPLATE = """
         body.dark .font-pick-row:hover, body.dark .font-pick-row.current { background: #262626; }
         body.dark .font-pick-sample { color: #7d7d7d; }
         body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
-        body.dark .sidebar, body.dark .sidebar-section,
+        body.dark .rail, body.dark .sidebar, body.dark .sidebar-section,
         body.dark .search-info, body.dark .post-header, body.dark .participant-card,
         body.dark .post-avatar img { border-color: #3a3a3a; }
         body.dark input, body.dark textarea, body.dark select { background: #1c1c1c !important; color: #e8e8e8 !important; border-color: #5a5a5a !important; }
@@ -696,6 +705,42 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="layout">
+        <!-- Левая колонка: состояние театра и управление им (см. .rail) — то,
+             к чему тянутся руками и поглядывают украдкой. Справа живёт то,
+             что читают: кто играет и о чём договорились -->
+        <div class="rail">
+            <div class="sidebar-section">
+                <div class="sidebar-title">Статус</div>
+                <div id="statusBar" class="status-bar" style="display:none;"></div>
+                <div id="statusPlaceholder" style="color:#666;font-size:13px;">Ожидание начала...</div>
+            </div>
+            <!-- Память видеокарты стоит рядом со статусом: оба отвечают на один
+                 вопрос — «можно ли играть дальше» -->
+            <div class="sidebar-section">
+                <div class="sidebar-title">Память GPU</div>
+                <div id="vramDisplay" style="color:#000000;font-size:13px;line-height:1.6;">—</div>
+            </div>
+            <!-- Управление театром — здесь, внизу колонки, а не в подвале
+                 страницы: колонка видна всегда, и смена шрифта видна там же, где
+                 выбор (см. .control-block). Списки шрифтов заполняются
+                 из FONT_CHOICES, а строки в них нарисованы своими шрифтами -->
+            <div class="sidebar-section control-block">
+                <div class="sidebar-title">Управление</div>
+                <label class="font-pick-label" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
+                <div class="font-pick-wrap">
+                    <button type="button" class="font-pick-btn" id="fontPick" onclick="togglePick('font')" aria-haspopup="true" aria-expanded="false" aria-label="Строки списка набраны своими шрифтами" title="Шрифт текста: разверните список — каждая строка набрана своим шрифтом. Выбор помнится, как тема">Georgia</button>
+                    <div class="font-pick-list" id="fontPickList" aria-label="Шрифт текста" hidden></div>
+                </div>
+                <label class="font-pick-label" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
+                <div class="font-pick-wrap">
+                    <button type="button" class="font-pick-btn" id="headPick" onclick="togglePick('heads')" aria-haspopup="true" aria-expanded="false" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится">Georgia</button>
+                    <div class="font-pick-list" id="headPickList" aria-label="Шрифт заголовков" hidden></div>
+                </div>
+                <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
+                <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
+                <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button>
+            </div>
+        </div>
         <div class="main-content">
             <div class="container">
                 <div class="header">
@@ -871,15 +916,9 @@ HTML_TEMPLATE = """
             </div>
         </div>
         <div class="sidebar">
-            <div class="sidebar-section">
-                <div class="sidebar-title">Статус</div>
-                <div id="statusBar" class="status-bar" style="display:none;"></div>
-                <div id="statusPlaceholder" style="color:#666;font-size:13px;">Ожидание начала...</div>
-            </div>
-            <div class="sidebar-section">
-                <div class="sidebar-title">Память GPU</div>
-                <div id="vramDisplay" style="color:#000000;font-size:13px;line-height:1.6;">—</div>
-            </div>
+            <!-- В правом сайдбаре — то, что ЧИТАЮТ во время спектакля: кто играет
+                 и о чём договорились. Состояние театра и управление им — в левой
+                 колонке (см. .rail) -->
             <div class="sidebar-section">
                 <div class="sidebar-title">Персонажи</div>
                 <div id="participantsDisplay" style="color:#000000;font-size:13px;line-height:1.6;"></div>
@@ -892,26 +931,7 @@ HTML_TEMPLATE = """
                 <div class="sidebar-title">Инструкции от руководства</div>
                 <div id="moderatorInstructionsDisplay" style="color:#000000;font-size:12px;line-height:1.5;font-weight:bold;"></div>
             </div>
-            <!-- Всё управление театром — здесь, внизу сайдбара, а не в подвале
-                 страницы: сайдбар виден всегда, и смена шрифта видна там же, где
-                 выбор (см. .font-pick-block). Списки шрифтов заполняются
-                 из FONT_CHOICES, а строки в них нарисованы своими шрифтами -->
-            <div class="sidebar-section font-pick-block">
-                <div class="sidebar-title">Управление</div>
-                <label class="font-pick-label" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
-                <div class="font-pick-wrap">
-                    <button type="button" class="font-pick-btn" id="fontPick" onclick="togglePick('font')" aria-haspopup="true" aria-expanded="false" aria-label="Строки списка набраны своими шрифтами" title="Шрифт текста: разверните список — каждая строка набрана своим шрифтом. Выбор помнится, как тема">Georgia</button>
-                    <div class="font-pick-list" id="fontPickList" aria-label="Шрифт текста" hidden></div>
-                </div>
-                <label class="font-pick-label" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
-                <div class="font-pick-wrap">
-                    <button type="button" class="font-pick-btn" id="headPick" onclick="togglePick('heads')" aria-haspopup="true" aria-expanded="false" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится">Georgia</button>
-                    <div class="font-pick-list" id="headPickList" aria-label="Шрифт заголовков" hidden></div>
-                </div>
-                <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
-                <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
-                <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button>
-            </div>
+
         </div>
     </div>
     <!-- Запись пульта на диск объявляет о себе здесь: режиссёр нажимает
