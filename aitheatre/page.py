@@ -18,25 +18,40 @@ HTML_TEMPLATE = """
     <title>AI Театр</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <style>
-        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и
-           Courier New. Раньше здесь стоял @import с чужим сервером шрифтов —
-           никто его не использовал, но браузер всё равно ждал ответа, прежде
-           чем нарисовать пульт: без интернета или за прокси он просто висел */
+        /* Шрифты — только свои. Текст рисуется системными Georgia и Courier New,
+           а на выбор есть ещё Izis: декоративный шрифт, который лежит рядом
+           с проектом (static/fonts/izis.ttf) и подключается своим @font-face.
+           Чужих серверов тут по-прежнему нет: раньше тут стоял @import с чужим
+           сервером шрифтов — никто этим шрифтом не пользовался, но браузер всё
+           равно ждал ответа, прежде чем нарисовать пульт, и без интернета
+           (или за прокси) висел. Свой файл ждать неоткуда: если его нет,
+           страница просто остаётся при Georgia — она стоит в цепочке следующей */
+        @font-face {
+            font-family: 'Izis';
+            src: url('/static/fonts/izis.ttf') format('truetype');
+            font-display: swap;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: Georgia, 'Times New Roman', Times, serif; background: #ffffff; min-height: 100vh; color: #000000; line-height: 1.6; font-size: 16px; }
+        /* Какой шрифт у текста страницы — в одном месте: выбор ставит класс
+           на body (см. applyFont), а берут отсюда и стили, и разметка, которую
+           рисует сам скрипт. Моноширинные (адреса, коды) и математические
+           (Cambria Math) — свои и не подменяются: это не проза, а знаки */
+        :root { --theatre-font: Georgia, 'Times New Roman', Times, serif; }
+        body.font-izis { --theatre-font: 'Izis', Georgia, 'Times New Roman', Times, serif; }
+        body { font-family: var(--theatre-font); background: #ffffff; min-height: 100vh; color: #000000; line-height: 1.6; font-size: 16px; }
         .layout { display: flex; min-height: 100vh; }
         .main-content { flex: 1; padding: 40px 60px; }
         .sidebar { width: 320px; background: #ffffff; border-left: 1px solid #000000; padding: 40px 30px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
         .container { width: 55%; margin: 0 auto; }
         .header { background: #ffffff; border-bottom: 1px solid #000000; padding: 40px 0 30px 0; margin-bottom: 40px; text-align: center; }
         .header-date { font-size: 14px; letter-spacing: 1px; margin-bottom: 20px; text-transform: uppercase; }
-        .header h1 { font-family: Georgia, serif; font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
+        .header h1 { font-family: var(--theatre-font); font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
         .header-subtitle { font-size: 16px; font-style: italic; font-weight: normal; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
         /* Тема — обычный текст по левому краю: её часто пишут пунктами,
            а по центру многострочный список нечитаем */
         .header-topic { font-size: 19px; font-weight: normal; color: #000000; margin-top: 20px; padding: 24px 28px; border: 2px solid #000000; text-align: left; line-height: 1.7; min-height: 60px; white-space: pre-wrap; word-wrap: break-word; }
         .card { background: #ffffff; border: none; border-top: 1px solid #000000; border-bottom: 1px solid #000000; padding: 30px 0; margin-bottom: 40px; }
-        .card h2 { font-family: Georgia, serif; font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
+        .card h2 { font-family: var(--theatre-font); font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
         .participants-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px; margin-bottom: 30px; }
         .participant-card { border: none; border-top: 1px solid #000000; padding: 25px 0; background: #ffffff; }
         .avatar-container { display: flex; justify-content: center; margin-bottom: 20px; }
@@ -44,18 +59,18 @@ HTML_TEMPLATE = """
         .avatar-preview:hover { border: 2px solid #000000; }
         .avatar-preview img { width: 100%; height: 100%; object-fit: cover; filter: grayscale(100%); }
         .input-group { margin-bottom: 20px; }
-        .input-group label { display: block; font-family: Georgia, serif; font-weight: normal; margin-bottom: 8px; color: #000000; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }
-        .input-group input, .input-group textarea { width: 100%; padding: 10px; border: 1px solid #000000; font-size: 18px; background: #ffffff; color: #000000; font-family: Georgia, serif; }
+        .input-group label { display: block; font-family: var(--theatre-font); font-weight: normal; margin-bottom: 8px; color: #000000; font-size: 16px; text-transform: uppercase; letter-spacing: 1px; }
+        .input-group input, .input-group textarea { width: 100%; padding: 10px; border: 1px solid #000000; font-size: 18px; background: #ffffff; color: #000000; font-family: var(--theatre-font); }
         .input-group input:focus, .input-group textarea:focus { outline: none; border: 2px solid #000000; }
-        .input-group textarea { resize: vertical; min-height: 80px; font-family: Georgia, serif; line-height: 1.6; }
-        .btn { padding: 12px 30px; border: 1px solid #000000; font-family: Georgia, serif; font-size: 16px; font-weight: normal; cursor: pointer; margin-right: 15px; letter-spacing: 1px; text-transform: uppercase; }
+        .input-group textarea { resize: vertical; min-height: 80px; font-family: var(--theatre-font); line-height: 1.6; }
+        .btn { padding: 12px 30px; border: 1px solid #000000; font-family: var(--theatre-font); font-size: 16px; font-weight: normal; cursor: pointer; margin-right: 15px; letter-spacing: 1px; text-transform: uppercase; }
         .btn-primary { background: #000000; color: #ffffff; }
         .btn-primary:hover { background: #333333; }
         .btn-secondary { background: #ffffff; color: #000000; }
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
-        .sidebar-title { font-family: Georgia, serif; font-size: 14px; font-weight: normal; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
+        .sidebar-title { font-family: var(--theatre-font); font-size: 14px; font-weight: normal; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
         /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
         .panel-section { border-top: 1px solid #000000; padding-top: 24px; margin-top: 28px; }
         .panel-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
@@ -63,7 +78,7 @@ HTML_TEMPLATE = """
         .panel-heading .name { font-size: 14px; text-transform: uppercase; letter-spacing: 2px; }
         .panel-note { font-size: 12px; color: #666666; line-height: 1.55; margin-bottom: 14px; }
         /* Поле сюжета: раньше было неотличимо от подписи — теперь заметное и на вырост */
-        .topic-input { display: block; width: 100%; min-height: 170px; box-sizing: border-box; padding: 16px 18px; border: 1px solid #000000; font-family: Georgia, serif; font-size: 17px; line-height: 1.7; color: #000000; resize: vertical; }
+        .topic-input { display: block; width: 100%; min-height: 170px; box-sizing: border-box; padding: 16px 18px; border: 1px solid #000000; font-family: var(--theatre-font); font-size: 17px; line-height: 1.7; color: #000000; resize: vertical; }
         .topic-input:focus { outline: none; border: 2px solid #000000; }
         /* Разделы пульта сворачиваются: на ходу целый состав занимает экран зря */
         .panel-heading { cursor: pointer; user-select: none; }
@@ -137,8 +152,8 @@ HTML_TEMPLATE = """
         body.dark .chip-drop { background: #141414; border-color: #3a3a3a; color: #e8e8e8; }
         .post-content { flex: 1; min-width: 0; }
         .post-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #000000; }
-        .post-author { font-family: Georgia, serif; font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
-        .post-model { font-size: 14px; color: #000000; font-family: Georgia, serif; margin-top: 5px; font-style: italic; }
+        .post-author { font-family: var(--theatre-font); font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
+        .post-model { font-size: 14px; color: #000000; font-family: var(--theatre-font); margin-top: 5px; font-style: italic; }
         .post-time { font-size: 14px; color: #000000; font-style: italic; }
         .post-text { font-size: 18px; line-height: 1.8; color: #000000; word-wrap: break-word; overflow-wrap: break-word; text-align: justify; }
         .post-text p { margin-bottom: 15px; }
@@ -176,7 +191,7 @@ HTML_TEMPLATE = """
                         padding-top: 10px; border-top: 1px dashed #cccccc; }
         body.dark .post-actions { border-top-color: #3a3a3a; }
         .post-action { background: #ffffff; border: 1px solid #000000; color: #555555; cursor: pointer;
-                       font-family: Georgia, serif; font-size: 12px; padding: 3px 10px; letter-spacing: 1px; }
+                       font-family: var(--theatre-font); font-size: 12px; padding: 3px 10px; letter-spacing: 1px; }
         .post-action:hover { background: #000000; color: #ffffff; }
         body.dark .post-action { background: #1c1c1c; border-color: #6f6f6f; color: #bbbbbb; }
         body.dark .post-action:hover { background: #e8e8e8; color: #111111; }
@@ -184,7 +199,7 @@ HTML_TEMPLATE = """
            часть сцены, и править их в стороне от неё было бы странно */
         .edit-box { margin-top: 12px; }
         .edit-box textarea { width: 100%; box-sizing: border-box; min-height: 90px; padding: 8px 10px;
-                                border: 2px solid #000000; font-family: Georgia, serif; font-size: 15px; line-height: 1.6; }
+                                border: 2px solid #000000; font-family: var(--theatre-font); font-size: 15px; line-height: 1.6; }
         body.dark .edit-box textarea { background: #1c1c1c; color: #e8e8e8; border-color: #6f6f6f; }
         .edit-actions { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
         .edit-actions .post-action { font-size: 13px; padding: 6px 14px; }
@@ -611,7 +626,7 @@ HTML_TEMPLATE = """
                         <div id="turnNote" class="turn-note">Спектакль ещё не начат — поле появится, когда очередь дойдёт до вас.</div>
                         <div id="turnComposer" style="display:none;">
                             <div class="panel-note">Пустое сообщение = пропуск действия. Ctrl+Enter — отправить.</div>
-                            <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:Georgia,serif; margin-bottom:15px;" placeholder="Напишите реплику, приложите картинку — или оставьте пустым, чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
+                            <textarea id="moderatorInput" rows="4" style="width:100%; padding:12px; border:2px solid #000000; font-size:16px; font-family:var(--theatre-font); margin-bottom:15px;" placeholder="Напишите реплику, приложите картинку — или оставьте пустым, чтобы пропустить действие..." onkeydown="if (event.ctrlKey &amp;&amp; event.key === 'Enter') { event.preventDefault(); sendModeratorMessage(); }"></textarea>
                             <div id="attachRow" style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
                                 <button class="btn btn-secondary" onclick="pickFiles()" title="Приложить картинку к этой реплике. Она уедет только тем моделям, которые читают картинки: у таких рядом с именем стоит «+»">🖼 Приложить картинку</button>
                                 <input type="file" id="fileInput" accept="image/*" multiple style="display:none;" onchange="attachFiles(this.files)">
@@ -651,7 +666,7 @@ HTML_TEMPLATE = """
                         <div style="margin-top:20px;padding-top:16px;border-top:1px solid #cccccc;">
                             <div class="panel-note">💾 <strong>Архив спектаклей</strong>: сохранение — это весь спектакль целиком (состав, правила и инструкции, вся история и приложенные картинки), и живёт оно вне порта, в одной папке на всю машину. Один и тот же сейв можно вернуть и здесь, и в театре на другом порту, а сохранений у спектакля бывает сколько угодно — хоть ветка на каждый вечер. Сохранение ничего не завершает: это копия, и берётся она в безопасный момент — на вашем ходу или под занавесом. Состояние спектакля тоже запоминается: сохранённый под занавесом вернётся под занавесом, а сохранённый на вашем ходу — тем же ходом, которому не хватает одной реплики («Доиграть прежний»).</div>
                             <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
-                                <input type="text" id="saveName" placeholder="Имя сохранения — например «до правки состава»" style="flex:1;min-width:240px;padding:8px 10px;border:2px solid #000000;font-size:14px;font-family:Georgia,serif;">
+                                <input type="text" id="saveName" placeholder="Имя сохранения — например «до правки состава»" style="flex:1;min-width:240px;padding:8px 10px;border:2px solid #000000;font-size:14px;font-family:var(--theatre-font);">
                                 <button class="btn btn-secondary" id="saveBtn" onclick="saveThisShow()" style="margin:0;">💾 Сохранить этот спектакль</button>
                                 <span id="saveHint" style="font-size:12px;color:#666;"></span>
                             </div>
@@ -663,6 +678,7 @@ HTML_TEMPLATE = """
                 <div class="footer">
                     <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                     <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
+                    <button class="btn btn-secondary" id="fontBtn" onclick="toggleFont()" title="Шрифт страницы: стандартный (системный Georgia) или Izis — выбор помнится">✒️ Шрифт: стандартный</button>
                     <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
             </div>
@@ -1307,13 +1323,13 @@ HTML_TEMPLATE = """
                 // Рамка карточки показывает роль — тот же цвет, что у полосы судьи в ленте
                 const borderColor = role === 'judge' ? '#7b1fa2' : '#000000';
                 // Селекты роли и модели не тянутся на всю ширину, в отличие от полей
-                const tightStyle = 'padding:6px;border:1px solid #000;font-family:Georgia,serif;font-size:13px;';
+                const tightStyle = 'padding:6px;border:1px solid #000;font-family:var(--theatre-font);font-size:13px;';
 
                 const avatar = p.avatar_url
                     ? '<img src="' + escapeHtml(p.avatar_url) + '">'
                     : (p.avatar_emoji || '📣');
                 const fieldLabel = text => '<label style="font-size:11px;text-transform:uppercase;letter-spacing:1px;">' + text + '</label>';
-                const fieldStyle = 'width:100%;padding:7px;border:1px solid #000;font-family:Georgia,serif;font-size:14px;';
+                const fieldStyle = 'width:100%;padding:7px;border:1px solid #000;font-family:var(--theatre-font);font-size:14px;';
 
                 // Модель есть у любого места, даже у живого участника: посадить
                 // за стол человека («human») или вернуть ему модель — решение
@@ -1457,7 +1473,7 @@ HTML_TEMPLATE = """
                 +     '<div style="flex:1;min-width:0;">'
                 +       '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;">'
                 +         '<div>' + fieldLabel('Имя')
-                +           '<input type="text" id="name-' + idx + '" value="' + escapeHtml(p.display_name || '') + '" placeholder="Введите имя" style="width:100%;padding:8px;border:1px solid #000;font-family:Georgia,serif;font-size:16px;">'
+                +           '<input type="text" id="name-' + idx + '" value="' + escapeHtml(p.display_name || '') + '" placeholder="Введите имя" style="width:100%;padding:8px;border:1px solid #000;font-family:var(--theatre-font);font-size:16px;">'
                 +         '</div>'
                 +         '<div>' + fieldLabel('Пол (влияет только на аватар)')
                 +           '<select id="gender-' + idx + '" style="' + fieldStyle + '">'
@@ -2460,6 +2476,24 @@ HTML_TEMPLATE = """
             try { localStorage.setItem('theatreTheme', dark ? 'dark' : 'light'); } catch (e) {}
         }
 
+        // Шрифт текста: стандартный (системный Georgia) или Izis — декоративный
+        // шрифт из файла рядом с проектом (см. --theatre-font, @font-face). Класс
+        // ставится один — на тело страницы, — а берут его сразу все правила,
+        // и стили, и разметка, которую рисует скрипт: подменять шрифт в каждом
+        // месте было бы правкой в двадцати, и первая же новая кнопка осталась бы
+        // при прежнем. Выбор помнится — как тема и цвет ролей
+        function applyFont(izis) {
+            document.body.classList.toggle('font-izis', !!izis);
+            const btn = document.getElementById('fontBtn');
+            if (btn) btn.textContent = izis ? '✒️ Шрифт: Izis' : '✒️ Шрифт: стандартный';
+        }
+
+        function toggleFont() {
+            const izis = !document.body.classList.contains('font-izis');
+            applyFont(izis);
+            try { localStorage.setItem('theatreFont', izis ? 'izis' : 'standard'); } catch (e) {}
+        }
+
         // Цветные полосы ролей в ленте: оформление, а не смысл, поэтому его можно
         // выключить. Класс стоит на самом теле страницы — оформление постов тогда
         // возвращается к прежнему виду, без правок разметки. Выбор запоминается
@@ -2487,6 +2521,14 @@ HTML_TEMPLATE = """
             try { saved = localStorage.getItem('theatreTheme'); } catch (e) {}
             const systemDark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
             applyTheme(saved === null ? systemDark : saved === 'dark');
+        })();
+
+        // А шрифт по умолчанию — стандартный: Izis ставят руками, и зрячей
+        // странице без выбора он был бы навязан (см. applyFont)
+        (function initFont() {
+            let saved = null;
+            try { saved = localStorage.getItem('theatreFont'); } catch (e) {}
+            applyFont(saved === 'izis');
         })();
         
         // Лицо реплики — одна разметка на всех: её рисуют и готовая реплика,
@@ -4418,7 +4460,7 @@ HTML_TEMPLATE = """
             // Приглушённый вид ставится сразу в разметке, а не после вставки:
             // правило, пришедшее с паузой из файла, иначе выглядело бы рабочим
             return `<div class="rule-row${off ? ' rule-off' : ''}" data-off="${off ? 1 : 0}" style="display:flex;gap:10px;margin-bottom:10px;align-items:flex-start;">`
-                + `<textarea id="${RULE_FIELDS[kind]}-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="${RULE_PLACEHOLDERS[kind]}">${escapeHtml(ruleText(text))}</textarea>`
+                + `<textarea id="${RULE_FIELDS[kind]}-${idx}" rows="2" style="flex:1;padding:8px;border:1px solid #000;font-size:14px;font-family:var(--theatre-font);" placeholder="${RULE_PLACEHOLDERS[kind]}">${escapeHtml(ruleText(text))}</textarea>`
                 + `<button class="btn btn-secondary rule-toggle" onclick="toggleRuleRow('${kind}', '${idx}')" style="padding:8px 12px;margin:0;" title="${ruleToggleTitle(off)}">${ruleToggleLabel(off)}</button>`
                 + `<button class="btn btn-secondary" onclick="removeRuleRow('${kind}', '${idx}')" style="padding:8px 12px;margin:0;" title="Удалить совсем">❌</button>`
                 + `</div>`;
@@ -4548,7 +4590,7 @@ HTML_TEMPLATE = """
                 <div class="instr-card${p.is_judge ? ' judge' : ''}" data-participant="${escapeHtml(p.name)}" style="border:2px solid ${borderColor};">
                     <label style="display:block;font-weight:bold;margin-bottom:5px;font-size:13px;">${roleBadge} ${escapeHtml(p.name)}:</label>
                     ${p.is_judge ? '<div class="instr-hint">Системный промпт судьи (можно редактировать):</div>' : ''}
-                    <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:Georgia,serif;" placeholder="Дополнительная инструкция для ${escapeHtml(p.name)}...">${escapeHtml(value)}</textarea>
+                    <textarea id="participant-instr-edit-${idx}" rows="${rows}" style="width:100%;padding:8px;border:1px solid #000;font-size:14px;font-family:var(--theatre-font);" placeholder="Дополнительная инструкция для ${escapeHtml(p.name)}...">${escapeHtml(value)}</textarea>
                 </div>
             `}).join('');
         }

@@ -4323,6 +4323,33 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("localStorage.setItem('theatreRoleMarks'", self.page)
         self.assertIn("localStorage.getItem('theatreRoleMarks')", self.page)
 
+    def test_the_font_chooser_is_wired_and_remembered(self):
+        """Шрифт страницы выбирается кнопкой, берётся из файла рядом и помнится.
+
+        Шрифт подставляется переменной (см. --theatre-font), а не правкой в каждом
+        правиле: иначе новая кнопка или поле снова остались бы при Georgia.
+        Моноширинные и математические шрифты при этом не трогаются — это не проза.
+        """
+        self.assertIn('id="fontBtn"', self.page)
+        self.assertIn('onclick="toggleFont()"', self.page)
+        # Класс ставится по выбранному шрифту, а не «просто ставится»: иначе
+        # кнопка меняла бы надпись, а текст оставался прежним
+        self.assertIn("document.body.classList.toggle('font-izis', !!izis);", self.page)
+        self.assertIn("localStorage.setItem('theatreFont', izis ? 'izis' : 'standard');",
+                      self.page, "выбор шрифта нечем запомнить")
+        self.assertIn("saved = localStorage.getItem('theatreFont');", self.page,
+                      "выбор шрифта неоткуда вернуть")
+        self.assertIn("applyFont(saved === 'izis');", self.page,
+                      "страница снова открывается не тем шрифтом, что выбрали")
+        self.assertIn("@font-face", self.page, "шрифта из файла рядом нет вовсе")
+        self.assertIn("url('/static/fonts/izis.ttf')", self.page,
+                      "шрифт тянется не из файла рядом с проектом")
+        self.assertIn("--theatre-font: Georgia", self.page, "нет шрифта по умолчанию")
+        self.assertIn("body.font-izis { --theatre-font: 'Izis'", self.page,
+                      "выбор шрифта ни на что не влияет")
+        self.assertNotIn("font-family: Georgia", self.page,
+                         "где-то шрифт прописан прямо, а не взят из --theatre-font")
+
 
 # ---------------------------------------------------------------- тонкая настройка
 
@@ -6335,8 +6362,10 @@ class TestOfflinePage(unittest.TestCase):
     """Страница обязана открываться без интернета: всё нужное лежит рядом.
 
     В пульте и ленте нет ни одного внешнего адреса — ни скриптов с CDN, ни
-    шрифтов. Найденный когда-то @import с Google Fonts никто не использовал
-    (весь текст рисуют системные Georgia и Courier New), но браузер всё равно
+    шрифтов. Весь текст рисуют системные Georgia и Courier New; на выбор есть
+    ещё Izis — но он лежит рядом с проектом (static/fonts) и уезжает оттуда же,
+    где взят клиент Socket.IO: чужих серверов у страницы нет вовсе. Найденный
+    когда-то @import с Google Fonts никто не использовал, но браузер всё равно
     ждал ответа fonts.googleapis.com перед отрисовкой: без интернета пульт
     просто висел на белом экране.
     """
@@ -6364,7 +6393,7 @@ class TestOfflinePage(unittest.TestCase):
         """
         root = Path(__file__).resolve().parent.parent
         missing = [name for name in ("static/socket.io.min.js", "static/temml.min.js",
-                                     "favicon.ico")
+                                     "static/fonts/izis.ttf", "favicon.ico")
                    if not (root / name).is_file()]
         self.assertEqual(missing, [], f"страница ссылается на отсутствующие файлы: {missing}")
 

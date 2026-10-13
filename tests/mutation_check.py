@@ -678,9 +678,24 @@ BUGS = {
     ],
     "страница снова тянет шрифты из интернета": [
         ("aitheatre/page.py",
-         "        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и",
+         "        /* Шрифты — только свои. Текст рисуется системными Georgia и Courier New,",
          "        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&display=swap');\n"
-         "        /* Внешних шрифтов здесь нет: вся страница рисуется системными Georgia и"),
+         "        /* Шрифты — только свои. Текст рисуется системными Georgia и Courier New,"),
+    ],
+    "выбранный шрифт снова не помнится": [
+        ("aitheatre/page.py",
+         "            try { localStorage.setItem('theatreFont', izis ? 'izis' : 'standard'); } catch (e) {}",
+         "            try { localStorage.setItem('theatreFont', 'standard'); } catch (e) {}"),
+    ],
+    "кнопка шрифта снова ни на что не влияет": [
+        ("aitheatre/page.py",
+         "            document.body.classList.toggle('font-izis', !!izis);",
+         "            document.body.classList.toggle('font-izis', false);"),
+    ],
+    "шрифт снова стоит прямо в правилах, а не берётся переменной": [
+        ("aitheatre/page.py",
+         "        body.font-izis { --theatre-font: 'Izis', Georgia, 'Times New Roman', Times, serif; }",
+         "        body.font-izis { }"),
     ],
     "правила судьи не переживают «Новый спектакль»": [
         ("aitheatre/show.py",
