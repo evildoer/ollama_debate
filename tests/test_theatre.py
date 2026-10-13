@@ -4350,6 +4350,51 @@ class TestRoleMarks(unittest.TestCase):
         self.assertNotIn("font-family: Georgia", self.page,
                          "где-то шрифт прописан прямо, а не взят из --theatre-font")
 
+    def test_the_heading_chooser_takes_its_own_font(self):
+        """Заголовки и значащие строки — своим шрифтом, и он мешается с текстом.
+
+        По умолчанию заголовки идут за текстом (--theatre-head-font смотрит на
+        --theatre-font), поэтому выбор заголовков отдельный: текст может быть
+        на Izis, а имена и заголовки — на Rubik, и это одна кнопка, а не вторая
+        обязанность. Переменная заголовков объявлена на body, а не в :root, и это
+        не придирка: значение переменной подставляется на том же элементе, где она
+        объявлена, поэтому в :root она подставила бы Georgia навсегда — выбор
+        текста до заголовков уже не дошёл бы.
+        """
+        self.assertIn('id="headBtn"', self.page)
+        self.assertIn('onclick="toggleHeads()"', self.page)
+        self.assertIn("document.body.classList.toggle('head-rubik', !!rubik);", self.page)
+        self.assertIn("localStorage.setItem('theatreHeads', rubik ? 'rubik' : 'text');",
+                      self.page, "выбор заголовков нечем запомнить")
+        self.assertIn("saved = localStorage.getItem('theatreHeads');", self.page,
+                      "выбор заголовков неоткуда вернуть")
+        self.assertIn("applyHeads(saved === 'rubik');", self.page,
+                      "страница снова открывается не тем шрифтом заголовков")
+        # Шрифт заголовков — тоже свой файл рядом, и у вариативного Rubik
+        # объявлен вес: без диапазона браузер взял бы его тонкий по умолчанию
+        self.assertIn("url('/static/fonts/rubik-var.ttf')", self.page,
+                      "шрифт заголовков тянется не из файла рядом с проектом")
+        self.assertIn("font-weight: 300 900;", self.page,
+                      "вес вариативного Rubik не объявлен")
+        self.assertIn("body { --theatre-head-font: var(--theatre-font); }", self.page,
+                      "заголовки перестали идти за текстом по умолчанию")
+        self.assertIn("body.head-rubik { --theatre-head-font: 'Rubik'", self.page,
+                      "выбор заголовков ни на что не влияет")
+        # Заголовки и значащие строки берут ИМЕННО свою переменную: иначе выбор
+        # заголовков менял бы надпись на кнопке, а вид оставался прежним
+        for rule in (".header h1", ".header-subtitle", ".card h2",
+                     ".post-author", ".sidebar-title"):
+            # Именно правило со шрифтом, а не любое упоминание селектора: правило
+            # про жирный тоже начинается с него (см. body.head-rubik выше)
+            self.assertIn(f"{rule} {{ font-family: var(--theatre-head-font)", self.page,
+                          f"{rule} остался при шрифте текста")
+        self.assertIn("body.head-rubik .header h1", self.page,
+                      "жирный к шрифту заголовков не приложен")
+        # Чужая работа лежит с условиями, под которыми её отдали (см. «Лицензию»)
+        root = Path(__file__).resolve().parent.parent
+        self.assertTrue((root / "static/fonts/Rubik-OFL.txt").is_file(),
+                        "шрифт заголовков в репозитории без своей лицензии")
+
 
 # ---------------------------------------------------------------- тонкая настройка
 
@@ -6514,7 +6559,8 @@ class TestOfflinePage(unittest.TestCase):
         """
         root = Path(__file__).resolve().parent.parent
         missing = [name for name in ("static/socket.io.min.js", "static/temml.min.js",
-                                     "static/fonts/izis.ttf", "favicon.ico")
+                                     "static/fonts/izis.ttf", "static/fonts/rubik-var.ttf",
+                                     "favicon.ico")
                    if not (root / name).is_file()]
         self.assertEqual(missing, [], f"страница ссылается на отсутствующие файлы: {missing}")
 

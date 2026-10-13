@@ -19,25 +19,48 @@ HTML_TEMPLATE = """
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <style>
         /* Шрифты — только свои. Текст рисуется системными Georgia и Courier New,
-           а на выбор есть ещё Izis: декоративный шрифт, который лежит рядом
-           с проектом (static/fonts/izis.ttf) и подключается своим @font-face.
-           Чужих серверов тут по-прежнему нет: раньше тут стоял @import с чужим
-           сервером шрифтов — никто этим шрифтом не пользовался, но браузер всё
-           равно ждал ответа, прежде чем нарисовать пульт, и без интернета
-           (или за прокси) висел. Свой файл ждать неоткуда: если его нет,
-           страница просто остаётся при Georgia — она стоит в цепочке следующей */
+           а на выбор есть ещё два, и оба лежат рядом с проектом (static/fonts):
+           Izis — декоративный, для обычного текста, и Rubik — для заголовков
+           и значащих строк. Чужих серверов тут по-прежнему нет: раньше тут стоял
+           @import с чужим сервером шрифтов — никто этим шрифтом не пользовался,
+           но браузер всё равно ждал ответа, прежде чем нарисовать пульт, и без
+           интернета (или за прокси) висел. Свой файл ждать неоткуда: если его
+           нет, страница просто остаётся при Georgia — она стоит в цепочке
+           следующей */
         @font-face {
             font-family: 'Izis';
             src: url('/static/fonts/izis.ttf') format('truetype');
             font-display: swap;
         }
+        /* Rubik уезжает вариативным файлом: вес в нём от тонкого до чёрного,
+           и заголовки берут оттуда жирный (см. body.head-rubik ниже) */
+        @font-face {
+            font-family: 'Rubik';
+            src: url('/static/fonts/rubik-var.ttf') format('truetype');
+            font-weight: 300 900;
+            font-display: swap;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        /* Какой шрифт у текста страницы — в одном месте: выбор ставит класс
-           на body (см. applyFont), а берут отсюда и стили, и разметка, которую
-           рисует сам скрипт. Моноширинные (адреса, коды) и математические
-           (Cambria Math) — свои и не подменяются: это не проза, а знаки */
+        /* Какой шрифт у текста страницы и какой у заголовков — в одном месте:
+           выбор ставит класс на body (см. applyFont и applyHeads), а берут отсюда
+           и стили, и разметка, которую рисует сам скрипт. Заголовки по умолчанию
+           идут за текстом: --theatre-head-font смотрит на --theatre-font, поэтому
+           выбор заголовков — отдельный выбор, а не вторая обязанность.
+           Моноширинные (адреса, коды) и математические (Cambria Math) — свои
+           и не подменяются: это не проза, а знаки */
         :root { --theatre-font: Georgia, 'Times New Roman', Times, serif; }
+        /* Почему --theatre-head-font стоит на body, а не в :root: значение
+           переменной подставляется на том же элементе, где объявлена. В :root
+           она подставила бы Georgia — и навсегда: выбор текста на body до
+           заголовков уже не дошёл бы, хотя именно этого и хочется (см. ниже) */
+        body { --theatre-head-font: var(--theatre-font); }
         body.font-izis { --theatre-font: 'Izis', Georgia, 'Times New Roman', Times, serif; }
+        body.head-rubik { --theatre-head-font: 'Rubik', Georgia, 'Times New Roman', Times, serif; }
+        /* Жирный — вместе со шрифтом: «значащая строка» в Rubik читается именно
+           весом, а не размером (см. --theatre-head-font) */
+        body.head-rubik .header h1, body.head-rubik .card h2,
+        body.head-rubik .post-author, body.head-rubik .sidebar-title,
+        body.head-rubik .header-subtitle { font-weight: 700; }
         body { font-family: var(--theatre-font); background: #ffffff; min-height: 100vh; color: #000000; line-height: 1.6; font-size: 16px; }
         .layout { display: flex; min-height: 100vh; }
         .main-content { flex: 1; padding: 40px 60px; }
@@ -45,13 +68,13 @@ HTML_TEMPLATE = """
         .container { width: 55%; margin: 0 auto; }
         .header { background: #ffffff; border-bottom: 1px solid #000000; padding: 40px 0 30px 0; margin-bottom: 40px; text-align: center; }
         .header-date { font-size: 14px; letter-spacing: 1px; margin-bottom: 20px; text-transform: uppercase; }
-        .header h1 { font-family: var(--theatre-font); font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
-        .header-subtitle { font-size: 16px; font-style: italic; font-weight: normal; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
+        .header h1 { font-family: var(--theatre-head-font); font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
+        .header-subtitle { font-family: var(--theatre-head-font); font-size: 16px; font-style: italic; font-weight: normal; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
         /* Тема — обычный текст по левому краю: её часто пишут пунктами,
            а по центру многострочный список нечитаем */
         .header-topic { font-size: 19px; font-weight: normal; color: #000000; margin-top: 20px; padding: 24px 28px; border: 2px solid #000000; text-align: left; line-height: 1.7; min-height: 60px; white-space: pre-wrap; word-wrap: break-word; }
         .card { background: #ffffff; border: none; border-top: 1px solid #000000; border-bottom: 1px solid #000000; padding: 30px 0; margin-bottom: 40px; }
-        .card h2 { font-family: var(--theatre-font); font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
+        .card h2 { font-family: var(--theatre-head-font); font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
         .participants-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px; margin-bottom: 30px; }
         .participant-card { border: none; border-top: 1px solid #000000; padding: 25px 0; background: #ffffff; }
         .avatar-container { display: flex; justify-content: center; margin-bottom: 20px; }
@@ -70,7 +93,7 @@ HTML_TEMPLATE = """
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
-        .sidebar-title { font-family: var(--theatre-font); font-size: 14px; font-weight: normal; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
+        .sidebar-title { font-family: var(--theatre-head-font); font-size: 14px; font-weight: normal; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
         /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
         .panel-section { border-top: 1px solid #000000; padding-top: 24px; margin-top: 28px; }
         .panel-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
@@ -152,7 +175,7 @@ HTML_TEMPLATE = """
         body.dark .chip-drop { background: #141414; border-color: #3a3a3a; color: #e8e8e8; }
         .post-content { flex: 1; min-width: 0; }
         .post-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #000000; }
-        .post-author { font-family: var(--theatre-font); font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
+        .post-author { font-family: var(--theatre-head-font); font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
         .post-model { font-size: 14px; color: #000000; font-family: var(--theatre-font); margin-top: 5px; font-style: italic; }
         .post-time { font-size: 14px; color: #000000; font-style: italic; }
         .post-text { font-size: 18px; line-height: 1.8; color: #000000; word-wrap: break-word; overflow-wrap: break-word; text-align: justify; }
@@ -679,6 +702,7 @@ HTML_TEMPLATE = """
                     <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                     <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
                     <button class="btn btn-secondary" id="fontBtn" onclick="toggleFont()" title="Шрифт страницы: стандартный (системный Georgia) или Izis — выбор помнится">✒️ Шрифт: стандартный</button>
+                    <button class="btn btn-secondary" id="headBtn" onclick="toggleHeads()" title="Заголовки и значащие строки: как остальной текст или Rubik — выбор помнится">🔠 Заголовки: как текст</button>
                     <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
             </div>
@@ -2529,6 +2553,30 @@ HTML_TEMPLATE = """
             let saved = null;
             try { saved = localStorage.getItem('theatreFont'); } catch (e) {}
             applyFont(saved === 'izis');
+        })();
+
+        // Заголовки и значащие строки — своим шрифтом, если его выбрали. По
+        // умолчанию они идут за текстом страницы (см. --theatre-head-font),
+        // поэтому выбор тут отдельный и обычного текста не трогает: тема
+        // разговора может быть на Izis, а имена и заголовки — на Rubik.
+        // Помнится он так же, как шрифт текста (см. applyFont)
+        function applyHeads(rubik) {
+            document.body.classList.toggle('head-rubik', !!rubik);
+            const btn = document.getElementById('headBtn');
+            if (btn) btn.textContent = rubik ? '🔠 Заголовки: Rubik' : '🔠 Заголовки: как текст';
+        }
+
+        function toggleHeads() {
+            const rubik = !document.body.classList.contains('head-rubik');
+            applyHeads(rubik);
+            try { localStorage.setItem('theatreHeads', rubik ? 'rubik' : 'text'); } catch (e) {}
+        }
+
+        // А по умолчанию заголовки — как текст: второй шрифт ставят руками
+        (function initHeads() {
+            let saved = null;
+            try { saved = localStorage.getItem('theatreHeads'); } catch (e) {}
+            applyHeads(saved === 'rubik');
         })();
         
         // Лицо реплики — одна разметка на всех: её рисуют и готовая реплика,

@@ -697,6 +697,26 @@ BUGS = {
          "        body.font-izis { --theatre-font: 'Izis', Georgia, 'Times New Roman', Times, serif; }",
          "        body.font-izis { }"),
     ],
+    "заголовки снова берут шрифт текста": [
+        ("aitheatre/page.py",
+         "        .header h1 { font-family: var(--theatre-head-font); font-size: 80px;",
+         "        .header h1 { font-family: var(--theatre-font); font-size: 80px;"),
+    ],
+    "переменная заголовков снова объявлена в :root": [
+        ("aitheatre/page.py",
+         "        body { --theatre-head-font: var(--theatre-font); }",
+         "        :root { --theatre-head-font: var(--theatre-font); }"),
+    ],
+    "выбранный шрифт заголовков снова не помнится": [
+        ("aitheatre/page.py",
+         "            try { localStorage.setItem('theatreHeads', rubik ? 'rubik' : 'text'); } catch (e) {}",
+         "            try { localStorage.setItem('theatreHeads', 'text'); } catch (e) {}"),
+    ],
+    "выбор заголовков снова не возвращается": [
+        ("aitheatre/page.py",
+         "            applyHeads(saved === 'rubik');",
+         "            applyHeads(false);"),
+    ],
     "правила судьи не переживают «Новый спектакль»": [
         ("aitheatre/show.py",
          "        self.judge_rules = judge_rules",
