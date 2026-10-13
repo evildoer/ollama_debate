@@ -18,49 +18,167 @@ HTML_TEMPLATE = """
     <title>AI Театр</title>
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
     <style>
-        /* Шрифты — только свои. Текст рисуется системными Georgia и Courier New,
-           а на выбор есть ещё два, и оба лежат рядом с проектом (static/fonts):
-           Izis — декоративный, для обычного текста, и Rubik — для заголовков
-           и значащих строк. Чужих серверов тут по-прежнему нет: раньше тут стоял
-           @import с чужим сервером шрифтов — никто этим шрифтом не пользовался,
-           но браузер всё равно ждал ответа, прежде чем нарисовать пульт, и без
-           интернета (или за прокси) висел. Свой файл ждать неоткуда: если его
-           нет, страница просто остаётся при Georgia — она стоит в цепочке
-           следующей */
+        /* Шрифты — только свои. Текст и заголовки берут шрифт из переменных
+           (--theatre-font и --theatre-head-font), а файлы лежат рядом с проектом
+           (static/fonts) и подключаются своими @font-face. Чужих серверов тут
+           по-прежнему нет: раньше стоял @import с чужим сервером шрифтов — никто
+           этим шрифтом не пользовался, но браузер всё равно ждал ответа, прежде чем
+           нарисовать пульт, и без интернета (или за прокси) висел. Свой файл ждать
+           неоткуда: если его нет, страница просто остаётся при Georgia — она стоит
+           в цепочке следующей (см. FONT_CHOICES).
+           Вариативные объявлены диапазоном веса, а не одним числом: без диапазона
+           браузер взял бы у них тонкое начертание по умолчанию, и жирный заголовок
+           вышел бы не жирным. Все они, кроме Izis, — под SIL Open Font License 1.1,
+           и текст лицензии лежит рядом, по файлу на семейство; Izis — чужая работа
+           и freeware для личного использования (см. «Лицензию» в README) */
+        /* Рисованные: под этот почерк и подбирался весь список ниже */
         @font-face {
             font-family: 'Izis';
             src: url('/static/fonts/izis.ttf') format('truetype');
             font-display: swap;
         }
+        /* Balsamiq Sans — рисованный, как Comic Sans, но с открытой лицензией
+           и кириллицей: им и подменяется системный Comic Sans там, где его нет.
+           Жирный лежит отдельным файлом, потому что он нужен заголовкам */
+        @font-face {
+            font-family: 'Balsamiq Sans';
+            src: url('/static/fonts/balsamiq-regular.ttf') format('truetype');
+            font-weight: 400;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Balsamiq Sans';
+            src: url('/static/fonts/balsamiq-bold.ttf') format('truetype');
+            font-weight: 700;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Neucha';
+            src: url('/static/fonts/neucha.ttf') format('truetype');
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Pangolin';
+            src: url('/static/fonts/pangolin.ttf') format('truetype');
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Marmelad';
+            src: url('/static/fonts/marmelad.ttf') format('truetype');
+            font-display: swap;
+        }
+        /* Гротески с кириллицей — от мягкого Comfortaa до строгого Noto Sans */
+        @font-face {
+            font-family: 'Comfortaa';
+            src: url('/static/fonts/comfortaa-var.ttf') format('truetype');
+            font-weight: 300 700;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Nunito';
+            src: url('/static/fonts/nunito-var.ttf') format('truetype');
+            font-weight: 200 1000;
+            font-display: swap;
+        }
         /* Rubik уезжает вариативным файлом: вес в нём от тонкого до чёрного,
-           и заголовки берут оттуда жирный (см. body.head-rubik ниже) */
+           и заголовки берут оттуда жирный (см. --theatre-head-font) */
         @font-face {
             font-family: 'Rubik';
             src: url('/static/fonts/rubik-var.ttf') format('truetype');
             font-weight: 300 900;
             font-display: swap;
         }
+        @font-face {
+            font-family: 'Golos Text';
+            src: url('/static/fonts/golos-text-var.ttf') format('truetype');
+            font-weight: 400 900;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Onest';
+            src: url('/static/fonts/onest-var.ttf') format('truetype');
+            font-weight: 100 900;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Manrope';
+            src: url('/static/fonts/manrope-var.ttf') format('truetype');
+            font-weight: 200 800;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Ruda';
+            src: url('/static/fonts/ruda-var.ttf') format('truetype');
+            font-weight: 400 900;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Podkova';
+            src: url('/static/fonts/podkova-var.ttf') format('truetype');
+            font-weight: 400 800;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Montserrat';
+            src: url('/static/fonts/montserrat-var.ttf') format('truetype');
+            font-weight: 100 900;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Noto Sans';
+            src: url('/static/fonts/noto-sans-var.ttf') format('truetype');
+            font-weight: 100 900;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'PT Sans';
+            src: url('/static/fonts/pt-sans-regular.ttf') format('truetype');
+            font-weight: 400;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'PT Sans';
+            src: url('/static/fonts/pt-sans-bold.ttf') format('truetype');
+            font-weight: 700;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Fixel Display';
+            src: url('/static/fonts/fixel-display-regular.ttf') format('truetype');
+            font-weight: 400;
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Fixel Display';
+            src: url('/static/fonts/fixel-display-bold.ttf') format('truetype');
+            font-weight: 700;
+            font-display: swap;
+        }
+        /* Акцидентные: в тексте тяжеловаты, а в крупном заголовке — в самый раз */
+        @font-face {
+            font-family: 'Russo One';
+            src: url('/static/fonts/russo-one.ttf') format('truetype');
+            font-display: swap;
+        }
+        @font-face {
+            font-family: 'Kelly Slab';
+            src: url('/static/fonts/kelly-slab.ttf') format('truetype');
+            font-display: swap;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         /* Какой шрифт у текста страницы и какой у заголовков — в одном месте:
-           выбор ставит класс на body (см. applyFont и applyHeads), а берут отсюда
-           и стили, и разметка, которую рисует сам скрипт. Заголовки по умолчанию
-           идут за текстом: --theatre-head-font смотрит на --theatre-font, поэтому
-           выбор заголовков — отдельный выбор, а не вторая обязанность.
+           выбор ставит переменную на body (см. applyChoice), а берут отсюда
+           и стили, и разметка, которую рисует сам скрипт. По умолчанию заголовки
+           идут за текстом: --theatre-head-font смотрит на --theatre-font, и это
+           то, что видно, пока шрифт не выбрали руками (см. FONT_CHOICES).
            Моноширинные (адреса, коды) и математические (Cambria Math) — свои
            и не подменяются: это не проза, а знаки */
         :root { --theatre-font: Georgia, 'Times New Roman', Times, serif; }
         /* Почему --theatre-head-font стоит на body, а не в :root: значение
            переменной подставляется на том же элементе, где объявлена. В :root
-           она подставила бы Georgia — и навсегда: выбор текста на body до
-           заголовков уже не дошёл бы, хотя именно этого и хочется (см. ниже) */
+           она подставила бы Georgia — и навсегда: выбор, который ставит скрипт
+           на body, до заголовков уже не дошёл бы */
         body { --theatre-head-font: var(--theatre-font); }
-        body.font-izis { --theatre-font: 'Izis', Georgia, 'Times New Roman', Times, serif; }
-        body.head-rubik { --theatre-head-font: 'Rubik', Georgia, 'Times New Roman', Times, serif; }
-        /* Жирный — вместе со шрифтом: «значащая строка» в Rubik читается именно
-           весом, а не размером (см. --theatre-head-font) */
-        body.head-rubik .header h1, body.head-rubik .card h2,
-        body.head-rubik .post-author, body.head-rubik .sidebar-title,
-        body.head-rubik .header-subtitle { font-weight: 700; }
         body { font-family: var(--theatre-font); background: #ffffff; min-height: 100vh; color: #000000; line-height: 1.6; font-size: 16px; }
         .layout { display: flex; min-height: 100vh; }
         .main-content { flex: 1; padding: 40px 60px; }
@@ -68,13 +186,17 @@ HTML_TEMPLATE = """
         .container { width: 55%; margin: 0 auto; }
         .header { background: #ffffff; border-bottom: 1px solid #000000; padding: 40px 0 30px 0; margin-bottom: 40px; text-align: center; }
         .header-date { font-size: 14px; letter-spacing: 1px; margin-bottom: 20px; text-transform: uppercase; }
-        .header h1 { font-family: var(--theatre-head-font); font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: normal; letter-spacing: 2px; font-variant: small-caps; }
-        .header-subtitle { font-family: var(--theatre-head-font); font-size: 16px; font-style: italic; font-weight: normal; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
+        /* Заголовки и значащие строки — тот же выбор, что и у текста (см.
+           FONT_CHOICES), но взятый жирным: «значащая строка» читается весом, а не
+           размером. У вариативных жирный берётся из файла, у одноначертательных
+           его досинтезирует браузер — иначе крупный заголовок был бы бледным */
+        .header h1 { font-family: var(--theatre-head-font); font-size: 80px; color: #000000; margin-bottom: 15px; font-weight: 700; letter-spacing: 2px; font-variant: small-caps; }
+        .header-subtitle { font-family: var(--theatre-head-font); font-size: 16px; font-style: italic; font-weight: 700; border-top: 1px solid #000000; padding-top: 15px; margin-top: 15px; }
         /* Тема — обычный текст по левому краю: её часто пишут пунктами,
            а по центру многострочный список нечитаем */
         .header-topic { font-size: 19px; font-weight: normal; color: #000000; margin-top: 20px; padding: 24px 28px; border: 2px solid #000000; text-align: left; line-height: 1.7; min-height: 60px; white-space: pre-wrap; word-wrap: break-word; }
         .card { background: #ffffff; border: none; border-top: 1px solid #000000; border-bottom: 1px solid #000000; padding: 30px 0; margin-bottom: 40px; }
-        .card h2 { font-family: var(--theatre-head-font); font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: normal; text-align: center; letter-spacing: 1px; }
+        .card h2 { font-family: var(--theatre-head-font); font-size: 40px; margin-bottom: 30px; color: #000000; font-weight: 700; text-align: center; letter-spacing: 1px; }
         .participants-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 40px; margin-bottom: 30px; }
         .participant-card { border: none; border-top: 1px solid #000000; padding: 25px 0; background: #ffffff; }
         .avatar-container { display: flex; justify-content: center; margin-bottom: 20px; }
@@ -93,7 +215,7 @@ HTML_TEMPLATE = """
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
-        .sidebar-title { font-family: var(--theatre-head-font); font-size: 14px; font-weight: normal; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
+        .sidebar-title { font-family: var(--theatre-head-font); font-size: 14px; font-weight: 700; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
         /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
         .panel-section { border-top: 1px solid #000000; padding-top: 24px; margin-top: 28px; }
         .panel-heading { display: flex; align-items: baseline; gap: 12px; margin-bottom: 8px; }
@@ -175,7 +297,7 @@ HTML_TEMPLATE = """
         body.dark .chip-drop { background: #141414; border-color: #3a3a3a; color: #e8e8e8; }
         .post-content { flex: 1; min-width: 0; }
         .post-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #000000; }
-        .post-author { font-family: var(--theatre-head-font); font-size: 36px; font-weight: normal; color: #000000; letter-spacing: 1px; }
+        .post-author { font-family: var(--theatre-head-font); font-size: 36px; font-weight: 700; color: #000000; letter-spacing: 1px; }
         .post-model { font-size: 14px; color: #000000; font-family: var(--theatre-font); margin-top: 5px; font-style: italic; }
         .post-time { font-size: 14px; color: #000000; font-style: italic; }
         .post-text { font-size: 18px; line-height: 1.8; color: #000000; word-wrap: break-word; overflow-wrap: break-word; text-align: justify; }
@@ -701,8 +823,8 @@ HTML_TEMPLATE = """
                 <div class="footer">
                     <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                     <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
-                    <button class="btn btn-secondary" id="fontBtn" onclick="toggleFont()" title="Шрифт страницы: стандартный (системный Georgia) или Izis — выбор помнится">✒️ Шрифт: стандартный</button>
-                    <button class="btn btn-secondary" id="headBtn" onclick="toggleHeads()" title="Заголовки и значащие строки: как остальной текст или Rubik — выбор помнится">🔠 Заголовки: как текст</button>
+                    <button class="btn btn-secondary" id="fontBtn" onclick="toggleFont()" title="Шрифт текста — перебором по всему списку шрифтов. Название выбранного — на самой кнопке, выбор помнится">✒️ Текст: Georgia</button>
+                    <button class="btn btn-secondary" id="headBtn" onclick="toggleHeads()" title="Шрифт заголовков и значащих строк — тот же список, что и у текста, но жирным. Название выбранного — на самой кнопке, выбор помнится">🔠 Заголовки: Georgia</button>
                     <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
             </div>
@@ -2500,23 +2622,64 @@ HTML_TEMPLATE = """
             try { localStorage.setItem('theatreTheme', dark ? 'dark' : 'light'); } catch (e) {}
         }
 
-        // Шрифт текста: стандартный (системный Georgia) или Izis — декоративный
-        // шрифт из файла рядом с проектом (см. --theatre-font, @font-face). Класс
-        // ставится один — на тело страницы, — а берут его сразу все правила,
-        // и стили, и разметка, которую рисует скрипт: подменять шрифт в каждом
-        // месте было бы правкой в двадцати, и первая же новая кнопка осталась бы
-        // при прежнем. Выбор помнится — как тема и цвет ролей
-        function applyFont(izis) {
-            document.body.classList.toggle('font-izis', !!izis);
-            const btn = document.getElementById('fontBtn');
-            if (btn) btn.textContent = izis ? '✒️ Шрифт: Izis' : '✒️ Шрифт: стандартный';
+        // Шрифт текста и шрифт заголовков выбираются ПЕРЕБОРОМ по одному и тому же
+        // списку: у кнопки не два состояния, а сколько шрифтов в списке, и на ней
+        // стоит имя выбранного сейчас — «стандартный» ничего не говорит тому, кто
+        // ищет именно Georgia. Список один на две кнопки нарочно: заголовки
+        // выбираются теми же шрифтами, что и текст, и разойтись эти два перечня
+        // не могут. stack — то, что подставляется переменной: первым идёт сам
+        // шрифт, следом запасные — на случай, если файла рядом нет или системного
+        // шрифта в этой системе не оказалось. Новый шрифт — строка в списке
+        // и @font-face к ней (см. выше), больше нигде ничего править не нужно
+        const FONT_CHOICES = [
+            {name: 'Georgia', stack: "Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Balsamiq Sans', stack: "'Balsamiq Sans', 'Comic Sans MS', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Comic Sans MS', stack: "'Comic Sans MS', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Izis', stack: "'Izis', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Neucha', stack: "'Neucha', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Pangolin', stack: "'Pangolin', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Marmelad', stack: "'Marmelad', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Comfortaa', stack: "'Comfortaa', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Nunito', stack: "'Nunito', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Rubik', stack: "'Rubik', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Golos Text', stack: "'Golos Text', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Onest', stack: "'Onest', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Manrope', stack: "'Manrope', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Ruda', stack: "'Ruda', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Podkova', stack: "'Podkova', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Montserrat', stack: "'Montserrat', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Noto Sans', stack: "'Noto Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'PT Sans', stack: "'PT Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Fixel Display', stack: "'Fixel Display', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Russo One', stack: "'Russo One', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Kelly Slab', stack: "'Kelly Slab', Georgia, 'Times New Roman', Times, serif"},
+        ];
+        const FONT_STATE = {font: 0, heads: 0};
+
+        // Переменная ставится одна — на тело страницы, — а берут её сразу все
+        // правила (см. --theatre-font): подменять шрифт в каждом месте было бы
+        // правкой в двадцати, и первая же новая кнопка осталась бы при прежнем
+        function applyChoice(what) {
+            const chosen = FONT_CHOICES[FONT_STATE[what]];
+            document.body.style.setProperty(what === 'font' ? '--theatre-font' : '--theatre-head-font',
+                                            chosen.stack);
+            const btn = document.getElementById(what === 'font' ? 'fontBtn' : 'headBtn');
+            if (btn) {
+                btn.textContent = (what === 'font' ? '✒️ Текст: ' : '🔠 Заголовки: ') + chosen.name;
+            }
         }
 
-        function toggleFont() {
-            const izis = !document.body.classList.contains('font-izis');
-            applyFont(izis);
-            try { localStorage.setItem('theatreFont', izis ? 'izis' : 'standard'); } catch (e) {}
+        function nextChoice(what) {
+            FONT_STATE[what] = (FONT_STATE[what] + 1) % FONT_CHOICES.length;
+            applyChoice(what);
+            try {
+                localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',
+                                     FONT_CHOICES[FONT_STATE[what]].name);
+            } catch (e) {}
         }
+
+        function toggleFont() { nextChoice('font'); }
+        function toggleHeads() { nextChoice('heads'); }
 
         // Цветные полосы ролей в ленте: оформление, а не смысл, поэтому его можно
         // выключить. Класс стоит на самом теле страницы — оформление постов тогда
@@ -2547,36 +2710,30 @@ HTML_TEMPLATE = """
             applyTheme(saved === null ? systemDark : saved === 'dark');
         })();
 
-        // А шрифт по умолчанию — стандартный: Izis ставят руками, и зрячей
-        // странице без выбора он был бы навязан (см. applyFont)
-        (function initFont() {
-            let saved = null;
-            try { saved = localStorage.getItem('theatreFont'); } catch (e) {}
-            applyFont(saved === 'izis');
-        })();
-
-        // Заголовки и значащие строки — своим шрифтом, если его выбрали. По
-        // умолчанию они идут за текстом страницы (см. --theatre-head-font),
-        // поэтому выбор тут отдельный и обычного текста не трогает: тема
-        // разговора может быть на Izis, а имена и заголовки — на Rubik.
-        // Помнится он так же, как шрифт текста (см. applyFont)
-        function applyHeads(rubik) {
-            document.body.classList.toggle('head-rubik', !!rubik);
-            const btn = document.getElementById('headBtn');
-            if (btn) btn.textContent = rubik ? '🔠 Заголовки: Rubik' : '🔠 Заголовки: как текст';
+        // А по умолчанию — Georgia и у текста, и у заголовков: свои шрифты ставят
+        // руками, и странице без выбора они были бы навязаны (см. FONT_CHOICES).
+        // Прежние записи читаются тоже: раньше в них лежали не имена шрифтов,
+        // а имена классов («standard», «izis», «rubik»), а «text» значило
+        // «заголовки идут за текстом» — теперь у заголовков своё имя, и оно
+        // и берётся вместо прежнего «как текст»
+        function atChoice(saved) {
+            if (!saved) return 0;
+            const was = {standard: 'Georgia', izis: 'Izis', text: 'Georgia', rubik: 'Rubik'};
+            const name = was[saved] || saved;
+            const at = FONT_CHOICES.findIndex(one => one.name === name);
+            return at < 0 ? 0 : at;
         }
 
-        function toggleHeads() {
-            const rubik = !document.body.classList.contains('head-rubik');
-            applyHeads(rubik);
-            try { localStorage.setItem('theatreHeads', rubik ? 'rubik' : 'text'); } catch (e) {}
-        }
-
-        // А по умолчанию заголовки — как текст: второй шрифт ставят руками
-        (function initHeads() {
-            let saved = null;
-            try { saved = localStorage.getItem('theatreHeads'); } catch (e) {}
-            applyHeads(saved === 'rubik');
+        (function initFonts() {
+            let font = null, heads = null;
+            try {
+                font = localStorage.getItem('theatreFont');
+                heads = localStorage.getItem('theatreHeads');
+            } catch (e) {}
+            FONT_STATE.font = atChoice(font);
+            FONT_STATE.heads = atChoice(heads);
+            applyChoice('font');
+            applyChoice('heads');
         })();
         
         // Лицо реплики — одна разметка на всех: её рисуют и готовая реплика,

@@ -4323,77 +4323,130 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("localStorage.setItem('theatreRoleMarks'", self.page)
         self.assertIn("localStorage.getItem('theatreRoleMarks')", self.page)
 
+    # Шрифты, которые предлагает страница: имя в списке — имя семейства в CSS.
+    # Georgia и Comic Sans MS — системные: своего файла рядом с проектом у них нет
+    # и быть не может, поэтому нет и @font-face
+    FONTS = ("Georgia", "Balsamiq Sans", "Comic Sans MS", "Izis", "Neucha", "Pangolin",
+             "Marmelad", "Comfortaa", "Nunito", "Rubik", "Golos Text", "Onest",
+             "Manrope", "Ruda", "Podkova", "Montserrat", "Noto Sans", "PT Sans",
+             "Fixel Display", "Russo One", "Kelly Slab")
+    SYSTEM_FONTS = ("Georgia", "Comic Sans MS")
+    # Izis — чужая работа: freeware для личного использования, и под лицензией
+    # проекта он не лежит, поэтому и текста лицензии рядом с ним нет (см. README)
+    FOREIGN_WORK = ("Izis",)
+
     def test_the_font_chooser_is_wired_and_remembered(self):
-        """Шрифт страницы выбирается кнопкой, берётся из файла рядом и помнится.
+        """Шрифт текста выбирается кнопкой, берётся из файла рядом и помнится.
 
         Шрифт подставляется переменной (см. --theatre-font), а не правкой в каждом
         правиле: иначе новая кнопка или поле снова остались бы при Georgia.
         Моноширинные и математические шрифты при этом не трогаются — это не проза.
+        В списке — ИМЕНА шрифтов: «стандартный» ничего не говорит тому, кто ищет
+        именно Georgia, а имя ещё и лежит в памяти страницы, поэтому выбор
+        переживает перезагрузку.
         """
         self.assertIn('id="fontBtn"', self.page)
         self.assertIn('onclick="toggleFont()"', self.page)
-        # Класс ставится по выбранному шрифту, а не «просто ставится»: иначе
-        # кнопка меняла бы надпись, а текст оставался прежним
-        self.assertIn("document.body.classList.toggle('font-izis', !!izis);", self.page)
-        self.assertIn("localStorage.setItem('theatreFont', izis ? 'izis' : 'standard');",
+        self.assertIn("const FONT_CHOICES = [", self.page)
+        for name in self.FONTS:
+            self.assertIn(f"{{name: '{name}', stack:", self.page,
+                          f"в списке шрифтов текста нет {name}")
+        # Перебором по всему списку: у кнопки не два состояния, а сколько шрифтов
+        # нашлось (см. nextChoice)
+        self.assertIn("FONT_STATE[what] = (FONT_STATE[what] + 1) % FONT_CHOICES.length;",
+                      self.page)
+        # Выбор ставит переменную на тело страницы, а берут её сразу все правила
+        # (см. --theatre-font): подменять шрифт в каждом месте было бы правкой
+        # в двадцати, и первая же новая кнопка осталась бы при прежнем
+        self.assertIn("document.body.style.setProperty(what === 'font' ? '--theatre-font' "
+                      ": '--theatre-head-font',", self.page,
+                      "выбор шрифта ни на что не влияет: переменная не ставится")
+        self.assertIn("                                            chosen.stack);", self.page,
+                      "переменной подставляется не выбранный шрифт")
+        self.assertIn("if (btn) {\n", self.page)
+        self.assertIn("btn.textContent = (what === 'font' ? '✒️ Текст: ' : '🔠 Заголовки: ') + chosen.name;",
+                      self.page, "на кнопке стоит не имя выбранного шрифта")
+        self.assertIn("localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',",
                       self.page, "выбор шрифта нечем запомнить")
-        self.assertIn("saved = localStorage.getItem('theatreFont');", self.page,
-                      "выбор шрифта неоткуда вернуть")
-        self.assertIn("applyFont(saved === 'izis');", self.page,
+        self.assertIn("FONT_CHOICES[FONT_STATE[what]].name);", self.page,
+                      "запоминается не имя выбранного шрифта")
+        self.assertIn("FONT_STATE.font = atChoice(font);", self.page,
                       "страница снова открывается не тем шрифтом, что выбрали")
-        self.assertIn("@font-face", self.page, "шрифта из файла рядом нет вовсе")
-        self.assertIn("url('/static/fonts/izis.ttf')", self.page,
-                      "шрифт тянется не из файла рядом с проектом")
+        self.assertIn("const was = {standard: 'Georgia', izis: 'Izis', text: 'Georgia', rubik: 'Rubik'};",
+                      self.page, "прежние записи о выбранном шрифте больше не читаются")
         self.assertIn("--theatre-font: Georgia", self.page, "нет шрифта по умолчанию")
-        self.assertIn("body.font-izis { --theatre-font: 'Izis'", self.page,
-                      "выбор шрифта ни на что не влияет")
         self.assertNotIn("font-family: Georgia", self.page,
                          "где-то шрифт прописан прямо, а не взят из --theatre-font")
 
-    def test_the_heading_chooser_takes_its_own_font(self):
-        """Заголовки и значащие строки — своим шрифтом, и он мешается с текстом.
+    def test_the_heading_chooser_takes_the_same_fonts_as_the_text(self):
+        """Заголовки выбираются тем же перечнем шрифтов, что и текст, и жирным.
 
-        По умолчанию заголовки идут за текстом (--theatre-head-font смотрит на
-        --theatre-font), поэтому выбор заголовков отдельный: текст может быть
-        на Izis, а имена и заголовки — на Rubik, и это одна кнопка, а не вторая
-        обязанность. Переменная заголовков объявлена на body, а не в :root, и это
-        не придирка: значение переменной подставляется на том же элементе, где она
-        объявлена, поэтому в :root она подставила бы Georgia навсегда — выбор
-        текста до заголовков уже не дошёл бы.
+        Свой выбор у заголовков есть (--theatre-head-font), а своего перечня нет:
+        перечень один на обе кнопки (см. FONT_CHOICES) — иначе шрифт, добавленный
+        тексту, не нашёлся бы в заголовках, и на кнопке стояло бы не то, что видно.
+        Жирный приложен правилом, а не начертанием файла: у половины шрифтов
+        жирного файла нет, и крупный заголовок иначе был бы бледным.
+        Переменная заголовков объявлена на body, а не в :root, и это не придирка:
+        значение переменной подставляется на том же элементе, где она объявлена,
+        поэтому в :root она подставила бы Georgia навсегда.
         """
         self.assertIn('id="headBtn"', self.page)
         self.assertIn('onclick="toggleHeads()"', self.page)
-        self.assertIn("document.body.classList.toggle('head-rubik', !!rubik);", self.page)
-        self.assertIn("localStorage.setItem('theatreHeads', rubik ? 'rubik' : 'text');",
-                      self.page, "выбор заголовков нечем запомнить")
-        self.assertIn("saved = localStorage.getItem('theatreHeads');", self.page,
-                      "выбор заголовков неоткуда вернуть")
-        self.assertIn("applyHeads(saved === 'rubik');", self.page,
+        # Второго перечня нет: «как текст» из выбора ушло, а имена шрифтов у обеих
+        # кнопок одни и те же (см. FONT_CHOICES)
+        self.assertNotIn("HEAD_CHOICES", self.page,
+                         "у заголовков завёлся свой перечень — он разойдётся с текстовым")
+        self.assertNotIn("{name: 'как текст'", self.page,
+                         "в выборе заголовков снова стоит «как текст» вместо имени шрифта")
+        self.assertIn("FONT_STATE.heads = atChoice(heads);", self.page,
                       "страница снова открывается не тем шрифтом заголовков")
-        # Шрифт заголовков — тоже свой файл рядом, и у вариативного Rubik
-        # объявлен вес: без диапазона браузер взял бы его тонкий по умолчанию
-        self.assertIn("url('/static/fonts/rubik-var.ttf')", self.page,
-                      "шрифт заголовков тянется не из файла рядом с проектом")
-        self.assertIn("font-weight: 300 900;", self.page,
-                      "вес вариативного Rubik не объявлен")
         self.assertIn("body { --theatre-head-font: var(--theatre-font); }", self.page,
                       "заголовки перестали идти за текстом по умолчанию")
-        self.assertIn("body.head-rubik { --theatre-head-font: 'Rubik'", self.page,
-                      "выбор заголовков ни на что не влияет")
-        # Заголовки и значащие строки берут ИМЕННО свою переменную: иначе выбор
-        # заголовков менял бы надпись на кнопке, а вид оставался прежним
+        # Заголовки и значащие строки берут ИМЕННО свою переменную (иначе выбор
+        # менял бы надпись на кнопке, а вид оставался прежним) и жирный вес
         for rule in (".header h1", ".header-subtitle", ".card h2",
                      ".post-author", ".sidebar-title"):
-            # Именно правило со шрифтом, а не любое упоминание селектора: правило
-            # про жирный тоже начинается с него (см. body.head-rubik выше)
             self.assertIn(f"{rule} {{ font-family: var(--theatre-head-font)", self.page,
                           f"{rule} остался при шрифте текста")
-        self.assertIn("body.head-rubik .header h1", self.page,
-                      "жирный к шрифту заголовков не приложен")
-        # Чужая работа лежит с условиями, под которыми её отдали (см. «Лицензию»)
+            line = next((one for one in self.page.splitlines()
+                         if one.startswith(f"        {rule} {{")), "")
+            self.assertIn("font-weight: 700;", line, f"{rule} не жирный")
+        # Вариативные объявлены диапазоном веса: с одним числом браузер взял бы
+        # у них тонкое начертание по умолчанию, и заголовок вышел бы не жирным
+        for face, weight in (("rubik-var.ttf", "300 900"), ("golos-text-var.ttf", "400 900"),
+                             ("onest-var.ttf", "100 900")):
+            block = re.search(r"@font-face \{[^}]*" + re.escape(face) + r"[^}]*\}",
+                              self.page)
+            self.assertIsNotNone(block, f"шрифта {face} нет среди @font-face")
+            self.assertIn(f"font-weight: {weight};", block.group(0),
+                          f"вес {face} не объявлен диапазоном")
+
+    def test_every_offered_font_has_its_file_and_licence(self):
+        """Что кнопка обещает, то и лежит рядом: файл шрифта и лицензия к нему.
+
+        Шрифтов в списке два десятка, и один забытый файл — это кнопка, которая
+        ничего не меняет: имя в списке без @font-face. Системные (Georgia, Comic
+        Sans MS) — исключение: файла у них нет и быть не может, они и стоят первыми
+        в цепочке запасных. А у каждого остального рядом лежит лицензия: чужую
+        работу берут на её условиях, и имя файла лицензии — по имени семейства
+        (см. «Лицензию» в README).
+        """
         root = Path(__file__).resolve().parent.parent
-        self.assertTrue((root / "static/fonts/Rubik-OFL.txt").is_file(),
-                        "шрифт заголовков в репозитории без своей лицензии")
+        faces = dict(re.findall(
+            r"@font-face \{\s*font-family: '([^']+)';\s*src: url\('/static/fonts/([^']+)'\)",
+            self.page))
+        for name in self.FONTS:
+            if name in self.SYSTEM_FONTS:
+                continue
+            self.assertIn(name, faces, f"{name} обещан кнопкой, а @font-face у него нет")
+            self.assertTrue((root / "static/fonts" / faces[name]).is_file(),
+                            f"файла {faces[name]} рядом с проектом нет")
+        for name in faces:
+            self.assertIn(name, self.FONTS, f"{faces[name]} подключён, а в списке его нет")
+            if name in self.FOREIGN_WORK:
+                continue
+            licence = root / "static/fonts" / f"{name.replace(' ', '')}-OFL.txt"
+            self.assertTrue(licence.is_file(), f"у шрифта {name} нет лицензии рядом")
 
 
 # ---------------------------------------------------------------- тонкая настройка
@@ -6560,7 +6613,8 @@ class TestOfflinePage(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         missing = [name for name in ("static/socket.io.min.js", "static/temml.min.js",
                                      "static/fonts/izis.ttf", "static/fonts/rubik-var.ttf",
-                                     "favicon.ico")
+                                     "static/fonts/balsamiq-regular.ttf",
+                                     "static/fonts/golos-text-var.ttf", "favicon.ico")
                    if not (root / name).is_file()]
         self.assertEqual(missing, [], f"страница ссылается на отсутствующие файлы: {missing}")
 

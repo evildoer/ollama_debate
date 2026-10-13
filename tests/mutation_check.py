@@ -678,24 +678,39 @@ BUGS = {
     ],
     "страница снова тянет шрифты из интернета": [
         ("aitheatre/page.py",
-         "        /* Шрифты — только свои. Текст рисуется системными Georgia и Courier New,",
+         "        /* Шрифты — только свои. Текст и заголовки берут шрифт из переменных",
          "        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;700&display=swap');\n"
-         "        /* Шрифты — только свои. Текст рисуется системными Georgia и Courier New,"),
+         "        /* Шрифты — только свои. Текст и заголовки берут шрифт из переменных"),
     ],
     "выбранный шрифт снова не помнится": [
         ("aitheatre/page.py",
-         "            try { localStorage.setItem('theatreFont', izis ? 'izis' : 'standard'); } catch (e) {}",
-         "            try { localStorage.setItem('theatreFont', 'standard'); } catch (e) {}"),
+         "                localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',",
+         "                localStorage.setItem(what === 'font' ? 'чужое' : 'чужое',"),
+    ],
+    "запоминается снова не имя выбранного шрифта": [
+        ("aitheatre/page.py",
+         "                                     FONT_CHOICES[FONT_STATE[what]].name);",
+         "                                     FONT_CHOICES[FONT_STATE[what]].stack);"),
+    ],
+    "на кнопке снова не имя выбранного шрифта": [
+        ("aitheatre/page.py",
+         "                btn.textContent = (what === 'font' ? '✒️ Текст: ' : '🔠 Заголовки: ') + chosen.name;",
+         "                btn.textContent = '✒️ Текст: выбранный'; "),
     ],
     "кнопка шрифта снова ни на что не влияет": [
         ("aitheatre/page.py",
-         "            document.body.classList.toggle('font-izis', !!izis);",
-         "            document.body.classList.toggle('font-izis', false);"),
+         "                                            chosen.stack);",
+         "                                            'Georgia, serif');"),
+    ],
+    "прежние записи о выбранном шрифте снова не читаются": [
+        ("aitheatre/page.py",
+         "            const was = {standard: 'Georgia', izis: 'Izis', text: 'Georgia', rubik: 'Rubik'};",
+         "            const was = {};"),
     ],
     "шрифт снова стоит прямо в правилах, а не берётся переменной": [
         ("aitheatre/page.py",
-         "        body.font-izis { --theatre-font: 'Izis', Georgia, 'Times New Roman', Times, serif; }",
-         "        body.font-izis { }"),
+         "        .card h2 { font-family: var(--theatre-head-font); font-size: 40px;",
+         "        .card h2 { font-family: Georgia, serif; font-size: 40px;"),
     ],
     "заголовки снова берут шрифт текста": [
         ("aitheatre/page.py",
@@ -707,15 +722,32 @@ BUGS = {
          "        body { --theatre-head-font: var(--theatre-font); }",
          "        :root { --theatre-head-font: var(--theatre-font); }"),
     ],
-    "выбранный шрифт заголовков снова не помнится": [
+    "заголовки снова не жирные": [
         ("aitheatre/page.py",
-         "            try { localStorage.setItem('theatreHeads', rubik ? 'rubik' : 'text'); } catch (e) {}",
-         "            try { localStorage.setItem('theatreHeads', 'text'); } catch (e) {}"),
+         "margin-bottom: 15px; font-weight: 700; letter-spacing: 2px;",
+         "margin-bottom: 15px; font-weight: normal; letter-spacing: 2px;"),
+    ],
+    "вес вариативного шрифта снова объявлен одним числом": [
+        ("aitheatre/page.py",
+         "            src: url('/static/fonts/onest-var.ttf') format('truetype');\n"
+         "            font-weight: 100 900;",
+         "            src: url('/static/fonts/onest-var.ttf') format('truetype');\n"
+         "            font-weight: 400;"),
+    ],
+    "файл одного из шрифтов странице снова не отдают": [
+        ("aitheatre/page.py",
+         "src: url('/static/fonts/onest-var.ttf') format('truetype');",
+         "src: url('/static/fonts/onest.ttf') format('truetype');"),
+    ],
+    "в списке шрифтов снова нет одного из обещанных": [
+        ("aitheatre/page.py",
+         "            {name: 'Onest', stack: \"'Onest', Georgia, 'Times New Roman', Times, serif\"},",
+         "            {name: 'Онест', stack: \"'Onest', Georgia, 'Times New Roman', Times, serif\"},"),
     ],
     "выбор заголовков снова не возвращается": [
         ("aitheatre/page.py",
-         "            applyHeads(saved === 'rubik');",
-         "            applyHeads(false);"),
+         "            FONT_STATE.heads = atChoice(heads);",
+         "            FONT_STATE.heads = 0;"),
     ],
     "правила судьи не переживают «Новый спектакль»": [
         ("aitheatre/show.py",
