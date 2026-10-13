@@ -6057,6 +6057,127 @@ class TestCloudGateway(unittest.TestCase):
         self.assertEqual(cloud.untranslated_options({"min_p": 0.2, "temperature": 0.8}), ["min_p"])
 
 
+    def test_the_vendor_overhead_is_learned_and_taken_off_the_picture(self):
+        """Надбавку вендора узнают по запросу без картинок — и вычитают из цены картинки.
+
+        Живые числа шлюза proxyapi (одна и та же картинка 64×64, наш счёт текста 20):
+        qwen отвечает на запрос без картинок 72 токенами, с инструментом — 350,
+        а с картинкой и инструментом — 416. Значит, картинка стоит 66 — и видно
+        это только тогда, когда из его «ввода» вычтено и наше, и его: одно
+        вычитание даёт 305, а вместе с его схемой инструмента (у него 278 там,
+        где наш счёт говорит 91) цена картинки и находится — без остатка.
+        """
+        cloud._TEXT_OVERHEAD.clear()
+        self.addCleanup(cloud._TEXT_OVERHEAD.clear)
+        model = "cloud:qwen/qwen3.8-flash"
+
+        self.assertIsNone(cloud.text_overhead(model, True),
+                          "надбавка взялась из ниоткуда")
+        # Запрос без картинок: вендор сказал 350, наш счёт того же запроса — 20
+        cloud.remember_text_overhead(model, 350, 20, True)
+        self.assertEqual(cloud.text_overhead(model, True), 330)
+        self.assertEqual(cloud.picture_price(model, 416, 20, True), 66,
+                         "цена картинки не сошлась с живым замером")
+        # И на длинной истории то же самое: надбавка от длины не зависит
+        self.assertEqual(cloud.picture_price(model, 3_416, 3_020, True), 66)
+        # Надбавки ещё не видали — вычитается наш счёт схемы, и это примерно
+        self.assertEqual(cloud.picture_price("cloud:google/gemma-4-31b-it", 361, 20, True),
+                         361 - 20 - cloud.tools_tokens_est(),
+                         "без выученной надбавки в дело не пошёл наш счёт схемы")
+        # Форма запроса — часть надбавки: без инструмента она своя
+        self.assertIsNone(cloud.text_overhead(model, False))
+        cloud.remember_text_overhead(model, 72, 20, False)
+        self.assertEqual(cloud.text_overhead(model, False), 52)
+        self.assertEqual(cloud.picture_price(model, 138, 20, False), 66)
+        # Сказать нечего — и не выдумываем: вендор молчит либо вычитать нечего
+        self.assertIsNone(cloud.picture_price(model, None, 20, True))
+        self.assertIsNone(cloud.picture_price(model, 40, 45, True),
+                          "из числа вендора ничего не вычитается — и цены нет")
+
+    def test_the_price_of_the_picture_lands_in_the_step_of_the_turn(self):
+        """Ход считает цену своей картинки там, где пришёл ответ, и пишет её в шаг.
+
+        В строке шага это единственное место, где видно, сколько картинка
+        стоила ВЕНДОРУ: наш счёт меряет другое. И по этой строке цена переживает
+        запись и разбор файла (см. show.vendor_picture_words, _ask_body).
+        """
+        cloud._TEXT_OVERHEAD.clear()
+        self.addCleanup(cloud._TEXT_OVERHEAD.clear)
+        # Инструмент поиска уезжает так же, как в живой игре (см. CLOUD_SEND_TOOLS):
+        # его схема — часть надбавки вендора, и проверять надо ту же форму запроса
+        cloud_setting(self, "CLOUD_SEND_TOOLS", True)
+        model = "cloud:qwen/qwen3.8-flash"
+        messages = [{"role": "user", "content": "Вот картинка — назови её цвет.",
+                     "images": ["data:image/png;base64,AAAA"]}]
+        our_text = cloud.messages_tokens(messages)
+        cloud.remember_text_overhead(model, 350, 20, True)     # надбавка вендора — 330
+        self.gateway.texts = [json.dumps({
+            "choices": [{"message": {"content": "Синий."}}],
+            "usage": {"prompt_tokens": our_text + 330 + 66,
+                      "completion_tokens": 5}})]
+        report = {"steps": []}
+
+        content, _tools = cloud.chat(model, messages, report=report)
+
+        self.assertEqual(content, "Синий.")
+        step = report["steps"][-1]
+        self.assertEqual(step.get("tokens_picture"), 66,
+                         "ход не посчитал цену своей картинки")
+        self.assertIn("картинка по счёту вендора ≈66", show.ask_line(step),
+                      "цена картинки не попала в строку запроса")
+
+    def test_the_picture_the_gateway_refused_does_not_take_the_turn_with_it(self):
+        """«Картинку не читаю» сказано 404 — ход доедет без неё, и это запомнится.
+
+        Списано с живого шлюза (proxyapi): на картинку текстовой модели он
+        отвечает «No endpoints found that support image input» — и кодом 404,
+        а не 400. Раньше такой отказ ход не лечил (см. _eased_body: повтор
+        начинался только на 400), и ход пропадал — а модель, чьё имя обещает
+        зрение («gemini», «gpt-5»), так и оставалась при догадке по имени:
+        следующий ход повторил бы то же самое слово в слово.
+        """
+        gateway = FakeGateway(statuses=(404, 200), texts=(
+            '{"error": {"message": "No endpoints found that support image input",'
+            ' "type": "not_found_error"}}',
+            '{"choices": [{"message": {"content": "Отвечаю без картинки."}}],'
+            ' "usage": {"prompt_tokens": 30, "completion_tokens": 6}}'))
+        self.addCleanup(gateway.stop)
+        settings.CLOUD_BASE_URL = gateway.base_url
+        # Зрение — память процесса, а ответы о нём ложатся ещё и в файл экземпляра:
+        # проверке нужен свой файл, иначе она учила бы следующую за ней
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        patcher = mock.patch.object(settings, "VISION_FILE",
+                                    Path(folder.name) / "vision.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        cloud._IMAGE_READERS.clear()
+        cloud._VISION_LOADED = False
+        self.addCleanup(cloud._IMAGE_READERS.clear)
+        self.addCleanup(cloud._PICTURES_DROPPED.clear)
+
+        messages = [{"role": "user", "content": "Вот картинка — назови её цвет.",
+                     "images": ["data:image/png;base64,AAAA"]}]
+        report = {"steps": []}
+        content, _tools = cloud.chat("cloud:google/gemini-3-pro-image", messages,
+                                     report=report)
+
+        self.assertEqual(content, "Отвечаю без картинки.",
+                         "ход пропал вместо повтора без приложения")
+        self.assertEqual(len(gateway.requests), 2, "запрос не был повторён")
+        self.assertTrue(cloud.pictures_in(gateway.requests[0]["body"]),
+                        "первый запрос ушёл без картинки — проверять было бы нечего")
+        self.assertFalse(cloud.pictures_in(gateway.requests[1]["body"]),
+                         "картинка уехала снова после отказа")
+        self.assertTrue(cloud.images_known("cloud:google/gemini-3-pro-image"),
+                        "отказ не запомнен — и картинка поехала бы на каждом ходу")
+        self.assertFalse(cloud.model_reads_images("cloud:google/gemini-3-pro-image"))
+        self.assertTrue(cloud.take_pictures_dropped("cloud:google/gemini-3-pro-image"),
+                        "приложение не помечено неуехавшим — и сойдёт за показанное")
+        self.assertTrue([step for step in report["steps"] if step.get("kind") == "images"],
+                        "в хронологии нет слова о том, что с картинкой вышло")
+
+
 class TestATurnThatStayedSilent(unittest.TestCase):
     """Молчание хода должно объяснять себя само.
 
@@ -8814,6 +8935,52 @@ class TestWhoReadsPictures(CloudVisionTest):
         self.assertTrue(cloud.images_known("cloud:some/text-model"),
                         "отказ запоминается: иначе он повторялся бы каждый раз")
 
+    def test_the_gateway_refusal_in_words_is_read_as_an_answer(self):
+        """«No endpoints found that support image input» — ответ про модель, а не «не знаем».
+
+        Так отвечает шлюз proxyapi — кодом 404, а не 400: снято живьём на
+        deepseek-v3.2, который картинок не читает вовсе. Раньше этот ответ
+        не читался ничем (код не из _PICTURE_REFUSAL_CODES, слов про картинку
+        не узнаём) — значит «не знаем», и модель оставалась при догадке по имени
+        (см. probe_images). А у имени вроде gemini или gpt-5 догадка — «читает»:
+        картинка уезжала на каждом ходу, и каждый ход падал на том же отказе.
+        """
+        refusal = cloud.GatewayError(
+            "шлюз ответил HTTP 404 Not Found — модель или адрес шлюза не найдены: "
+            "{\"error\": {\"message\": \"No endpoints found that support image "
+            "input\", \"type\": \"not_found_error\"}}", 404)
+
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", return_value=(None, refusal)):
+            told = cloud.probe_images("cloud:google/gemini-3-pro-image")
+            again = cloud.probe_images("cloud:google/gemini-3-pro-image")
+
+        self.assertFalse(told, "отказ шлюза прочитан как «не знаем»")
+        self.assertTrue(cloud.images_known("cloud:google/gemini-3-pro-image"),
+                        "ответ шлюза не запомнен — на следующем ходу спросим заново")
+        self.assertFalse(again, "из памяти ответ вышел другим")
+        self.assertFalse(cloud.model_reads_images("cloud:google/gemini-3-pro-image"),
+                         "картинка поехала бы снова: догадка по имени осталась в силе")
+
+    def test_a_404_about_the_model_itself_is_not_an_answer_about_pictures(self):
+        """«Модели такой нет» — не то же самое, что «картинок не читаю».
+
+        Живая разница с прошлой проверкой: тем же кодом 404 шлюз отвечает
+        и на имя, которого у него нет («model: claude-opus-4-1 …»). Запиши такой
+        ответ в модель — и она осталась бы слепой навсегда, хотя её и в списке-то нет.
+        """
+        refusal = cloud.GatewayError(
+            "шлюз ответил HTTP 404 Not Found — модель или адрес шлюза не найдены: "
+            "{\"error\": {\"message\": \"model: claude-opus-4-1 not found\"}}", 404)
+
+        with mock.patch.object(cloud, "is_configured", return_value=True), \
+             mock.patch.object(cloud, "_request", return_value=(None, refusal)):
+            told = cloud.probe_images("cloud:anthropic/claude-opus-4-1")
+
+        self.assertIsNone(told, "несуществующая модель записалась слепой")
+        self.assertFalse(cloud.images_known("cloud:anthropic/claude-opus-4-1"),
+                         "о картинках тут не решено ничего")
+
     def test_the_probe_asks_with_an_ordinary_picture(self):
         """Проверяем не выдумкой, а обычной картинкой — иначе проверяем не модель.
 
@@ -9330,12 +9497,18 @@ class TestWhatTheModelGot(PicturesTest):
             gender="female"))
         return picture, place, self.session.history_from_posts()
 
-    def _turned(self, place: dict, history: list, spent=None, tokens_in=None) -> dict:
+    def _turned(self, place: dict, history: list, spent=None, tokens_in=None,
+                tokens_picture=None) -> dict:
         """Отчёт о ходе — по той же истории, что собиралась бы к модели.
 
         spent и tokens_in — про облачный ход: цена берётся с ключа, а ввод считается
         по запросам (см. _input_tokens_total). Оба нужны, чтобы проверить, что
         у вернувшегося хода с ценой досчитывается и доля картинки в ней.
+
+        tokens_picture — цена картинки в числах самого вендора (см.
+        show._vendor_picture_tokens): её пишет строка запроса, и она должна
+        пережить и файл, и разбор файла — иначе у вернувшегося спектакля
+        от картинки остался бы один наш счёт по длине данных.
         """
         messages = self.session._format_history(place["display_name"], history,
                                                 model=place["model"])
@@ -9345,6 +9518,8 @@ class TestWhatTheModelGot(PicturesTest):
         steps = ([{"kind": "ask", "n": 1, "clock": "00:07",
                    "tokens_in": int(tokens_in), "tokens_out": 900}]
                  if tokens_in else [])
+        if steps and tokens_picture is not None:
+            steps[0]["tokens_picture"] = int(tokens_picture)
         return {"messages": [show._message_view(one) for one in messages],
                 "added": [], "removed": [], "steps": steps,
                 "budget": {"kind": "local", "window": 100},
@@ -9353,7 +9528,8 @@ class TestWhatTheModelGot(PicturesTest):
                             "tokens_in_total": int(tokens_in or 0)}}
 
     def _through_the_dump(self, place: dict, history: list, pictures: list,
-                          shown: bool = False, spent=None, tokens_in=None) -> tuple:
+                          shown: bool = False, spent=None, tokens_in=None,
+                          tokens_picture=None) -> tuple:
         """Спектакль — в ДАМП и обратно: файл, разобранная запись и её номер.
 
         Пишется тем же, чем пишет живой ход: реплика модератора с приложенным,
@@ -9377,7 +9553,7 @@ class TestWhatTheModelGot(PicturesTest):
             for post in self.session.posts[:-1]:
                 show.save_dump_entry(post)
             show.dump_note_picture_travel([one["url"] for one in pictures])
-            turn = self._turned(place, history, spent, tokens_in)
+            turn = self._turned(place, history, spent, tokens_in, tokens_picture)
             post = show.create_post(place["display_name"], place["model"],
                                     "Красный.", round_num=1, gender="female")
             if turn["steps"]:
@@ -9589,6 +9765,120 @@ class TestWhatTheModelGot(PicturesTest):
         self.assertIn("💰 0,20 ₽", line, "в шапке записи не видно цены хода")
         self.assertIn("из цены хода", line,
                       "в шапке записи не видно, сколько из цены съела картинка")
+
+    def test_the_picture_price_comes_from_the_vendor_when_he_named_it(self):
+        """Цена картинки берётся из числа вендора, а наш счёт — запасной.
+
+        Живой замер (proxyapi, одна и та же картинка 64×64): вендор говорит
+        5, 18, 66, 185 и 260 токенов у разных моделей там, где наш счёт
+        по длине данных даёт 150; а на картинке 1600×1600 наш счёт даёт
+        десятки тысяч там, где вендор говорит сотни и тысячи. Цена считается
+        там, где пришёл ответ (см. cloud.picture_price), и лежит в шаге
+        хода числом (см. show.vendor_picture_words).
+        """
+        steps = [{"kind": "ask", "n": 1, "tokens_in": 3431,
+                  "tokens_in_est": 14736, "tokens_picture": 2881}]
+
+        self.assertEqual(show._vendor_picture_tokens(steps), 2881,
+                         "цена картинки у вендора не прочиталась из шага")
+
+        # То же и к концу хода: число вендора встаёт в сводку вместе с именем счёта
+        turn = {"summary": {}}
+        show.refresh_turn_report(turn, [], 0, {"steps": steps},
+                                 spent=0.30, seconds=7.0)
+        summary = turn["summary"]
+        self.assertEqual(summary["picture_tokens"], 2881,
+                         "в счёт хода пошёл наш счёт по длине данных, а не число вендора")
+        self.assertEqual(summary["picture_count"], "vendor", "не сказано, чей это счёт")
+        self.assertIn("≈2 881 токенов на картинку — по счёту вендора",
+                      " · ".join(show.picture_cost_words(summary)),
+                      "в свёрнутой строке число вендора выдано за наш счёт")
+        self.assertEqual(summary["picture_money"], show.picture_share_of_price(summary),
+                         "доля цены хода не досчитана")
+
+    def test_the_vendor_price_of_the_picture_survives_the_dump(self):
+        """Число вендора живёт в записи хода: и на ходу, и после возврата спектакля.
+
+        В ДАМП цена картинки пишется строкой запроса (см. show.vendor_picture_words) —
+        там же, где и всё остальное о его числах, и читается обратно тем же
+        разбором (см. show._ask_body). Иначе в ленте стояло бы число вендора,
+        а у той же реплики в возвращённом спектакле — наш счёт по длине данных.
+        """
+        picture, place, history = self._discussion()
+        show.post_image_pairs([picture])
+
+        written, turn, post_id = self._through_the_dump(place, history, [picture],
+                                                        spent=0.30, tokens_in=3431,
+                                                        tokens_picture=2881)
+        summary = turn["summary"]
+
+        self.assertEqual(summary["picture_tokens"], 2881,
+                         "у вернувшегося хода цена картинки не та, что на ходу")
+        self.assertEqual(summary["picture_count"], "vendor", "не сказано, чей это счёт")
+        self.assertIn("картинка по счёту вендора", written,
+                      "в ДАМПе нет цены картинки, названной вендором")
+        self.assertEqual(show._ask_body(show.ask_line(turn["steps"][0]))
+                         .get("tokens_picture"), 2881,
+                         "цена картинки не читается обратно из строки запроса")
+        line = show.turn_heading(post_id, turn)
+        self.assertIn("по счёту вендора", line, "в шапке записи не сказано, чей это счёт")
+
+    def test_the_price_of_the_picture_stands_in_the_line_of_its_request(self):
+        """В строке запроса видно, сколько вендор взял за его картинку.
+
+        Строка — то, чем запрос переживает запись (см. ask_line), поэтому разбор
+        строки обязан совпадать с тем, что в неё положили: иначе цена картинки
+        в числах вендора потеряется на возврате спектакля (см. _ask_body,
+        _vendor_picture_tokens). Запрос без картинок о ней молчит.
+        """
+        step = {"kind": "ask", "n": 1, "clock": "00:00:01.000",
+                "tokens_in": 3431, "tokens_out": 900,
+                "tokens_in_est": 14736, "tokens_picture": 2881}
+        line = show.ask_line(step)
+
+        self.assertIn("картинка по счёту вендора ≈2 881", line)
+        self.assertEqual(show._ask_body(line).get("tokens_picture"), 2881,
+                         "разбор строки разошёлся с тем, что в неё положили")
+        self.assertNotIn("картинка по счёту",
+                         show.ask_line({"kind": "ask", "n": 1, "tokens_in": 3431,
+                                        "tokens_out": 900, "tokens_in_est": 3400}),
+                         "у запроса без картинок появилась её цена")
+
+    def test_a_vendor_who_said_nothing_leaves_the_count_to_us(self):
+        """Вендор о картинке молчит — считаем по длине и говорим, что счёт наш.
+
+        Молчит он по-разному: не назвал чисел вовсе (без ключа, без связи),
+        либо из его числа ничего не вычитается — так у модели, чей «ввод»
+        измеряется десятками токенов (живьём у gpt-5-nano — 37 с картинкой
+        против 32 без неё). Сделать из этого ноль значило бы сказать
+        «картинка ничего не стоила».
+        """
+        self.assertIsNone(show._vendor_picture_tokens([
+            {"kind": "ask", "tokens_in": 37, "tokens_in_est": 45}]),
+            "цены картинки в шаге нет, а ход её выдумал")
+        # Запросов несколько: цена берётся по каждому и усредняется — картинка
+        # уезжает в каждом, и свои числа у вендора тоже по каждому
+        self.assertEqual(show._vendor_picture_tokens([
+            {"kind": "ask", "tokens_picture": 200},
+            {"kind": "ask", "tokens_picture": 400},
+            {"kind": "ask", "tokens_in": 999},
+        ]), 300, "промолчавший запрос утянул среднее на себя")
+        # Местная модель о цене картинки не говорит: числа токенов у неё свои
+        self.assertIsNone(show._vendor_picture_tokens([{"kind": "ask", "tokens": 12}]))
+
+        # А без числа вендора в сводке остаётся наш счёт — и это сказано словами
+        summary = {"picture_unknown": 3, "spent": 0.30,
+                   "tokens_in_total": 3431, "asks": 1}
+        show.remember_picture_cost(summary, vendor=2881)
+        self.assertEqual(summary["picture_tokens"], 2881)
+        self.assertEqual(summary["picture_count"], "vendor")
+        self.assertEqual(summary["picture_unknown"], 0,
+                         "«вес неизвестен» остался там, где вес назван вендором")
+        ours = {"picture_tokens": 4200, "picture_count": "ours"}
+        words = " · ".join(show.picture_cost_words(ours))
+        self.assertIn("4 200 токенов на картинку — наш счёт", words,
+                      "наш счёт выдан за вендорский")
+        self.assertNotIn("≈", words, "у нашего счёта нет вендорского «≈»")
 
     def test_the_turn_knows_its_picture_did_not_travel(self):
         """Ход сам знает, что ушёл без картинки: это говорит commit_shown_pictures.

@@ -609,7 +609,12 @@ def probe_images(model: str):
             "images": [PROBE_PICTURE]}])})
     if error:
         code = getattr(error, "code", None)
-        if code not in _PICTURE_REFUSAL_CODES:
+        # Ответом бывает и код, и слово: картинку не принял не только 400
+        # (у proxyapi та же беда приходит 404 «No endpoints found that support
+        # image input», а у gemma — 422 «Invalid Input», см. _PICTURE_REFUSAL_CODES,
+        # _MODEL_REFUSED_PICTURES). Слова спрашиваются отдельно: код говорит
+        # «запрос не понят» и о картинках ничего не знает
+        if code not in _PICTURE_REFUSAL_CODES and not model_refused_pictures(str(error)):
             # Ключ, баланс, связь, чужой тупик шлюза: про картинки это ничего
             # не говорит, поэтому остаёмся при догадке по имени (см. ниже)
             print(f"  🔎 Не удалось спросить у шлюза про картинки "
@@ -966,9 +971,17 @@ def named_field(text: str) -> str:
 #     на пиксель 1x1). Это про файл, а не про модель: ход повторяется без
 #     приложения, но приговором модели такой отказ не становится — иначе один
 #     неудачный файл навсегда лишал бы модель картинок (см. _eased_body)
+# Приметы отказа по самой модели. Последние две — не длинные фразы, а то, чем
+# шлюз отвечает, когда картинку не читает НИ ОДНА его модель с таким именем:
+# «No endpoints found that support image input» (у proxyapi это 404, а не 400),
+# так отвечает, например, deepseek-v3.2. Разница дорогая: не признать эти слова
+# за отказ модели — значит оставить модель при догадке по имени, присылать ей
+# картинку каждый ход и каждый ход получать тот же отказ (см. probe_images,
+# _eased_body)
 _MODEL_REFUSED_PICTURES = ("does not support image", "doesn't support image",
                            "images are not supported", "unsupported image",
-                           "cannot read image", "model does not support image")
+                           "cannot read image", "model does not support image",
+                           "support image input", "does not support vision")
 _FILE_REFUSED_PICTURES = ("load image", "load the image", "invalid image",
                           "image too", "failed to load image", "image length",
                           "image width", "image size", "must be larger than",
@@ -1960,6 +1973,84 @@ def messages_tokens(messages: list) -> int:
     return total
 
 
+def tools_tokens_est() -> int:
+    """Сколько токенов занимает схема инструмента поиска — нашим счётом.
+
+    Схема уезжает вместе с запросом (см. CLOUD_SEND_TOOLS), и вендор считает её
+    во вводе так же, как текст, — своими токенами. Свой счёт про неё знает
+    примерно (91 против его 278 у qwen — замерено живьём), поэтому точную
+    надбавку берут из его же чисел, а этот счёт нужен, когда такой надбавки
+    ещё не видали (см. text_overhead, picture_price)
+    """
+    try:
+        return text.estimate_tokens(json.dumps(_tool_schema(), ensure_ascii=False))
+    except Exception:
+        return 0
+
+
+# Чем вендор дороже нашего счёта на том же самом запросе БЕЗ картинки: шаблон
+# разговора, схема инструмента и разница токенизаторов. Именно это и надо
+# вычесть из его «ввода» кроме текста, иначе разница между «с картинкой» и «без»
+# припишет картинке всю эту надбавку. А она не мала: у qwen схема инструмента
+# стоит 278 его токенов там, где наш счёт говорит 91 — и цена картинки выходила
+# вчетверо больше настоящей (297 против 66, замерено живьём); у gemma наоборот —
+# его надбавка меньше нашей, и без вычета картинка стоила бы на 91 токен меньше
+# истинной. Запоминается по каждому запросу без картинок, потому что форма
+# запроса бывает двух родов — с инструментом и без него (см. _overhead_key)
+_TEXT_OVERHEAD = {}
+
+
+def _overhead_key(model: str, tools) -> str:
+    """Под каким ключом лежит надбавка: форма запроса — часть надбавки."""
+    return f"{bare_model_name(model)}|{'tools' if tools else 'plain'}"
+
+
+def text_overhead(model: str, tools=None):
+    """Надбавка вендора к нашему счёту (None — такой запрос ещё не видали).
+
+    Считается по запросам без картинок (см. remember_text_overhead): там она вся
+    и видна, потому что никакого другого прибавления к тексту в запросе нет
+    """
+    if tools is None:
+        keys = [key for key in _TEXT_OVERHEAD
+                if key.startswith(bare_model_name(model) + "|")]
+        return _TEXT_OVERHEAD[keys[0]] if len(keys) == 1 else None
+    return _TEXT_OVERHEAD.get(_overhead_key(model, tools))
+
+
+def remember_text_overhead(model: str, vendor, our_count, tools) -> None:
+    """Запомнить надбавку вендора по запросу без картинок.
+
+    Вендор сам называет, сколько взял за этот запрос, а наш счёт того же самого
+    запроса — рядом (см. messages_tokens); разница между ними — всё, чем он
+    дороже, кроме текста. Уходит в память процесса, а не в файл: с новым запуском
+    её спрашивают заново — как и всё остальное про этого вендора
+    """
+    if vendor is None or our_count is None:
+        return
+    _TEXT_OVERHEAD[_overhead_key(model, tools)] = int(vendor) - int(our_count)
+
+
+def picture_price(model: str, vendor, our_text, tools) -> int:
+    """Сколько вендор взял ЗА КАРТИНКУ запроса — или None, если сказать нечего.
+
+    В его числах картинка отдельно не названа: во «вводе» она слита и с текстом,
+    и с тем, чем он дороже нас (см. text_overhead). Отсюда и вычитание — одно
+    и то же для всех картинок этого хода и этой формы запроса.
+
+    По длине данных этого не видно вовсе: она и близко не вендорский счёт.
+    Возвращается None, когда вендор чисел не назвал, когда из его числа ничего
+    не вычитается (так у моделей, чей «ввод» измеряется десятками токенов) и когда
+    вычитание дало ноль: ноль здесь — не факт, а отсутствие ответа
+    """
+    if vendor is None or our_text is None:
+        return None
+    extra = text_overhead(model, tools)
+    told = int(vendor) - int(our_text) - (int(extra) if extra is not None
+                                         else (tools_tokens_est() if tools else 0))
+    return told if told > 0 else None
+
+
 def chat(model: str, messages: list, options: dict = None, tool_choice: str = None,
          on_delta=None, on_thought=None, use_tools=None, report: dict = None,
          deadline: float = None) -> tuple:
@@ -2054,6 +2145,19 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
             # почему модель не искала — не дали инструмент или сама не стала
             notes["tools"] = tools_sent
             notes["tokens_in_est"] = messages_tokens(messages)
+            # Цена картинки — сразу здесь, пока под рукой и числа вендора,
+            # и наша надбавка к ним (см. picture_price): в строку запроса она
+            # уйдёт числом, и по ДАМПу его видно так же, как в ленте
+            if pictures_in(body):
+                price = picture_price(model, notes.get("tokens_in"),
+                                      notes.get("tokens_in_est"), tools_sent)
+                if price is not None:
+                    notes["tokens_picture"] = price
+            else:
+                # А на запросе без картинок видна сама надбавка — её и запоминаем:
+                # в следующий раз она вычтется из числа вендора (см. picture_price)
+                remember_text_overhead(model, notes.get("tokens_in"),
+                                       notes.get("tokens_in_est"), tools_sent)
             notes["tokens_out_est"] = (
                 text.estimate_tokens(answer.get("content") or "")
                 + text.estimate_tokens(answer.get("thinking") or ""))
@@ -2071,7 +2175,12 @@ def chat(model: str, messages: list, options: dict = None, tool_choice: str = No
     tools_stripped = False   # инструмент пришлось убрать из тела — только это
                              # и значит «модель не принимает инструмент»
     for _ in range(_EASE_ROUNDS):
-        if getattr(error, "code", None) != 400:
+        # Запрос с картинкой повторяется и на других кодах: «картинку не принял»
+        # шлюз говорит и 404, и 422 (см. _eased_body, _PICTURE_REFUSAL_CODES).
+        # Читаются при этом слова, а не код: 404 про несуществующую модель
+        # от отказа по картинке не отличается ничем, кроме этих слов
+        if not (getattr(error, "code", None) == 400
+                or (pictures_in(body) and picture_refused(str(error)))):
             break
         eased = _eased_body(model, body, error)
         if eased is None:

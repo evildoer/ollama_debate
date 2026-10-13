@@ -334,6 +334,24 @@ def step_period(step: dict) -> str:
     return start
 
 
+def vendor_picture_words(step: dict) -> str:
+    """«картинка по счёту вендора ≈66» — цена картинки запроса в его числах.
+
+    Вендор о картинке отдельно не говорит: во «вводе» она слита и с текстом
+    запроса, и с его же надбавкой к нашему счёту. Оба вычитаемых при этом
+    известны (см. cloud.picture_price), и разница уже посчитана там, где пришёл
+    ответ; здесь она только называется словом — вместе с «≈», потому что в ней
+    сидит ещё и его шаблон разговора. Записать её надо в самом запросе: без этого
+    у вернувшегося из ДАМПа спектакля от картинки оставался бы один наш счёт
+    (см. _vendor_picture_tokens). Пусто — запрос без картинок либо вендор о ней
+    промолчал: и то и другое значит «считать не из чего».
+    """
+    price = step.get("tokens_picture")
+    if not price:
+        return ""
+    return f"картинка по счёту вендора ≈{numbers_word(price)}"
+
+
 def ask_line(step: dict) -> str:
     """Один запрос хода одной строкой — с числами и их названиями.
 
@@ -347,6 +365,11 @@ def ask_line(step: dict) -> str:
     Если же вендор чисел не прислал вовсе, остаётся только наш счёт: без него
     на месте ввода была бы дыра, а «сколько вошло в запрос» — первое, что хочется
     знать.
+
+    А у запроса с картинкой рядом с общим весом стоит и разбор этого веса:
+    сколько в нём текста, а сколько самой картинки (см. picture_split_words).
+    Иначе о цене картинки в ДАМПе нечего было бы прочитать (см.
+    _vendor_picture_tokens).
     """
     if step.get("error"):
         return f"не прошёл — {step['error']}"
@@ -362,6 +385,11 @@ def ask_line(step: dict) -> str:
             weight += f" (наш счёт ≈{numbers_word(estimate)})"
         weight += f" → вывод {numbers_word(step.get('tokens_out'))} токенов"
     parts = [weight]
+    # Сколько из этого веса пришлось на картинку — рядом с весом и до всего
+    # остального: это части одного числа, а не два факта о запросе
+    split = vendor_picture_words(step)
+    if split:
+        parts.append(split)
     if step.get("reasoning_tokens"):
         parts.append(f"из них размышлений {numbers_word(step['reasoning_tokens'])}")
     if step.get("finish_reason"):
@@ -958,11 +986,13 @@ def picture_cost_words(summary: dict) -> list:
     Слова одни на страницу и на ДАМП (см. page.pictureCostText): сводка в файле
     — это та же свёрнутая строка ленты (см. turn_summary_line).
 
-    Токены — наш счёт, а не вендорский: о цене картинки он отдельно не говорит
-    (см. sent_picture_tokens). Деньги — доля цены хода, а не отдельный счёт,
-    поэтому и «≈»; меньше копейки так и называется, потому что «0,00 ₽»
-    читалось бы как «бесплатно» (см. picture_share_of_price). Счёта нет —
-    так и говорим, а не показываем ноль вместо него.
+    Токены — по счёту вендора, когда он его назвал (см. _vendor_picture_tokens),
+    а наш счёт по длине данных — запасной, когда вендор о картинке молчит
+    (см. sent_picture_tokens). Чей это счёт, сказано тут же, у самого числа:
+    мерки разные, и разница между ними — в разы. Деньги — доля цены хода,
+    а не отдельный счёт, поэтому и «≈»; меньше копейки так и называется, потому
+    что «0,00 ₽» читалось бы как «бесплатно» (см. picture_share_of_price).
+    Счёта нет — так и говорим, а не показываем ноль вместо него.
     """
     summary = summary or {}
     # Картинка хода до модели не доехала: шлюз не принял приложенное, и реплика
@@ -973,7 +1003,14 @@ def picture_cost_words(summary: dict) -> list:
         return ["🖼 картинка до модели не дошла — в счёт не пошла"]
     tokens = int(summary.get("picture_tokens") or 0)
     if tokens:
-        parts = [f"🖼 {numbers_word(tokens)} токенов на картинку"]
+        # И чей это счёт — рядом с числом: счёт вендора и наш — две разные мерки,
+        # и они расходятся не на проценты (см. _vendor_picture_tokens). Без имени
+        # счёта «токенов на картинку» читалось бы как одно и то же число.
+        # А у числа вендора ещё и «≈»: в нём сидит доля его шаблона разговора
+        vendor = summary.get("picture_count") == "vendor"
+        count = "по счёту вендора" if vendor else "наш счёт, вендор не сказал"
+        parts = [f"🖼 {'≈' if vendor else ''}"
+                 f"{numbers_word(tokens)} токенов на картинку — {count}"]
         share = summary.get("picture_money")
         if share:
             parts.append("меньше копейки из цены хода" if float(share) < 0.01
@@ -2057,6 +2094,12 @@ def _ask_body(body: str) -> dict:
             found = re.search(pattern, body)
             if found:
                 step[key] = _as_int(found.group(1))
+    # Цена картинки в числах вендора — обратно тому, что пишет ask_line:
+    # без неё у вернувшегося спектакля от картинки остался бы только наш счёт
+    # (см. vendor_picture_words, _vendor_picture_tokens)
+    found = re.search(rf"картинка по счёту вендора ≈({_GROUPED})", body)
+    if found:
+        step["tokens_picture"] = _as_int(found.group(1))
     found = re.search(r"конец: (\S+)", body)
     if found:
         step["finish_reason"] = found.group(1)
@@ -2485,7 +2528,11 @@ def _link_message_pictures(posts: list, turns: dict, by_words: dict,
         summary = turn.get("summary")
         if summary is None:
             continue
-        remember_picture_cost(summary, messages)
+        # И то же число вендора: оно считается заново по строкам запросов
+        # (см. _vendor_picture_tokens), чтобы вернувшийся спектакль не назвал
+        # своим счётом то, что шлюз назвал своим
+        remember_picture_cost(summary, messages,
+                              vendor=_vendor_picture_tokens(turn.get("steps")))
         # Тем же словарём, а не копией: сводка у реплики и у отчёта одна
         # и та же — иначе в ленте и в отчёте стояли бы разные числа
         post["turn"] = summary
@@ -2529,7 +2576,7 @@ def _pictures_spoken_of(message: dict, by_words: dict, by_name: dict) -> tuple:
 
 
 def remember_picture_cost(summary: dict, messages: list = None,
-                          dropped: bool = None) -> None:
+                          dropped: bool = None, vendor: int = None) -> None:
     """Вписать в сводку хода вес его картинок — и долю цены, что на них ушла.
 
     Числа об одном и том же ходе складываются в трёх местах: ход начался
@@ -2548,11 +2595,24 @@ def remember_picture_cost(summary: dict, messages: list = None,
     значило бы выставить ход дороже, чем он вышел. О том, что картинка была
     и не дошла, говорит отдельное слово, а не ноль (см. picture_cost_words).
 
+    vendor — цена картинки в числах самого вендора (см. _vendor_picture_tokens).
+    Он важнее нашего: этим числом вендор берёт деньги, а наш счёт по длине
+    данных — своя мерка, и расходится она с его числом в разы. Сказал — берём
+    его, и в сводке видно, чей это счёт (см. picture_cost_words); промолчал —
+    остаётся наш, и это тоже сказано словами.
+
     Признак не трогается, если о нём не спросили (dropped=None): у хода
     из ДАМПа он уже записан в сводке, и пересчёт по записи не должен его терять.
     """
     if messages is not None:
         summary.update(turn_picture_cost(messages))
+        summary["picture_count"] = "ours"
+    if vendor is not None:
+        # Число вендора стирает и «вес неизвестен»: о картинке теперь известно
+        # больше, чем по ней самой (см. picture_cost_words)
+        summary["picture_tokens"] = int(vendor)
+        summary["picture_unknown"] = 0
+        summary["picture_count"] = "vendor"
     if dropped is not None:
         summary["picture_dropped"] = bool(dropped)
     if summary.get("picture_dropped"):
@@ -3714,6 +3774,31 @@ def _input_tokens_total(steps) -> int:
     return total
 
 
+def _vendor_picture_tokens(steps) -> int:
+    """Сколько токенов весит картинка хода ПО СЧЁТУ ВЕНДОРА (None — молчит).
+
+    Число для каждого запроса уже посчитано там, где пришёл ответ (см.
+    cloud.picture_price) и записано в его строку (см. vendor_picture_words) —
+    здесь они собираются и усредняются по запросам с картинкой: картинка уезжает
+    в каждом запросе хода, а числа вендора у каждого свои.
+
+    Это его мерка, а не наша: на живой картинке 1600×1600 наш счёт по длине
+    даёт десятки тысяч токенов там, где вендор говорит сотни и тысячи (замерено),
+    а разница «с картинкой минус без неё» у пяти подопытных моделей вышла 5, 18,
+    66, 185 и 260 токенов там, где наш счёт говорит 150. У числа остаётся
+    погрешность его же шаблона разговора — поэтому рядом с ним и стоит «≈».
+
+    Ни один запрос цены не назвал — возвращается None: тогда в цену хода идёт
+    наш запасной счёт (см. sent_picture_tokens).
+    """
+    weights = [int(step["tokens_picture"]) for step in (steps or [])
+               if isinstance(step, dict) and step.get("kind") == "ask"
+               and step.get("tokens_picture")]
+    if not weights:
+        return None
+    return int(round(sum(weights) / len(weights)))
+
+
 def _as_number(value, fallback: int) -> int:
     """Число из отчёта, а если его там нет — запасное: ноль тоже число."""
     try:
@@ -3767,8 +3852,11 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     # теперь, когда цена уже известна, — и тем же счётом, что в начале хода
     # (см. remember_picture_cost, build_turn_report). И тут же видно, уехала ли
     # картинка вовсе: шлюз бывает не согласен с приложенным, и тогда её в счёте
-    # хода быть не должно (см. commit_shown_pictures)
-    remember_picture_cost(summary, dropped=pictures_dropped)
+    # хода быть не должно (см. commit_shown_pictures). А вес её к этому времени
+    # известен и по вендору: в его числах картинка слита с текстом, но текст
+    # мы считаем сами — отсюда и разница (см. _vendor_picture_tokens)
+    remember_picture_cost(summary, dropped=pictures_dropped,
+                          vendor=_vendor_picture_tokens(steps))
     turn["added"] = extra
 
 

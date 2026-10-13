@@ -1788,8 +1788,35 @@ BUGS = {
     ],
     "обрыв связи снова запоминают как слепоту модели": [
         ("aitheatre/cloud.py",
-         "        if code not in _PICTURE_REFUSAL_CODES:",
+         "        if code not in _PICTURE_REFUSAL_CODES and not model_refused_pictures(str(error)):",
          "        if False:"),
+    ],
+    "отказ шлюза словами снова не читается как ответ про картинки": [
+        ("aitheatre/cloud.py",
+         "        if code not in _PICTURE_REFUSAL_CODES and not model_refused_pictures(str(error)):",
+         "        if code not in _PICTURE_REFUSAL_CODES:"),
+    ],
+    "404 по картинке снова уносит ход с собой": [
+        ("aitheatre/cloud.py",
+         "                or (pictures_in(body) and picture_refused(str(error)))):",
+         "                or (False)):"),
+    ],
+    "цена картинки снова не считается в числах вендора": [
+        ("aitheatre/cloud.py",
+         "            if pictures_in(body):\n"
+         "                price = picture_price(model, notes.get(\"tokens_in\"),",
+         "            if False:\n"
+         "                price = picture_price(model, notes.get(\"tokens_in\"),"),
+    ],
+    "надбавка вендора снова не вычитается из цены картинки": [
+        ("aitheatre/cloud.py",
+         "    extra = text_overhead(model, tools)",
+         "    extra = None"),
+    ],
+    "надбавку вендора снова не запоминают по запросу без картинок": [
+        ("aitheatre/cloud.py",
+         "                remember_text_overhead(model, notes.get(\"tokens_in\"),",
+         "                pass  # remember_text_overhead(model, notes.get(\"tokens_in\"),"),
     ],
     "картинка снова едет отдельно от самой реплики": [
         ("aitheatre/show.py",
@@ -2333,8 +2360,34 @@ BUGS = {
     ],
     "к концу хода доля его картинки снова не считается": [
         ("aitheatre/show.py",
-         "    remember_picture_cost(summary, dropped=pictures_dropped)",
+         "    remember_picture_cost(summary, dropped=pictures_dropped,\n"
+         "                          vendor=_vendor_picture_tokens(steps))",
          "    pass"),
+    ],
+    "цена картинки снова берётся у нас, а не у вендора": [
+        ("aitheatre/show.py",
+         "    remember_picture_cost(summary, dropped=pictures_dropped,\n"
+         "                          vendor=_vendor_picture_tokens(steps))",
+         "    remember_picture_cost(summary, dropped=pictures_dropped)"),
+    ],
+    "цена картинки снова не переживает возврата из ДАМПа": [
+        ("aitheatre/show.py",
+         "        remember_picture_cost(summary, messages,\n"
+         "                              vendor=_vendor_picture_tokens(turn.get(\"steps\")))",
+         "        remember_picture_cost(summary, messages)"),
+    ],
+    "цена картинки запроса снова не попадает в его строку": [
+        ("aitheatre/show.py",
+         "    split = vendor_picture_words(step)\n"
+         "    if split:\n"
+         "        parts.append(split)",
+         "    pass"),
+    ],
+    "число вендора снова выдаётся за наш счёт": [
+        ("aitheatre/show.py",
+         "        vendor = summary.get(\"picture_count\") == \"vendor\"\n"
+         "        count = \"по счёту вендора\" if vendor else \"наш счёт, вендор не сказал\"",
+         "        count = \"наш счёт, вендор не сказал\""),
     ],
     "цена картинки снова не досчитывается у возвращённого хода": [
         ("aitheatre/show.py",
@@ -2348,7 +2401,8 @@ BUGS = {
     ],
     "отказанная шлюзом картинка снова входит в счёт хода": [
         ("aitheatre/show.py",
-         "    remember_picture_cost(summary, dropped=pictures_dropped)",
+         "    remember_picture_cost(summary, dropped=pictures_dropped,\n"
+         "                          vendor=_vendor_picture_tokens(steps))",
          "    remember_picture_cost(summary)"),
     ],
     "в пересчитанной записи неуехавшая картинка снова в счёте": [

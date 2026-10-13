@@ -2689,9 +2689,12 @@ HTML_TEMPLATE = """
 
         // Сколько из цены хода съела именно его картинка — сразу за ценой.
         // Уехавшее изображение занимает в запросе тысячи токенов, и по одной цене
-        // хода этого не видно (см. show.turn_picture_cost). Деньги — доля цены,
-        // а не отдельный счёт, поэтому «≈»; меньше копейки так и называется,
-        // потому что «0,00 ₽» читалось бы как «бесплатно» (см. show.picture_share_of_price).
+        // хода этого не видно (см. show.turn_picture_cost). Токены — по счёту
+        // вендора, когда он его назвал, а наш счёт по длине данных — запасной
+        // (см. show._vendor_picture_tokens), и чей это счёт — сказано тут же:
+        // две эти мерки расходятся в разы. Деньги — доля цены, а не отдельный
+        // счёт, поэтому «≈»; меньше копейки так и называется, потому что
+        // «0,00 ₽» читалось бы как «бесплатно» (см. show.picture_share_of_price).
         // Счёта нет — так и говорим: ноль вместо него был бы выдумкой
         function pictureCostText(info) {
             const data = info || {};
@@ -2702,7 +2705,9 @@ HTML_TEMPLATE = """
             if (data.picture_dropped) return '🖼 картинка до модели не дошла — в счёт не пошла';
             const tokens = Number(data.picture_tokens || 0);
             if (tokens) {
-                const parts = [`🖼 ${tokensText(tokens)} токенов на картинку`];
+                const vendor = data.picture_count === 'vendor';
+                const count = vendor ? 'по счёту вендора' : 'наш счёт, вендор не сказал';
+                const parts = [`🖼 ${vendor ? '≈' : ''}${tokensText(tokens)} токенов на картинку — ${count}`];
                 const share = Number(data.picture_money || 0);
                 if (share) {
                     parts.push(share < 0.01 ? 'меньше копейки из цены хода'
