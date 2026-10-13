@@ -2288,6 +2288,36 @@ BUGS = {
          '    if marks.get("words"):\n        return str(marks["words"])',
          '    if False:\n        return str(marks["words"])'),
     ],
+    "цена картинки снова считается ни по чему": [
+        ("aitheatre/show.py",
+         '        for url in (one or {}).get("travelled") or []:',
+         '        for url in []:'),
+    ],
+    "в сводке хода снова не видно, во что обошлась его картинка": [
+        ("aitheatre/show.py",
+         "    parts.extend(picture_cost_words(summary))",
+         "    parts.extend([])"),
+    ],
+    "доля цены снова берётся ни от чего": [
+        ("aitheatre/show.py",
+         "    return round(float(spent) * tokens * shots / total, 4)",
+         "    return round(float(spent) * 0 * shots / total, 4)"),
+    ],
+    "в ленте цена хода снова молчит о своей картинке": [
+        ("aitheatre/page.py",
+         "            const picture = pictureCostText(info);",
+         "            const picture = '';"),
+    ],
+    "уехавшая картинка снова возвращается из ДАМПа без следа о поездке": [
+        ("aitheatre/show.py",
+         "            travelled = _travelled_spoken_of(message, by_words)",
+         "            travelled = []"),
+    ],
+    "цена картинки снова не досчитывается у возвращённого хода": [
+        ("aitheatre/show.py",
+         "        summary.update(turn_picture_cost(messages))",
+         "        summary.update({})"),
+    ],
     "крохотная картинка снова показывается сама собой": [
         ("aitheatre/page.py",
          "        .post-attachments img, .prompt-pictures img { min-height: 64px; width: auto; }",

@@ -2645,6 +2645,28 @@ HTML_TEMPLATE = """
             return parts.join(' · ');
         }
 
+        // Сколько из цены хода съела именно его картинка — сразу за ценой.
+        // Уехавшее изображение занимает в запросе тысячи токенов, и по одной цене
+        // хода этого не видно (см. show.turn_picture_cost). Деньги — доля цены,
+        // а не отдельный счёт, поэтому «≈»; меньше копейки так и называется,
+        // потому что «0,00 ₽» читалось бы как «бесплатно» (см. show.picture_share_of_price).
+        // Счёта нет — так и говорим: ноль вместо него был бы выдумкой
+        function pictureCostText(info) {
+            const data = info || {};
+            const tokens = Number(data.picture_tokens || 0);
+            if (tokens) {
+                const parts = [`🖼 ${tokensText(tokens)} токенов на картинку`];
+                const share = Number(data.picture_money || 0);
+                if (share) {
+                    parts.push(share < 0.01 ? 'меньше копейки из цены хода'
+                                            : `≈${moneyText(share)} из цены хода`);
+                }
+                return parts.join(' · ');
+            }
+            if (Number(data.picture_unknown || 0)) return '🖼 вес картинки неизвестен';
+            return '';
+        }
+
         function spentLine(data) {
             const spent = Number((data && data.spent) || 0);
             const left = (data && data.balance !== null && data.balance !== undefined)
@@ -3035,6 +3057,10 @@ HTML_TEMPLATE = """
             // Цена хода — факт со счёта шлюза (разница остатков), а не оценка:
             // тарифов приложение не знает (см. settings.CLOUD_BALANCE_PATH)
             if (info.spent) parts.push(`💰 ${moneyText(info.spent)}`);
+            // А сразу за ценой — сколько из неё съела картинка хода: слова
+            // те же, что в записи спектакля (см. show.picture_cost_words)
+            const picture = pictureCostText(info);
+            if (picture) parts.push(picture);
             if (info.removed_messages) parts.push(`выброшено ${info.removed_messages}`);
             // Заминки названы по отдельности: отказ в поиске сверх лимита —
             // это ещё не беда (модель просто просила больше, чем ей дали),

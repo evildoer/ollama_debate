@@ -9413,6 +9413,67 @@ class TestWhatTheModelGot(PicturesTest):
         self.assertIn("приложено 8×8", show.travelled_picture_words(picture["url"]),
                       "ДАМП забыл, что было приложено")
 
+    def test_the_price_of_the_picture_is_our_own_count_and_its_share(self):
+        """Вес картинки — наш счёт, а деньги — доля цены хода, и видно их словами.
+
+        Вендор о цене картинки отдельно не говорит: в его числах она слита
+        с текстом запроса (см. sent_picture_tokens) — поэтому своё число так
+        и зовётся своим. Деньги считаются долей цены хода: картинка уезжает
+        в каждый запрос хода и место занимает в каждом (см. picture_share_of_price).
+        Считать не из чего — так и говорим молчанием, а не нолём: ноль читался
+        бы как «бесплатно» (см. picture_cost_words).
+        """
+        # Части идут тем же порядком, что в свёрнутой строке: сперва вес,
+        # а за ним — сколько из цены хода он занял (см. turn_summary_line)
+        words = " · ".join(show.picture_cost_words({"picture_tokens": 4200,
+                                                   "picture_money": 0.56}))
+        self.assertIn("токенов на картинку", words)
+        self.assertIn("из цены хода", words)
+        self.assertEqual(show.picture_cost_words({"picture_unknown": 1}),
+                         ["🖼 вес картинки неизвестен"])
+        self.assertEqual(show.picture_cost_words({"asks": 3}), [],
+                         "у хода без картинок нет и разговора о них")
+
+        self.assertEqual(
+            show.picture_share_of_price({"spent": 1.89, "tokens_in_total": 14158,
+                                         "asks": 3, "picture_tokens": 4200}),
+            round(1.89 * 4200 * 3 / 14158, 4))
+        self.assertIsNone(show.picture_share_of_price(
+            {"tokens_in_total": 14158, "picture_tokens": 4200}),
+            "цены хода нет — и доли от неё нет")
+        self.assertIsNone(show.picture_share_of_price(
+            {"spent": 1.89, "tokens_in_total": 14158}),
+            "картинок в ходу не было — делить нечего")
+
+    def test_the_price_of_the_picture_comes_back_with_the_record(self):
+        """У возвращённого хода цена его картинки встаёт на своё место.
+
+        Сводка хода пишется в ДАМП без счёта картинки: счёт живёт в памяти того
+        запуска (см. sent_picture_tokens), а в файле остаются картинка и слово
+        о её поездке. После перезапуска вес досчитывается по ним и лента
+        говорит то же, что говорила на ходу (см. _link_message_pictures,
+        turn_picture_cost): иначе от хода с картинкой оставалось бы одно
+        «уехала вместе с ней», а во что она обошлась — нигде.
+        """
+        picture, place, history = self._discussion()
+        show.post_image_pairs([picture])
+
+        _written, turn, post_id = self._through_the_dump(place, history, [picture])
+        summary = turn["summary"]
+
+        self.assertEqual(turn["messages"][0].get("travelled"), [picture["url"]],
+                         "уехавшая картинка вернулась без следа о поездке")
+        self.assertEqual(summary["picture_tokens"],
+                         show.sent_picture_tokens(picture["url"]),
+                         "вес картинки у возвращённого хода не тот, что уехал")
+        self.assertEqual(summary["picture_unknown"], 0)
+        self.assertIsNone(summary["picture_money"],
+                          "цены хода нет — и доли от неё быть не может")
+        # И самое главное — в шапке записи, по которой решают, читать ли дальше:
+        # она та же свёрнутая строка, что в ленте (см. turn_heading)
+        self.assertIn("токенов на картинку", show.turn_heading(post_id, turn),
+                      "в шапке записи не видно, во что обошлась её картинка")
+
     def test_a_picture_already_shown_comes_back_too(self):
         """Уже показанная картинка находится в записи по своему имени.
 
@@ -10628,9 +10689,13 @@ class TestPageScript(unittest.TestCase):
         больше всего: «осталось» считает браузер, и ошибка в нём видна только
         зрителю (см. turnClockText).
         """
+        # pictureCostText едет рядом со сводкой не для полноты: сводка зовёт его
+        # сама — у реплики с картинкой цена хода и вес картинки стоят рядом
+        # (см. page.turnSummaryParts)
         return self._run_page(("escapeHtml", "tokensText", "moneyText", "durationText",
                                "turnClockText", "turnSummaryParts", "spentLine",
-                               "linkWaiting", "linkLine", "textNeedsClamp"), *calls)
+                               "pictureCostText", "linkWaiting", "linkLine",
+                               "textNeedsClamp"), *calls)
 
     def _run_page(self, functions, *calls, constants=()):
         """Страница в node: сколько угодно её функций и чисел — в том виде,
@@ -10696,6 +10761,45 @@ class TestPageScript(unittest.TestCase):
         self.assertNotIn("заминок", mute,
                          "общего «заминок» больше нет: оно ни о чём не говорит")
 
+    def test_the_price_of_a_turn_says_what_its_picture_cost(self):
+        """Рядом с ценой хода — сколько из неё съела его картинка.
+
+        Уехавшее изображение стоит в запросе тысячи токенов, и по одной цене хода
+        этого не видно: «1,89 ₽» и «1,89 ₽» читаются одинаково (см.
+        show.turn_picture_cost). Деньги — доля цены, а не отдельный счёт, поэтому
+        «≈»; меньше копейки так и называется, потому что «0,00 ₽» читалось бы
+        как «бесплатно» (см. show.picture_share_of_price). А без цены хода доли
+        не сосчитать — тогда говорят только о токенах, а не о нуле рублей.
+
+        Проверяется настоящим node: это та же строка, что уедет в браузер
+        (см. page.pictureCostText).
+        """
+        out = self._run_in_node(
+            "turnSummaryParts({asks: 1, tokens: 10, spent: 1.89,"
+            " picture_tokens: 4200, picture_money: 0.56})",
+            "turnSummaryParts({asks: 1, tokens: 10, spent: 1.89,"
+            " picture_tokens: 1200, picture_money: 0.002})",
+            "turnSummaryParts({asks: 1, tokens: 10, picture_tokens: 4200})",
+            "turnSummaryParts({asks: 1, tokens: 10, picture_unknown: 1})",
+            "turnSummaryParts({asks: 1, tokens: 10})")
+        line = [" · ".join(one) for one in out]
+
+        self.assertIn("4\u00a0200 токенов на картинку", line[0])
+        self.assertIn("≈0,56 ₽ из цены хода", line[0])
+        self.assertIn("1,89 ₽", line[0], "цена хода должна остаться рядом со своей картинкой")
+        self.assertLess(line[0].index("1,89 ₽"), line[0].index("на картинку"),
+                        "вес картинки стоит не за ценой хода")
+        self.assertIn("меньше копейки из цены хода", line[1])
+        self.assertNotIn("0,00 ₽", line[1], "ноль вместо копейки читался бы как «бесплатно»")
+        self.assertIn("4\u00a0200 токенов на картинку", line[2])
+        self.assertNotIn("из цены хода", line[2],
+                         "цены хода нет — и доли от неё нет")
+        self.assertIn("вес картинки неизвестен", line[3])
+        self.assertNotIn("токенов на картинку", line[3],
+                         "картинка без счёта — не «ноль токенов»")
+        self.assertNotIn("картинк", line[4],
+                         "у реплики без картинок нет и разговора о них")
+
     def test_the_reply_section_of_a_cut_turn_says_what_happened(self):
         """Раздел «чем ход кончился» у оборванного хода не пустует.
 
@@ -10742,7 +10846,7 @@ class TestPageScript(unittest.TestCase):
         summary = {"asks": 3, "search_rounds": 5, "thought_steps": 2,
                    "tokens": 2254, "tokens_in_total": 14158, "seconds": 135,
                    "spent": 1.89, "removed_messages": 2, "search_refusals": 1,
-                   "silences": 1}
+                   "silences": 1, "picture_tokens": 4200, "picture_money": 0.56}
         out = self._run_in_node("turnSummaryParts(" + json.dumps(summary) + ")")
         # Пробел в разрядах у страницы неразрывный (toLocaleString), а у файла
         # обычный: читателю разницы нет, а сверке она мешала бы

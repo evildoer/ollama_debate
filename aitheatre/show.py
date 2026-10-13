@@ -577,6 +577,11 @@ def turn_summary_line(summary: dict) -> str:
         parts.append(f"⏱ {duration_words(summary['seconds'])}")
     if summary.get("spent"):
         parts.append(f"💰 {money(summary['spent'])}")
+    # А сразу за ценой — сколько из неё съела картинка: уехавшее стоит в запросе
+    # тысячи токенов, и по одной цене хода этого не видно (см. turn_picture_cost).
+    # Деньги — доля цены, поэтому и «≈» (см. picture_share_of_price); слова
+    # те же, что на странице (см. page.pictureCostText)
+    parts.extend(picture_cost_words(summary))
     if summary.get("removed_messages"):
         parts.append(f"выброшено {summary['removed_messages']}")
     if summary.get("search_refusals"):
@@ -825,19 +830,13 @@ def sent_picture_bytes(file: str):
     (спектакль вернулся из ДАМПа, и отправки в этом запуске ещё не было) —
     собирается тут же и запоминается, чтобы не пересобирать на каждую отрисовку.
     """
-    path = _upload_path(f"/uploads/{str(file or '').strip()}")
+    name = str(file or "").strip()
+    path = _upload_path(f"/uploads/{name}")
     if path is None:
         return b"", ""
-    key = (path.name, path.stat().st_size)
-    payload = _UPLOAD_IMAGES.get(key)
-    if payload is None:
-        raw = path.read_bytes()
-        kind = image_kind(raw)
-        if not kind:
-            return b"", ""
-        payload, _note = pictures.prepare(
-            f"data:{kind};base64," + base64.b64encode(raw).decode("ascii"))
-        _UPLOAD_IMAGES[key] = payload
+    payload = _sent_payload(f"/uploads/{path.name}")
+    if not payload:
+        return b"", ""
     head, marker, body = payload.partition(";base64,")
     if not marker:
         return b"", ""
@@ -870,12 +869,135 @@ def sent_picture_tokens(url: str):
     с текстом запроса. А длина её данных в том же запросе видна — по ней
     и считаем тем же счётом, каким приложение меряет историю (см.
     text.estimate_tokens), чтобы число сходилось с тем, чем резали.
+
+    У картинки, уехавшей в прежнем запуске (спектакль вернулся из ДАМПа),
+    этого счёта в памяти нет — но есть сама картинка: приведённое к обычному
+    размеру собирается тем же заготовлением, что и на отправке, и вес выходит
+    тот же (см. sent_picture_bytes). Считается это один раз и помнится.
     """
     key = _picture_key(url)
     marks = _UPLOAD_MARKS.get(key) if key else None
     if not marks:
         return None
+    if marks.get("tokens") is None:
+        _mark_sent_tokens(url, marks)
     return marks.get("tokens")
+
+
+def _mark_sent_tokens(url: str, marks: dict) -> None:
+    """Досчитать вес картинки, уехавшей в прежнем запуске, — и запомнить его.
+
+    Запись о поездке есть, а счёта при ней нет: он жил в памяти того процесса
+    (см. _UPLOAD_MARKS). Тогда картинка собирается заново тем же заготовлением
+    (см. post_image_pairs, pictures.prepare) и меряется тем же счётом — иначе
+    на вопрос «сколько она съела» у вернувшегося спектакля был бы только ноль.
+    """
+    if not _sent_payload(url):
+        return
+    key = _picture_key(url)
+    if not key:
+        return
+    marks["tokens"] = text.estimate_tokens(_UPLOAD_IMAGES[key])
+
+
+def _sent_payload(url: str) -> str:
+    """Данные картинки в том виде, в каком её получила модель (пусто — нет файла).
+
+    Это и есть тот адрес-данные, который уехал в запросе: он собирается
+    из самого файла тем же заготовлением, что и на отправке (см.
+    post_image_pairs) и помнится в _UPLOAD_IMAGES. Отдельно от
+    sent_picture_bytes затем, что там нужны сами байты для показа, а здесь —
+    целое сообщение, по которому меряется вес (см. _mark_sent_tokens).
+    """
+    path = _upload_path(url)
+    if path is None:
+        return ""
+    key = (path.name, path.stat().st_size)
+    payload = _UPLOAD_IMAGES.get(key)
+    if payload is None:
+        raw = path.read_bytes()
+        kind = image_kind(raw)
+        if not kind:
+            return ""
+        payload, _note = pictures.prepare(
+            f"data:{kind};base64," + base64.b64encode(raw).decode("ascii"))
+        _UPLOAD_IMAGES[key] = payload
+    return payload
+
+
+def turn_picture_cost(messages: list) -> dict:
+    """Сколько токенов съели картинки этого хода — и у скольких счёта нет.
+
+    Считаются по записи хода, а не по ленте: картинка стоит в тех самых
+    сообщениях, что уехали модели (см. _message_view, travelled). И только
+    уехавшая: показанной в запросе нет вовсе, и денег она не стоит — за неё
+    заплачено на прежнем ходу.
+
+    «Наш счёт» — потому что вендор о цене картинки отдельно не говорит
+    (см. sent_picture_tokens); у картинки из прежнего запуска счёта может
+    и не быть вовсе — тогда так и говорится, а не нолём.
+    """
+    urls = []
+    for one in messages or []:
+        for url in (one or {}).get("travelled") or []:
+            if url and url not in urls:
+                urls.append(url)
+    tokens, unknown = 0, 0
+    for url in urls:
+        cost = sent_picture_tokens(url)
+        if cost is None:
+            unknown += 1
+        else:
+            tokens += int(cost or 0)
+    return {"picture_tokens": tokens, "picture_unknown": unknown}
+
+
+def picture_cost_words(summary: dict) -> list:
+    """Сколько токенов и денег съела картинка хода — частями сводки.
+
+    Слова одни на страницу и на ДАМП (см. page.pictureCostText): сводка в файле
+    — это та же свёрнутая строка ленты (см. turn_summary_line).
+
+    Токены — наш счёт, а не вендорский: о цене картинки он отдельно не говорит
+    (см. sent_picture_tokens). Деньги — доля цены хода, а не отдельный счёт,
+    поэтому и «≈»; меньше копейки так и называется, потому что «0,00 ₽»
+    читалось бы как «бесплатно» (см. picture_share_of_price). Счёта нет —
+    так и говорим, а не показываем ноль вместо него.
+    """
+    summary = summary or {}
+    tokens = int(summary.get("picture_tokens") or 0)
+    if tokens:
+        parts = [f"🖼 {numbers_word(tokens)} токенов на картинку"]
+        share = summary.get("picture_money")
+        if share:
+            parts.append("меньше копейки из цены хода" if float(share) < 0.01
+                         else f"≈{money(share)} из цены хода")
+        return parts
+    if summary.get("picture_unknown"):
+        return ["🖼 вес картинки неизвестен"]
+    return []
+
+
+def picture_share_of_price(summary: dict):
+    """Сколько из цены хода пришлось на его картинки — наш счёт (None — не сосчитать).
+
+    Посчитано по месту картинок в запросах: столько-то их токенов против всего
+    ввода хода (см. _input_tokens_total) и столько же раз, сколько было
+    запросов, — картинка уезжает в каждый из них (см. remember_pictures_to_send).
+    Это оценка, а не счёт вендора: тарифов приложение не знает, а цену знает
+    (см. refresh_turn_report) — поэтому и говорится «≈» (page.pictureCostText).
+
+    Цены нет или ввод не мерен — нет и доли: ноль здесь читался бы как
+    «бесплатно», а про местный спектакль это правда, про облачный — нет.
+    """
+    summary = summary or {}
+    spent = summary.get("spent")
+    total = int(summary.get("tokens_in_total") or 0)
+    tokens = int(summary.get("picture_tokens") or 0)
+    if not spent or not total or not tokens:
+        return None
+    shots = max(1, int(summary.get("asks") or 1))
+    return round(float(spent) * tokens * shots / total, 4)
 
 
 def pictures_report() -> dict:
@@ -2325,7 +2447,8 @@ def _pictures_of_names(posts: list) -> dict:
     return _pictures_keyed(posts, attached_pictures(posts).get)
 
 
-def _link_message_pictures(turns: dict, by_words: dict, by_name: dict) -> None:
+def _link_message_pictures(posts: list, turns: dict, by_words: dict,
+                           by_name: dict) -> None:
     """Привязать к сообщениям записей те картинки, о которых сказано словами.
 
     Записи пишут о приложенном к сообщению одними словами — во что картинку
@@ -2333,13 +2456,57 @@ def _link_message_pictures(turns: dict, by_words: dict, by_name: dict) -> None:
     а сама картинка лежит в том же файле, связанная с репликой. Привязка
     восстанавливается по этим словам, и тогда в записи видно само изображение.
     Не нашлось — привязки не будет: показать чужую картинку хуже, чем никакой.
+
+    Заодно считается и вес уехавших картинок (см. turn_picture_cost): ход
+    о цене картинки записан в ДАМПе не был — он досчитывается по самим
+    картинкам, и в сводке у него то же место, что и на ходу (см.
+    turn_summary_line, postTurnHtml).
     """
-    for turn in (turns or {}).values():
-        for message in turn.get("messages") or []:
+    for post in posts or []:
+        turn = (turns or {}).get(int(post.get("id") or 0)) or {}
+        messages = turn.get("messages") or []
+        for message in messages:
+            # Уехавшая названа словом на поездку, и только она стоит денег:
+            # показанная в запросе не была (см. turn_picture_cost). След берётся
+            # по словам и тогда, когда картинки в записи уже есть: слово о поездке
+            # пишется и на нынешнем ходу, а счёта при нём может и не оказаться
+            travelled = _travelled_spoken_of(message, by_words)
+            if travelled:
+                message["travelled"] = travelled
             if message.get("pictures"):
                 continue
             for one in _pictures_spoken_of(message, by_words, by_name):
                 message.setdefault("pictures", []).append(one)
+        summary = turn.get("summary")
+        if summary is None:
+            continue
+        summary.update(turn_picture_cost(messages))
+        summary["picture_money"] = picture_share_of_price(summary)
+        # Тем же словарём, а не копией: сводка у реплики и у отчёта одна
+        # и та же — иначе в ленте и в отчёте стояли бы разные числа
+        post["turn"] = summary
+
+
+def _travel_words(message: dict) -> list:
+    """Слова, которыми сообщение говорит о поездке картинки (см. message_note).
+
+    Слово берётся то же, что оставила отправка, и через него находится сама
+    картинка: у картинки из ДАМПа прошлого запуска других следов не осталось.
+    """
+    told = _TRAVELLED_IN_NOTE_RE.search(str(message.get("note") or ""))
+    if not told:
+        return []
+    return [word.strip() for word in told.group("words").split("; ") if word.strip()]
+
+
+def _travelled_spoken_of(message: dict, by_words: dict) -> list:
+    """Адреса картинок, о поездке которых говорит само сообщение."""
+    urls = []
+    for words in _travel_words(message):
+        one = by_words.get(words)
+        if one and one["url"] not in urls:
+            urls.append(one["url"])
+    return urls
 
 
 def _pictures_spoken_of(message: dict, by_words: dict, by_name: dict) -> list:
@@ -2350,12 +2517,10 @@ def _pictures_spoken_of(message: dict, by_words: dict, by_name: dict) -> list:
     строка в самом тексте (см. images_already_shown_note).
     """
     found = []
-    told = _TRAVELLED_IN_NOTE_RE.search(str(message.get("note") or ""))
-    if told:
-        for words in told.group("words").split("; "):
-            one = by_words.get(words.strip())
-            if one:
-                found.append(dict(one))
+    for words in _travel_words(message):
+        one = by_words.get(words)
+        if one:
+            found.append(dict(one))
     for names in _SHOWN_IN_NOTE_RE.findall(str(message.get("content") or "")):
         for name in re.findall(r"«(.+?)»", names):
             one = by_name.get(name.strip())
@@ -2712,7 +2877,7 @@ def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dic
     # «уехали вместе с ней» и «приложена картинка «…»» — и ни одной
     # (см. _link_message_pictures). Делается это после разбора всех реплик:
     # слова о поездке у картинки известны только из всего спектакля
-    _link_message_pictures(turns, _picture_of_sent_words(posts),
+    _link_message_pictures(posts, turns, _picture_of_sent_words(posts),
                            _pictures_of_names(posts))
     return {
         "format": version,
@@ -3293,12 +3458,16 @@ def _message_view(msg: dict) -> dict:
         # по ней, и без неё от «уехала картинка» остаётся одно слово (см.
         # message_pictures, page.promptMessagesHtml)
         "pictures": message_pictures(msg),
+        # А это — только те из них, что и вправду уехали: по ним считается,
+        # сколько картинка съела токенов и денег (см. turn_picture_cost).
+        # Показанная тут не значится: в запросе её нет, и денег она не стоит
+        "travelled": [one["url"] for one in travelled_pictures(msg)],
         "note": message_note(msg),
     }
 
 
-def message_pictures(message: dict) -> list:
-    """Картинки этого сообщения — для записи хода и для страницы.
+def travelled_pictures(message: dict) -> list:
+    """Картинки, уехавшие этим сообщением, — по адресу их данных.
 
     В самом сообщении от уехавшей картинки остался только её адрес-данные (см.
     _format_history), а отчёт о ходе нужен людям: по этой картинке модель
@@ -3307,10 +3476,8 @@ def message_pictures(message: dict) -> list:
     адресу данных (см. _PAYLOAD_FILES) — чужая (из прежнего запуска, где
     адреса в памяти уже нет) остаётся без картинки, но со своими словами.
 
-    И уже показанная — тоже: ехать второй раз ей нечем, и в запросе вместо неё
-    стоит строка о себе (см. shown_pictures, images_already_shown_note), но
-    показать есть чем: по этой строке видно, о какой картинке речь, и её саму
-    надо видеть, а не только слова о ней (см. _format_history).
+    Отдельно от уже показанной не для красоты: уехавшая заняла в запросе своё
+    место и стоила денег, а показанной там нет вовсе (см. turn_picture_cost).
     """
     out = []
     for one in (message.get("images") or []):
@@ -3320,6 +3487,18 @@ def message_pictures(message: dict) -> list:
         view = attachment_view(told)
         if view:
             out.append(view)
+    return out
+
+
+def message_pictures(message: dict) -> list:
+    """Картинки этого сообщения — для записи хода и для страницы.
+
+    И уже показанная — тоже: ехать второй раз ей нечем, и в запросе вместо неё
+    стоит строка о себе (см. shown_pictures, images_already_shown_note), но
+    показать есть чем: по этой строке видно, о какой картинке речь, и её саму
+    надо видеть, а не только слова о ней (см. _format_history).
+    """
+    out = travelled_pictures(message)
     for one in (message.get("shown_pictures") or []):
         view = attachment_view(one)
         if view:
@@ -3391,6 +3570,11 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         # а не всегдашний (см. added_kinds)
         "added_kinds": added_kinds(extra),
         "search_rounds": int(search_count or 0),
+        # И картинки — своим числом: они стоят в запросе тысячи токенов, и по
+        # одной цене хода этого не видно (см. turn_picture_cost). Доля цены
+        # досчитывается к концу хода, когда цена уже известна
+        # (см. refresh_turn_report, picture_share_of_price)
+        **turn_picture_cost(messages + extra),
         "asks": sum(1 for step in steps if step.get("kind") == "ask"),
         # Заминки названы по отдельности, а не одним числом: отказ в поиске
         # сверх лимита — это ещё не беда (модель просто просила больше, чем ей
@@ -3547,6 +3731,9 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     # эту сумму видно в кабинете шлюза, и именно она объясняет, почему при
     # пяти поисках вход выглядит втрое больше первой истории (см. _input_tokens_total)
     summary["tokens_in_total"] = _input_tokens_total(steps)
+    # А это — доля цены, пришедшаяся на картинки хода: считается она только
+    # теперь, когда цена уже известна (см. picture_share_of_price, build_turn_report)
+    summary["picture_money"] = picture_share_of_price(summary)
     turn["added"] = extra
 
 
