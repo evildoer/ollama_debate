@@ -215,13 +215,24 @@ HTML_TEMPLATE = """
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
         /* Выбор шрифта — списком, а не перебором по кнопке: шрифтов два десятка,
-           и щёлкать по кругу до нужного — не выбор, а наказание. Подпись и сам
-           список стоят в строке, как кнопки рядом (см. footer), а имена в списке
-           те же, что в FONT_CHOICES: подпись берётся из одного места с текстом */
-        .font-pick { font-family: var(--theatre-font); font-size: 14px; letter-spacing: 1px; text-transform: uppercase; }
-        select.font-pick { padding: 11px 12px; border: 1px solid #000000; background: #ffffff; color: #000000;
-                           font-size: 14px; font-family: inherit; letter-spacing: 1px; cursor: pointer;
-                           margin-right: 15px; }
+           и щёлкать по кругу до нужного — не выбор, а наказание. Стоит он внизу
+           САЙДБАРА, а не в подвале страницы, и это не про красоту: сайдбар
+           приклеен к верху и виден всегда, поэтому смену шрифта видно там же,
+           где стоит выбор, — а из подвала страницы на текст не посмотришь, туда
+           уходят и смотрят на пустоту. Блок прилипает к низу сайдбара
+           (position: sticky): список участников и правила бывают длинными,
+           и выбор шрифта иначе уезжал бы под них вместе с прокруткой */
+        .font-pick-block { position: sticky; bottom: 0; background: inherit;
+                           border-top: 1px solid #000000; border-bottom: none;
+                           margin-bottom: 0; padding-bottom: 24px; }
+        .font-pick { display: block; font-family: var(--theatre-font); font-size: 13px;
+                     letter-spacing: 2px; text-transform: uppercase; color: #000000;
+                     margin-bottom: 8px; }
+        select.font-pick { width: 100%; padding: 10px 12px; border: 1px solid #000000; background: #ffffff;
+                           color: #000000; font-size: 14px; font-family: inherit; letter-spacing: 1px;
+                           cursor: pointer; }
+        /* Второй подписи нужен отступ от первого списка: блок — столбик, а не строка */
+        select.font-pick + .font-pick { margin-top: 18px; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
         .sidebar-title { font-family: var(--theatre-head-font); font-size: 14px; font-weight: 700; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
         /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
@@ -579,7 +590,8 @@ HTML_TEMPLATE = """
         body.dark .header h1, body.dark .card h2, body.dark .header-subtitle, body.dark .header-date,
         body.dark .sidebar-title, body.dark .post-author, body.dark .post-text, body.dark .post-model,
         body.dark .post-time, body.dark .header-topic, body.dark .search-info, body.dark .footer,
-        body.dark .panel-heading .name, body.dark .status-bar, body.dark .btn { color: #e8e8e8; }
+        body.dark .panel-heading .name, body.dark .status-bar, body.dark .btn,
+        body.dark .font-pick { color: #e8e8e8; }
         body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
         body.dark .footer, body.dark .sidebar, body.dark .sidebar-section,
         body.dark .search-info, body.dark .post-header, body.dark .participant-card,
@@ -831,10 +843,6 @@ HTML_TEMPLATE = """
                 <div class="footer">
                     <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                     <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
-                    <label class="font-pick" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
-                    <select class="font-pick" id="fontPick" onchange="pickFont(this.value)" title="Шрифт текста: выберите из списка. Выбор помнится, как тема"></select>
-                    <label class="font-pick" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
-                    <select class="font-pick" id="headPick" onchange="pickHeads(this.value)" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится"></select>
                     <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
                 </div>
             </div>
@@ -860,6 +868,16 @@ HTML_TEMPLATE = """
             <div class="sidebar-section">
                 <div class="sidebar-title">Инструкции от руководства</div>
                 <div id="moderatorInstructionsDisplay" style="color:#000000;font-size:12px;line-height:1.5;font-weight:bold;"></div>
+            </div>
+            <!-- Шрифт выбирается здесь, внизу сайдбара, а не в подвале страницы:
+                 сайдбар виден всегда, и смена шрифта видна там же, где выбор
+                 (см. .font-pick-block). Списки заполняются из FONT_CHOICES -->
+            <div class="sidebar-section font-pick-block">
+                <div class="sidebar-title">Шрифт</div>
+                <label class="font-pick" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
+                <select class="font-pick" id="fontPick" onchange="pickFont(this.value)" title="Шрифт текста: выберите из списка. Выбор помнится, как тема"></select>
+                <label class="font-pick" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
+                <select class="font-pick" id="headPick" onchange="pickHeads(this.value)" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится"></select>
             </div>
         </div>
     </div>

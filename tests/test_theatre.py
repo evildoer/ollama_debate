@@ -4364,6 +4364,20 @@ class TestRoleMarks(unittest.TestCase):
                       "в списке стоят имена не из FONT_CHOICES")
         self.assertIn("+ escapeHtml(one.name) +", self.page,
                       "в списке вместо имени шрифта что-то другое")
+        # Выбор стоит внизу САЙДБАРА, а не в подвале страницы: сайдбар приклеен
+        # к верху и виден всегда, поэтому смену шрифта видно там же, где выбор, —
+        # из подвала страницы на текст не посмотришь, туда уходят и смотрят
+        # на пустоту (см. .font-pick-block)
+        self.assertLess(self.page.index('<div class="sidebar">'),
+                        self.page.index('id="fontPick"'),
+                        "выбор шрифта снова уехал в подвал страницы")
+        self.assertLess(self.page.index('id="fontPick"'),
+                        self.page.index('id="avatarModal"'),
+                        "выбор шрифта стоит не в сайдбаре")
+        self.assertIn('<div class="sidebar-section font-pick-block">', self.page,
+                      "блок шрифтов перестал быть разделом сайдбара")
+        self.assertIn(".font-pick-block { position: sticky; bottom: 0;", self.page,
+                      "блок шрифтов уезжает под список участников вместе с прокруткой")
         # Выбор ставит переменную на тело страницы, а берут её сразу все правила
         # (см. --theatre-font): подменять шрифт в каждом месте было бы правкой
         # в двадцати, и первая же новая кнопка осталась бы при прежнем

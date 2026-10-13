@@ -754,6 +754,16 @@ BUGS = {
          "                    '<option value=\"' + at + '\">' + escapeHtml(one.name) + '</option>').join('');",
          "                    '<option value="' + at + '">шрифт</option>').join('');"),
     ],
+    "блок шрифтов снова перестал быть разделом сайдбара": [
+        ("aitheatre/page.py",
+         '            <div class="sidebar-section font-pick-block">',
+         '            <div class="sidebar-section">'),
+    ],
+    "блок шрифтов снова уезжает под прокрутку сайдбара": [
+        ("aitheatre/page.py",
+         "        .font-pick-block { position: sticky; bottom: 0; background: inherit;",
+         "        .font-pick-block { position: static; bottom: 0; background: inherit;"),
+    ],
     "выбор заголовков снова не возвращается": [
         ("aitheatre/page.py",
          "            FONT_STATE.heads = atChoice(heads);",
