@@ -3203,7 +3203,25 @@ HTML_TEMPLATE = """
         function promptPicturesHtml(pictures) {
             if (!pictures || !pictures.length) return '';
             return '<div class="prompt-pictures">'
-                + pictures.map(pictureBlockHtml).join('') + '</div>';
+                + pictures.map(promptPictureBlockHtml).join('') + '</div>';
+        }
+
+        // Картинка в записи хода — та самая, что уехала модели: превью — из
+        // приведённого к обычному размеру, по клику — тоже оно, целиком.
+        // Раньше тут показывался режиссёрский файл, и по отчёту нельзя было
+        // сказать, что именно видела модель (см. show.sent_picture_url).
+        // Оригинал — рядом ссылкой: он тот же, да не тот, что уехал
+        function promptPictureBlockHtml(one) {
+            const sent = one.sent_url || one.url;
+            return '<span class="picture-block">'
+                + `<img src="${escapeHtml(sent)}" title="${escapeHtml(one.name)}"`
+                + ` onclick="showAvatarFull('${sent}', true)">`
+                + (one.sent ? `<span class="picture-sent">${escapeHtml(one.sent)}</span>` : '')
+                + (one.own ? `<span class="picture-own">приложено ${escapeHtml(one.own)} · `
+                    + `<a href="${escapeHtml(one.url)}" target="_blank"`
+                    + ' rel="noopener" onclick="event.stopPropagation()">открыть оригинал</a>'
+                    + '</span>' : '')
+                + '</span>';
         }
 
         // Приложенное к реплике — прямо над текстом: без этого непонятно, о чём

@@ -9142,6 +9142,43 @@ class TestWhatTheModelGot(PicturesTest):
         self.assertIn(place["display_name"], after["sent"],
                       "в отчёте не сказано, кому уехала")
 
+    def test_what_the_model_got_is_served_by_its_own_address(self):
+        """В записи хода показывается то самое изображение, что уехало модели.
+
+        Не режиссёрский файл: модель получила приведённое к обычному размеру
+        (см. show.sent_picture_bytes, sent_picture_url). Слова «уехало 64×64»
+        без самой картинки оставались словами о том, чего не видно.
+        """
+        picture = self.attach_tiny()
+        place = plain_participant(self.session)
+        show.post_image_pairs([picture])
+        self.show_to(picture["url"], place)
+
+        shown = show.attachment_view(picture)
+        self.assertTrue(shown["sent_url"], "у уехавшей картинки нет своего адреса")
+
+        raw, kind = show.sent_picture_bytes(picture["url"].rsplit("/", 1)[-1])
+        marks = pictures.picture_marks(raw)
+
+        self.assertEqual(kind, "image/png")
+        self.assertEqual((marks["width"], marks["height"]), (64, 64),
+                         "отдаётся не то, что получила модель, а файл на диске")
+        self.assertIn("64×64", shown["sent"], "слова и картинка разошлись")
+
+    def test_the_route_gives_what_the_model_got(self):
+        """Тот же адрес отдаёт картинку браузеру — и отказывает, если её нет."""
+        picture = self.attach_tiny()
+        show.post_image_pairs([picture])
+        client = web_app.app.test_client()
+
+        answer = client.get(show.sent_picture_url(picture["url"]))
+
+        self.assertEqual(answer.status_code, 200)
+        self.assertEqual(answer.mimetype, "image/png")
+        self.assertEqual(pictures.picture_marks(answer.data)["width"], 64)
+        self.assertEqual(client.get("/api/picture/нет-такого.png/sent").status_code, 404)
+        self.assertEqual(client.get("/api/picture/../../etc/passwd/sent").status_code, 404)
+
     def test_the_pictures_that_went_are_counted(self):
         """Счёт картинок: показы по моделям, а вес — по длине уехавших данных.
 
@@ -10595,28 +10632,36 @@ class TestPageScript(unittest.TestCase):
                          "подпись нарисована там, где сервер её не присылал")
 
     def test_the_turn_report_shows_the_picture_to_the_reader(self):
-        """Картинка хода рисуется превью, с подписью и ссылкой на оригинал.
+        """Картинка хода — превью того самого файла, что получила модель.
 
         В записи хода картинка едет адресом и словами о ней (см.
         show.message_pictures), а показывает её страница — и уедет в браузер
-        такой, какою написана (см. promptPicturesHtml).
+        такой, какою написана (см. promptPicturesHtml). Превью и разворот
+        по клику — из адреса уехавшего (sent_url), а не из режиссёрского файла:
+        в отчёте надо видеть то, на что модель смотрела.
         """
         out = self._run_page(
-            ("escapeHtml", "tokensText", "pictureBlockHtml", "promptPicturesHtml",
-             "promptMessagesHtml"),
+            ("escapeHtml", "tokensText", "pictureBlockHtml", "promptPictureBlockHtml",
+             "promptPicturesHtml", "promptMessagesHtml"),
             "promptMessagesHtml([{role: 'user', name: 'живой', tokens: 10,"
             " content: 'Смотрите', note: 'приложено картинок: 1',"
             " pictures: [{name: 'значок.png', url: '/uploads/a.png',"
+            " sent_url: '/api/picture/a.png/sent',"
             " own: 'png 8×8 · 74 Б',"
             " sent: '🖼 уехало моделям (Харита): png 64×64 · 180 Б'}]}])",
             "promptMessagesHtml([{role: 'user', name: 'живой', tokens: 10,"
             " content: 'Без картинки'}])",
             constants=("ROLE_WORDS",))
 
-        self.assertIn("/uploads/a.png", out[0], "картинки хода в отчёте нет")
+        self.assertIn('src="/api/picture/a.png/sent"', out[0],
+                      "в отчёте показан не тот файл, что получила модель")
+        self.assertIn("showAvatarFull('/api/picture/a.png/sent'", out[0],
+                      "по клику разворачивается не то, что получила модель")
         self.assertIn("png 8×8", out[0], "не сказано, что это за картинка")
         self.assertIn("png 64×64", out[0], "не сказано, какою она уехала")
         self.assertIn("Харита", out[0], "не сказано, какой модели уехало")
+        self.assertIn('href="/uploads/a.png"', out[0],
+                      "оригинал из отчёта не открыть")
         self.assertIn('target="_blank"', out[0],
                       "оригинал из отчёта не открыть новым окном")
         self.assertNotIn("prompt-pictures", out[1],

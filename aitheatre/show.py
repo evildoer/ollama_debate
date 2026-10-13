@@ -756,6 +756,9 @@ def attachment_view(one: dict) -> dict:
     sent = sent_picture_words(url)
     if sent:
         view["sent"] = sent
+        # И адрес той же картинки в том виде, в каком её получила модель:
+        # в записи хода показывается именно она (см. sent_picture_url)
+        view["sent_url"] = sent_picture_url(url)
     return view
 
 
@@ -798,6 +801,51 @@ def picture_travellers(url: str) -> list:
         if name and model and url in shown.get(model, set()):
             who.append(name)
     return who
+
+
+def sent_picture_url(url: str) -> str:
+    """Адрес той же картинки в том виде, в каком её получила модель (пусто — нет файла).
+
+    Имя файла то же, а вид определяет маршрут (см. web.sent_picture): отдельного
+    файла на диске у приведённого к обычному размеру нет — оно собирается
+    на отправке (см. post_image_pairs).
+    """
+    key = _picture_key(url)
+    return f"/api/picture/{key[0]}/sent" if key else ""
+
+
+def sent_picture_bytes(file: str):
+    """Данные картинки в том виде, в каком её получила модель, — и её вид (пусто, пусто).
+
+    Спрашивают это затем, чтобы показать в записи хода то самое изображение,
+    на которое модель смотрела (см. attachment_view, sent_url): слова
+    «уехало 64×64 · 180 Б» без самой картинки — это слова о том, чего не видно.
+
+    Картинка уже собранная — из памяти (см. _UPLOAD_IMAGES); не собранная
+    (спектакль вернулся из ДАМПа, и отправки в этом запуске ещё не было) —
+    собирается тут же и запоминается, чтобы не пересобирать на каждую отрисовку.
+    """
+    path = _upload_path(f"/uploads/{str(file or '').strip()}")
+    if path is None:
+        return b"", ""
+    key = (path.name, path.stat().st_size)
+    payload = _UPLOAD_IMAGES.get(key)
+    if payload is None:
+        raw = path.read_bytes()
+        kind = image_kind(raw)
+        if not kind:
+            return b"", ""
+        payload, _note = pictures.prepare(
+            f"data:{kind};base64," + base64.b64encode(raw).decode("ascii"))
+        _UPLOAD_IMAGES[key] = payload
+    head, marker, body = payload.partition(";base64,")
+    if not marker:
+        return b"", ""
+    kind = head.split(":", 1)[-1] or "image/png"
+    try:
+        return base64.b64decode(body), kind
+    except Exception:
+        return b"", ""
 
 
 def sent_picture_words(url: str) -> str:

@@ -2191,6 +2191,16 @@ BUGS = {
          '        told = _PAYLOAD_FILES.get(one) if isinstance(one, str) else None',
          '        told = None if isinstance(one, str) else None'),
     ],
+    "в отчёте снова показывается режиссёрский файл вместо уехавшего": [
+        ("aitheatre/page.py",
+         '            const sent = one.sent_url || one.url;',
+         '            const sent = one.url;'),
+    ],
+    "уехавшее снова остаётся словами без самой картинки": [
+        ("aitheatre/show.py",
+         '        view["sent_url"] = sent_picture_url(url)',
+         '        view["sent_url"] = ""'),
+    ],
     "картинка хода снова не рисуется на странице": [
         ("aitheatre/page.py",
          '                + promptPicturesHtml(m.pictures)',

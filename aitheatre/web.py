@@ -14,8 +14,8 @@ import threading
 import time
 import webbrowser
 
-from flask import (Flask, jsonify, make_response, render_template_string, request,
-                   send_from_directory)
+from flask import (Flask, Response, jsonify, make_response, render_template_string,
+                   request, send_from_directory)
 from flask_socketio import SocketIO, emit
 
 from . import avatars
@@ -286,6 +286,23 @@ def serve_avatar(filename):
 def serve_upload(filename):
     """Приложенная к реплике картинка: её видно и в ленте, и в превью набора."""
     return send_from_directory(settings.UPLOAD_DIR, filename)
+
+
+@app.route('/api/picture/<path:filename>/sent')
+def sent_picture(filename):
+    """Та же картинка в том виде, в каком её получила модель.
+
+    Отдельным адресом, а не вторым файлом на диске: режиссёрский оригинал
+    остаётся в папке экземпляра один (см. show.save_upload), а приведённое
+    к обычному размеру собирается на отправке и помнится в памяти
+    (см. show.post_image_pairs). Смотрит сюда запись хода: по ней видно,
+    на что именно смотрела модель, — и «уехало 64×64» без самой картинки
+    оставалось словами о том, чего не видно.
+    """
+    raw, kind = show.sent_picture_bytes(filename)
+    if not raw:
+        return jsonify({"success": False, "error": "картинки нет"}), 404
+    return Response(raw, mimetype=kind)
 
 
 @app.route('/api/upload', methods=['POST'])
