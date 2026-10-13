@@ -692,10 +692,15 @@ BUGS = {
          "                                     FONT_CHOICES[at].name);",
          "                                     FONT_CHOICES[FONT_STATE[what]].stack);"),
     ],
-    "в списке шрифтов снова не видно выбранного": [
+    "на кнопке списка шрифтов снова не видно выбранного": [
         ("aitheatre/page.py",
-         "            if (pick) pick.value = String(FONT_STATE[what]);",
-         "            if (false) pick.value = String(FONT_STATE[what]);"),
+         "                btn.textContent = chosen.name;",
+         "                btn.textContent = 'шрифт';"),
+    ],
+    "в списке шрифтов снова не отмечен выбранный": [
+        ("aitheatre/page.py",
+         "                one.classList.toggle('current', Number(one.dataset.at) === FONT_STATE[what]);",
+         "                one.classList.toggle('current', false);"),
     ],
     "выбор шрифта снова ни на что не влияет": [
         ("aitheatre/page.py",
@@ -744,15 +749,47 @@ BUGS = {
          "            {name: 'Onest', stack: \"'Onest', Georgia, 'Times New Roman', Times, serif\"},",
          "            {name: 'Онест', stack: \"'Onest', Georgia, 'Times New Roman', Times, serif\"},"),
     ],
-    "щелчок в списке шрифтов снова ничего не выбирает": [
+    "щелчок по строке списка шрифтов снова ничего не выбирает": [
         ("aitheatre/page.py",
-         "        function pickFont(value) { choose('font', Number(value)); }",
-         "        function pickFont(value) { }"),
+         "                    if (row) choose(what, Number(row.dataset.at));",
+         "                    if (false) choose(what, Number(row.dataset.at));"),
+    ],
+    "строки списка шрифтов снова набраны системным шрифтом": [
+        ("aitheatre/page.py",
+         "                    one.style.fontFamily = FONT_CHOICES[Number(one.dataset.at)].stack;",
+         "                    one.style.fontFamily = '';"),
+    ],
+    "рядом с именем шрифта снова нет образца строки": [
+        ("aitheatre/page.py",
+         "                    '<span class=\"font-pick-sample\">Когда ты зайдёшь</span></button>').join('');",
+         "                    '</button>').join('');"),
+    ],
+    "список шрифтов снова не закрывается щелчком мимо": [
+        ("aitheatre/page.py",
+         "            if (!(event.target.closest && event.target.closest('.font-pick-wrap'))) closePicks();",
+         "            if (false) closePicks();"),
+    ],
+    "тёмная сцена снова не перекрашивает список шрифтов": [
+        ("aitheatre/page.py",
+         "            background: #1c1c1c; border-color: #5a5a5a; }",
+         "            background: #ffffff; border-color: #000000; }"),
+    ],
+    "выход из театра снова уехал из сайдбара в подвал страницы": [
+        ("aitheatre/page.py",
+         '                <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button>',
+         '                <div class="footer"><button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button></div>'),
+    ],
+    "выход снова ищет кнопку в подвале страницы": [
+        ("aitheatre/page.py",
+         "                // СРАЗУ скрываем кнопку выхода — чтобы нельзя было нажать повторно\n"
+         "                const exitBtn = document.getElementById('leaveBtn');",
+         "                // СРАЗУ скрываем кнопку выхода — чтобы нельзя было нажать повторно\n"
+         "                const exitBtn = document.querySelector('.footer .btn');"),
     ],
     "список шрифтов снова заполняется не именами": [
         ("aitheatre/page.py",
-         "                    '<option value=\"' + at + '\">' + escapeHtml(one.name) + '</option>').join('');",
-         "                    '<option value="' + at + '">шрифт</option>').join('');"),
+         "                    escapeHtml(one.name) +",
+         "                    'шрифт' +"),
     ],
     "блок шрифтов снова перестал быть разделом сайдбара": [
         ("aitheatre/page.py",

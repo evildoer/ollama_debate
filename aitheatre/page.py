@@ -67,6 +67,14 @@ HTML_TEMPLATE = """
             src: url('/static/fonts/marmelad.ttf') format('truetype');
             font-display: swap;
         }
+        /* Adigiana 2 — округлый рисованный шрифт с кириллицей; в самом файле вместо
+           имени автора стоит заглушка «© (your company)», то есть условий автор
+           не назвал, — лицензии рядом с ним нет (см. «Лицензию» в README) */
+        @font-face {
+            font-family: 'Adigiana 2';
+            src: url('/static/fonts/adigiana-2.ttf') format('truetype');
+            font-display: swap;
+        }
         /* Гротески с кириллицей — от мягкого Comfortaa до строгого Noto Sans */
         @font-face {
             font-family: 'Comfortaa';
@@ -214,25 +222,42 @@ HTML_TEMPLATE = """
         .btn-secondary { background: #ffffff; color: #000000; }
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
-        /* Выбор шрифта — списком, а не перебором по кнопке: шрифтов два десятка,
-           и щёлкать по кругу до нужного — не выбор, а наказание. Стоит он внизу
-           САЙДБАРА, а не в подвале страницы, и это не про красоту: сайдбар
-           приклеен к верху и виден всегда, поэтому смену шрифта видно там же,
-           где стоит выбор, — а из подвала страницы на текст не посмотришь, туда
-           уходят и смотрят на пустоту. Блок прилипает к низу сайдбара
-           (position: sticky): список участников и правила бывают длинными,
-           и выбор шрифта иначе уезжал бы под них вместе с прокруткой */
+        /* Всё управление театром — шрифт текста, шрифт заголовков, цвет ролей,
+           тёмная сцена и выход — стоит внизу САЙДБАРА, а не в подвале страницы,
+           и это не про красоту: сайдбар приклеен к верху и виден всегда, поэтому
+           смену шрифта видно там же, где выбор, — а из подвала страницы на текст
+           не посмотришь, туда уходят и смотрят на пустоту. Блок прилипает к низу
+           сайдбара (position: sticky): список участников и правила бывают
+           длинными, и управление иначе уезжало бы под них вместе с прокруткой */
         .font-pick-block { position: sticky; bottom: 0; background: inherit;
                            border-top: 1px solid #000000; border-bottom: none;
                            margin-bottom: 0; padding-bottom: 24px; }
-        .font-pick { display: block; font-family: var(--theatre-font); font-size: 13px;
-                     letter-spacing: 2px; text-transform: uppercase; color: #000000;
-                     margin-bottom: 8px; }
-        select.font-pick { width: 100%; padding: 10px 12px; border: 1px solid #000000; background: #ffffff;
-                           color: #000000; font-size: 14px; font-family: inherit; letter-spacing: 1px;
-                           cursor: pointer; }
-        /* Второй подписи нужен отступ от первого списка: блок — столбик, а не строка */
-        select.font-pick + .font-pick { margin-top: 18px; }
+        /* Кнопки и подписи в сайдбаре стоят столбиком: он узкий, и в строку
+           они не влезут */
+        .font-pick-block .btn { display: block; width: 100%; margin: 0 0 10px 0;
+                                padding: 11px 12px; font-size: 14px; text-align: center; }
+        .font-pick-label { display: block; font-family: var(--theatre-font); font-size: 13px;
+                           letter-spacing: 2px; text-transform: uppercase; color: #000000;
+                           margin-bottom: 8px; }
+        /* Список шрифтов — свой, а не родной <select>: в родном списке браузера имя
+           нарисовано системным шрифтом, и выбирать там приходится по названию,
+           а не глазами. Здесь каждая строка набрана тем шрифтом, который
+           предлагает, и рядом идёт образец (см. fillPicks) */
+        .font-pick-wrap { position: relative; margin-bottom: 18px; }
+        .font-pick-btn { display: block; width: 100%; padding: 11px 12px; text-align: left;
+                         border: 1px solid #000000; background: #ffffff; color: #000000;
+                         font-size: 16px; cursor: pointer; }
+        .font-pick-btn:after { content: ' ▾'; color: #888888; }
+        .font-pick-list { position: absolute; left: 0; right: 0; bottom: 100%; z-index: 20;
+                          max-height: 300px; overflow-y: auto; background: #ffffff;
+                          border: 1px solid #000000; }
+        .font-pick-list[hidden] { display: none; }
+        .font-pick-row { display: block; width: 100%; padding: 7px 10px; text-align: left;
+                         border: none; border-bottom: 1px solid #eeeeee; background: #ffffff;
+                         color: #000000; font-size: 17px; line-height: 1.2; cursor: pointer; }
+        .font-pick-row:hover, .font-pick-row.current { background: #f0f0f0; }
+        .font-pick-row.current:after { content: ' ✓'; }
+        .font-pick-sample { display: block; font-size: 12px; color: #888888; margin-top: 2px; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
         .sidebar-title { font-family: var(--theatre-head-font); font-size: 14px; font-weight: 700; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
         /* Разделы режиссёрского пульта: та же типографика, что у блоков сайдбара */
@@ -563,7 +588,6 @@ HTML_TEMPLATE = """
         body.dark .emoji-menu { background: #101010; border-color: #3a3a3a; color: #e8e8e8; }
         body.dark .emoji-choice { background: #141414; border-color: #3a3a3a; }
         body.dark .emoji-choice.current { background: #242424; }
-        .footer { text-align: center; color: #000000; padding: 30px 0; font-size: 14px; border-top: 1px solid #000000; margin-top: 40px; font-style: italic; letter-spacing: 1px; }
         /* Нулевой раздел (готовность): метка о проблемах видна и в свёрнутом виде */
         .ready-badge { margin-left: 8px; font-size: 11px; font-weight: bold; letter-spacing: 1px; color: #b00020; }
         /* Пояснение вместо поля реплики, когда не ваша очередь: блок остаётся на месте */
@@ -582,18 +606,22 @@ HTML_TEMPLATE = """
         /* Один холст: фон крупных блоков совпадает с фоном страницы — точно так же, как
            в светлой теме, где всё белое и разделяют только линии. Стоит задать им другой
            фон — и блоки выглядят «отрезанными» по бокам, а текст упирается в край плашки */
-        body.dark .header, body.dark .card, body.dark .post, body.dark .footer,
+        body.dark .header, body.dark .card, body.dark .post,
         body.dark .sidebar, body.dark .participant-card { background: #0d0d0d; border-color: #3a3a3a; }
         /* Плашки с внутренними отступами подсветить можно: текст в них не упирается в край */
         body.dark .status-bar { background: #171717; border-left-color: #e8e8e8; }
         body.dark .modal-content { border-color: #3a3a3a; }
         body.dark .header h1, body.dark .card h2, body.dark .header-subtitle, body.dark .header-date,
         body.dark .sidebar-title, body.dark .post-author, body.dark .post-text, body.dark .post-model,
-        body.dark .post-time, body.dark .header-topic, body.dark .search-info, body.dark .footer,
+        body.dark .post-time, body.dark .header-topic, body.dark .search-info,
         body.dark .panel-heading .name, body.dark .status-bar, body.dark .btn,
-        body.dark .font-pick { color: #e8e8e8; }
+        body.dark .font-pick-label, body.dark .font-pick-btn, body.dark .font-pick-row { color: #e8e8e8; }
+        body.dark .font-pick-btn, body.dark .font-pick-list, body.dark .font-pick-row {
+            background: #1c1c1c; border-color: #5a5a5a; }
+        body.dark .font-pick-row:hover, body.dark .font-pick-row.current { background: #262626; }
+        body.dark .font-pick-sample { color: #7d7d7d; }
         body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
-        body.dark .footer, body.dark .sidebar, body.dark .sidebar-section,
+        body.dark .sidebar, body.dark .sidebar-section,
         body.dark .search-info, body.dark .post-header, body.dark .participant-card,
         body.dark .post-avatar img { border-color: #3a3a3a; }
         body.dark input, body.dark textarea, body.dark select { background: #1c1c1c !important; color: #e8e8e8 !important; border-color: #5a5a5a !important; }
@@ -840,11 +868,6 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
                 <div id="posts"></div>
-                <div class="footer">
-                    <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
-                    <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
-                    <button class="btn btn-secondary" onclick="shutdownServer()">Покинуть театр</button>
-                </div>
             </div>
         </div>
         <div class="sidebar">
@@ -869,15 +892,25 @@ HTML_TEMPLATE = """
                 <div class="sidebar-title">Инструкции от руководства</div>
                 <div id="moderatorInstructionsDisplay" style="color:#000000;font-size:12px;line-height:1.5;font-weight:bold;"></div>
             </div>
-            <!-- Шрифт выбирается здесь, внизу сайдбара, а не в подвале страницы:
-                 сайдбар виден всегда, и смена шрифта видна там же, где выбор
-                 (см. .font-pick-block). Списки заполняются из FONT_CHOICES -->
+            <!-- Всё управление театром — здесь, внизу сайдбара, а не в подвале
+                 страницы: сайдбар виден всегда, и смена шрифта видна там же, где
+                 выбор (см. .font-pick-block). Списки шрифтов заполняются
+                 из FONT_CHOICES, а строки в них нарисованы своими шрифтами -->
             <div class="sidebar-section font-pick-block">
-                <div class="sidebar-title">Шрифт</div>
-                <label class="font-pick" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
-                <select class="font-pick" id="fontPick" onchange="pickFont(this.value)" title="Шрифт текста: выберите из списка. Выбор помнится, как тема"></select>
-                <label class="font-pick" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
-                <select class="font-pick" id="headPick" onchange="pickHeads(this.value)" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится"></select>
+                <div class="sidebar-title">Управление</div>
+                <label class="font-pick-label" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
+                <div class="font-pick-wrap">
+                    <button type="button" class="font-pick-btn" id="fontPick" onclick="togglePick('font')" aria-haspopup="true" aria-expanded="false" aria-label="Строки списка набраны своими шрифтами" title="Шрифт текста: разверните список — каждая строка набрана своим шрифтом. Выбор помнится, как тема">Georgia</button>
+                    <div class="font-pick-list" id="fontPickList" aria-label="Шрифт текста" hidden></div>
+                </div>
+                <label class="font-pick-label" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
+                <div class="font-pick-wrap">
+                    <button type="button" class="font-pick-btn" id="headPick" onclick="togglePick('heads')" aria-haspopup="true" aria-expanded="false" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится">Georgia</button>
+                    <div class="font-pick-list" id="headPickList" aria-label="Шрифт заголовков" hidden></div>
+                </div>
+                <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
+                <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
+                <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button>
             </div>
         </div>
     </div>
@@ -2667,6 +2700,7 @@ HTML_TEMPLATE = """
             {name: 'Neucha', stack: "'Neucha', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Pangolin', stack: "'Pangolin', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Marmelad', stack: "'Marmelad', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Adigiana 2', stack: "'Adigiana 2', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Comfortaa', stack: "'Comfortaa', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Nunito', stack: "'Nunito', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Rubik', stack: "'Rubik', Georgia, 'Times New Roman', Times, serif"},
@@ -2686,41 +2720,103 @@ HTML_TEMPLATE = """
 
         // Оба списка страницы заполняются из того же FONT_CHOICES: второй перечень
         // имён, написанный в разметке руками, разошёлся бы с первым на первой правке,
-        // и в выборе стоял бы шрифт, которого в правилах уже нет
+        // и в списке стоял бы шрифт, которого в правилах уже нет
+        // Список свой, а не родной <select>: в родном имя нарисовано системным
+        // шрифтом, и выбирать приходится по названию. Здесь каждая строка набрана
+        // тем шрифтом, который предлагает, и рядом идёт образец строки
         function fillPicks() {
             for (const [what, id] of [['font', 'fontPick'], ['heads', 'headPick']]) {
-                const pick = document.getElementById(id);
-                if (!pick) continue;
-                pick.innerHTML = FONT_CHOICES.map((one, at) =>
-                    '<option value="' + at + '">' + escapeHtml(one.name) + '</option>').join('');
+                const list = document.getElementById(id + 'List');
+                if (!list) continue;
+                list.innerHTML = FONT_CHOICES.map((one, at) =>
+                    '<button type="button" class="font-pick-row" data-at="' + at + '">' +
+                    escapeHtml(one.name) +
+                    '<span class="font-pick-sample">Когда ты зайдёшь</span></button>').join('');
+                // Шрифт строки ставится уже на месте, а не в разметке: в стеках есть
+                // одинарные кавычки, и в атрибут они не влезают
+                list.querySelectorAll('.font-pick-row').forEach(one => {
+                    one.style.fontFamily = FONT_CHOICES[Number(one.dataset.at)].stack;
+                });
+                // Обработчик один на список, а не на каждой строке: строки
+                // перерисовываются целиком, и обработчиков-сирот не остаётся
+                list.onclick = event => {
+                    const row = event.target.closest ? event.target.closest('.font-pick-row') : null;
+                    if (row) choose(what, Number(row.dataset.at));
+                };
             }
         }
+
+        function listOf(what) {
+            return document.getElementById((what === 'font' ? 'fontPick' : 'headPick') + 'List');
+        }
+
+        function closePicks() {
+            for (const what of ['font', 'heads']) {
+                const list = listOf(what);
+                if (!list || list.hidden) continue;
+                list.hidden = true;
+                const btn = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
+                if (btn) btn.setAttribute('aria-expanded', 'false');
+            }
+        }
+
+        // Список открывается вверх (он внизу сайдбара) и открывается по одному:
+        // второй открытый список закрыл бы первый собой
+        function togglePick(what) {
+            const list = listOf(what);
+            if (!list) return;
+            const wasHidden = list.hidden;
+            closePicks();
+            list.hidden = !wasHidden;
+            const btn = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
+            if (btn) btn.setAttribute('aria-expanded', wasHidden ? 'true' : 'false');
+            if (wasHidden) {
+                const current = list.querySelector('.font-pick-row.current');
+                if (current) list.scrollTop = Math.max(0, current.offsetTop - 60);
+            }
+        }
+
+        // Щелчок мимо списка и Escape закрывают открытый список: иначе он висел бы
+        // над страницей до следующего выбора
+        document.addEventListener('click', event => {
+            if (!(event.target.closest && event.target.closest('.font-pick-wrap'))) closePicks();
+        });
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape') closePicks();
+        });
 
         // Переменная ставится одна — на тело страницы, — а берут её сразу все
         // правила (см. --theatre-font): подменять шрифт в каждом месте было бы
         // правкой в двадцати, и первый же новый выбор остался бы при прежнем
-        // Список при этом показывает выбранное: иначе он врал бы о том, что видно
+        // Кнопка и текущая строка при этом показывают выбранное: иначе список
+        // врал бы о том, что видно
         function applyChoice(what) {
             const chosen = FONT_CHOICES[FONT_STATE[what]];
             document.body.style.setProperty(what === 'font' ? '--theatre-font' : '--theatre-head-font',
                                             chosen.stack);
-            const pick = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
-            if (pick) pick.value = String(FONT_STATE[what]);
+            const btn = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
+            if (btn) {
+                btn.textContent = chosen.name;
+                btn.style.fontFamily = chosen.stack;
+            }
+            const list = listOf(what);
+            if (list) list.querySelectorAll('.font-pick-row').forEach(one => {
+                one.classList.toggle('current', Number(one.dataset.at) === FONT_STATE[what]);
+            });
         }
 
         // В памяти страницы лежит ИМЯ выбранного шрифта, а не его номер в списке:
         // список со временем меняется, и номер в нём значил бы уже другое (см. atChoice)
+        // Выбор же закрывает список — выбранное тут же видно на странице
         function choose(what, at) {
             FONT_STATE[what] = at;
             applyChoice(what);
+            closePicks();
             try {
                 localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',
                                      FONT_CHOICES[at].name);
             } catch (e) {}
         }
-
-        function pickFont(value) { choose('font', Number(value)); }
-        function pickHeads(value) { choose('heads', Number(value)); }
 
         // Цветные полосы ролей в ленте: оформление, а не смысл, поэтому его можно
         // выключить. Класс стоит на самом теле страницы — оформление постов тогда
@@ -4119,7 +4215,7 @@ HTML_TEMPLATE = """
                 statusDiv.classList.remove('active');
                 statusDiv.innerHTML = '<div style="text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;">🎭 Театр закрыт</div><div style="font-style:italic;">Спектакль сохранён для просмотра</div>';
                 
-                const exitBtn = document.querySelector('.footer .btn');
+                const exitBtn = document.getElementById('leaveBtn');
                 if (exitBtn) exitBtn.style.display = 'none';
                 
                 // Опрос останавливаем только убедившись, что сервера нет, а не после
@@ -4630,7 +4726,7 @@ HTML_TEMPLATE = """
                 stopPolling();
                 
                 // СРАЗУ скрываем кнопку выхода — чтобы нельзя было нажать повторно
-                const exitBtn = document.querySelector('.footer .btn');
+                const exitBtn = document.getElementById('leaveBtn');
                 if (exitBtn) exitBtn.style.display = 'none';
                 
                 // СРАЗУ обновляем UI

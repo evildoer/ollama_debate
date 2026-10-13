@@ -4207,7 +4207,7 @@ class TestPosts(unittest.TestCase):
 # ---------------------------------------------------------------- вид ленты
 
 class TestRoleMarks(unittest.TestCase):
-    """Цветная полоса роли слева у реплик (кнопка «Цвет ролей» в подвале).
+    """Цветная полоса роли слева у реплик (кнопка «Цвет ролей» в сайдбаре).
 
     Проверяем связку «роль от сервера → класс на посте → правило в стилях»:
     если появится четвёртая роль, тест напомнит, что ей нужен свой цвет.
@@ -4329,11 +4329,13 @@ class TestRoleMarks(unittest.TestCase):
     FONTS = ("Georgia", "Balsamiq Sans", "Comic Sans MS", "Izis", "Neucha", "Pangolin",
              "Marmelad", "Comfortaa", "Nunito", "Rubik", "Golos Text", "Onest",
              "Manrope", "Ruda", "Podkova", "Montserrat", "Noto Sans", "PT Sans",
-             "Fixel Display", "Russo One", "Kelly Slab")
+             "Fixel Display", "Russo One", "Kelly Slab", "Adigiana 2")
     SYSTEM_FONTS = ("Georgia", "Comic Sans MS")
-    # Izis — чужая работа: freeware для личного использования, и под лицензией
-    # проекта он не лежит, поэтому и текста лицензии рядом с ним нет (см. README)
-    FOREIGN_WORK = ("Izis",)
+    # Izis и Adigiana 2 — чужие работы: у Izis freeware для личного пользования,
+    # у Adigiana 2 в файле вместо автора стоит заглушка «© (your company)», то есть
+    # условий автор не назвал. Под лицензией проекта они не лежат, поэтому
+    # и текста лицензии рядом с ними нет (см. README)
+    FOREIGN_WORK = ("Izis", "Adigiana 2")
 
     def test_the_font_chooser_is_wired_and_remembered(self):
         """Шрифт текста выбирается из списка, берётся из файла рядом и помнится.
@@ -4348,7 +4350,15 @@ class TestRoleMarks(unittest.TestCase):
         # Выбор — списком, а не перебором по кнопке: два десятка шрифтов по кругу
         # не выбирают, а листают, и нужный оказывается случайно
         self.assertIn('id="fontPick"', self.page)
-        self.assertIn('onchange="pickFont(this.value)"', self.page)
+        # Список — свой, а не родной <select>: в родном списке имя нарисовано
+        # системным шрифтом, и выбирать там приходится по названию, а не глазами.
+        # Щелчок ловит обработчик на самом списке: строки перерисовываются целиком,
+        # и в разметке обработчиков не остаётся
+        self.assertIn('id="fontPickList"', self.page)
+        self.assertIn("if (row) choose(what, Number(row.dataset.at));", self.page,
+                      "щелчок по строке списка никуда не ведёт")
+        self.assertNotIn('<select class="font-pick"', self.page,
+                         "список шрифтов снова родной: строки в нём не набраны своими шрифтами")
         self.assertNotIn("toggleFont", self.page,
                          "шрифт снова выбирается перебором по кнопке")
         self.assertIn("const FONT_CHOICES = [", self.page)
@@ -4360,10 +4370,17 @@ class TestRoleMarks(unittest.TestCase):
         # и в выборе стоял бы шрифт, которого у страницы уже нет
         self.assertIn("[['font', 'fontPick'], ['heads', 'headPick']]", self.page,
                       "списки текста и заголовков заполняются не общим перечнем")
-        self.assertIn("pick.innerHTML = FONT_CHOICES.map((one, at) =>", self.page,
+        self.assertIn("list.innerHTML = FONT_CHOICES.map((one, at) =>", self.page,
                       "в списке стоят имена не из FONT_CHOICES")
-        self.assertIn("+ escapeHtml(one.name) +", self.page,
+        self.assertIn("escapeHtml(one.name) +", self.page,
                       "в списке вместо имени шрифта что-то другое")
+        # За этим список и заведён: каждая строка нарисована тем шрифтом, который
+        # предлагает, и рядом идёт образец строки. Шрифт ставится на строку после
+        # вставки, а не в разметке, — в стеках есть одинарные кавычки
+        self.assertIn("one.style.fontFamily = FONT_CHOICES[Number(one.dataset.at)].stack;",
+                      self.page, "строки списка снова набраны системным шрифтом")
+        self.assertIn('<span class="font-pick-sample">Когда ты зайдёшь</span>', self.page,
+                      "рядом с именем шрифта нет образца строки")
         # Выбор стоит внизу САЙДБАРА, а не в подвале страницы: сайдбар приклеен
         # к верху и виден всегда, поэтому смену шрифта видно там же, где выбор, —
         # из подвала страницы на текст не посмотришь, туда уходят и смотрят
@@ -4386,13 +4403,21 @@ class TestRoleMarks(unittest.TestCase):
                       "выбор шрифта ни на что не влияет: переменная не ставится")
         self.assertIn("                                            chosen.stack);", self.page,
                       "переменной подставляется не выбранный шрифт")
-        # Выбранное показывается в самом списке: иначе список врал бы о том,
-        # какой шрифт сейчас у страницы (см. applyChoice)
-        self.assertIn("if (pick) pick.value = String(FONT_STATE[what]);", self.page,
-                      "список шрифтов не показывает выбранное")
-        # Список — это и есть выбор: щелчок по нему обязан дойти до правил и до памяти
-        self.assertIn("function pickFont(value) { choose('font', Number(value)); }", self.page)
-        self.assertIn("function pickHeads(value) { choose('heads', Number(value)); }", self.page)
+        # Выбранное показывается и на кнопке списка, и в самом списке: иначе
+        # список врал бы о том, какой шрифт сейчас у страницы (см. applyChoice)
+        self.assertIn("btn.textContent = chosen.name;", self.page,
+                      "на кнопке списка не видно выбранного шрифта")
+        self.assertIn("one.classList.toggle('current', Number(one.dataset.at) === FONT_STATE[what]);",
+                      self.page, "в списке не отмечен выбранный шрифт")
+        # Список — это и есть выбор, и он закрывается сам: открытым он висел бы
+        # над страницей до следующего выбора (см. togglePick и choose)
+        self.assertIn("function togglePick(what) {", self.page, "список шрифтов нечем открыть")
+        self.assertIn("        .font-pick-list { position: absolute; left: 0; right: 0; bottom: 100%;",
+                      self.page, "список раскрывается не вверх — он стоит внизу сайдбара")
+        self.assertIn("if (!(event.target.closest && event.target.closest('.font-pick-wrap'))) closePicks();",
+                      self.page, "список шрифтов не закрывается щелчком мимо")
+        self.assertIn("if (event.key === 'Escape') closePicks();", self.page,
+                      "список шрифтов не закрывается с клавиатуры")
         self.assertIn("localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',",
                       self.page, "выбор шрифта нечем запомнить")
         self.assertIn("FONT_CHOICES[at].name);", self.page,
@@ -4404,6 +4429,48 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("--theatre-font: Georgia", self.page, "нет шрифта по умолчанию")
         self.assertNotIn("font-family: Georgia", self.page,
                          "где-то шрифт прописан прямо, а не взят из --theatre-font")
+
+    def test_the_whole_theatre_control_lives_in_the_sidebar(self):
+        """Всё управление театром — в одном месте: внизу сайдбара, а не в подвале.
+
+        Подвал страницы для управления не годится: сайдбар приклеен к верху
+        и виден всегда, а в подвал уходят и смотрят на пустоту. Кнопки стоят
+        в том же разделе, что и списки шрифтов (см. .font-pick-block), ниже
+        списков и столбиком: сайдбар узкий, в строку они не влезут.
+        """
+        self.assertNotIn('<div class="footer">', self.page, "подвал страницы вернулся")
+        self.assertNotIn(".footer {", self.page, "оформление подвала осталось в стилях")
+        self.assertNotIn("body.dark .footer", self.page,
+                         "тёмная сцена снова помнит про подвал")
+        self.assertIn('<div class="sidebar-section font-pick-block">', self.page)
+        # Кнопки — внутри раздела сайдбара, а не где-то ниже страницы
+        start = self.page.index('<div class="sidebar-section font-pick-block">')
+        block = self.page[start:self.page.index('id="avatarModal"')]
+        for button in ('id="fontPick"', 'id="headPick"', 'id="rolesBtn"',
+                       'id="themeBtn"', 'id="leaveBtn"'):
+            self.assertIn(button, block, f"{button} снова не в управлении театром")
+        self.assertLess(self.page.index('id="fontPickList"'),
+                        self.page.index('id="themeBtn"'),
+                        "кнопки управления стоят выше списков шрифтов")
+        self.assertIn(".font-pick-block .btn { display: block; width: 100%;", self.page,
+                      "кнопки управления в сайдбаре снова стоят в строку")
+        # В тёмной сцене список перекрашивается вместе с сайдбаром: иначе белые
+        # строки и белый фон висели бы над тёмной страницей. Смотрим не на одни
+        # селекторы, а на сам фон: селекторы могут остаться на месте, а цвет — нет
+        self.assertIn("body.dark .font-pick-btn, body.dark .font-pick-list, body.dark .font-pick-row {",
+                      self.page, "тёмная сцена не трогает список шрифтов")
+        dark = self.page[self.page.index(
+            "body.dark .font-pick-btn, body.dark .font-pick-list, body.dark .font-pick-row {"):]
+        dark = dark[:dark.index("}") + 1]
+        self.assertIn("background: #1c1c1c;", dark,
+                      "тёмная сцена оставила фон списка шрифтов белым")
+        self.assertIn("body.dark .font-pick-row:hover, body.dark .font-pick-row.current { background: #262626; }",
+                      self.page, "в тёмной сцене выбранная строка списка не отличается от прочих")
+        # Выход ищется по имени своей кнопки: подвала, по которому его искали, нет
+        self.assertIn("const exitBtn = document.getElementById('leaveBtn');", self.page,
+                      "выход снова ищет кнопку в подвале страницы, а подвала нет")
+        self.assertNotIn("document.querySelector('.footer", self.page,
+                         "где-то ещё ищут кнопки в подвале страницы")
 
     def test_the_heading_chooser_takes_the_same_fonts_as_the_text(self):
         """Заголовки выбираются тем же перечнем шрифтов, что и текст, и жирным.
@@ -4418,7 +4485,7 @@ class TestRoleMarks(unittest.TestCase):
         поэтому в :root она подставила бы Georgia навсегда.
         """
         self.assertIn('id="headPick"', self.page)
-        self.assertIn('onchange="pickHeads(this.value)"', self.page)
+        self.assertIn('id="headPickList"', self.page)
         self.assertNotIn("toggleHeads", self.page,
                          "заголовки снова выбираются перебором по кнопке")
         # Второго перечня нет: «как текст» из выбора ушло, а имена шрифтов у обеих
