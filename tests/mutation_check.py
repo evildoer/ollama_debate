@@ -2257,10 +2257,8 @@ BUGS = {
     ],
     "прежняя запись хода снова остаётся без картинки": [
         ("aitheatre/show.py",
-         '            for one in _pictures_spoken_of(message, by_words, by_name):\n'
-         '                message.setdefault("pictures", []).append(one)',
-         '            for one in ():\n'
-         '                message.setdefault("pictures", []).append(one)'),
+         '            message.setdefault("pictures", []).extend(spoken)',
+         '            pass'),
     ],
     "картинка снова не связывается с сообщением по словам о поездке": [
         ("aitheatre/show.py",
@@ -2310,8 +2308,18 @@ BUGS = {
     ],
     "уехавшая картинка снова возвращается из ДАМПа без следа о поездке": [
         ("aitheatre/show.py",
-         "            travelled = _travelled_spoken_of(message, by_words)",
-         "            travelled = []"),
+         "            spoken, travelled = _pictures_spoken_of(message, by_words, by_name)",
+         "            spoken, travelled = _pictures_spoken_of(message, {}, by_name)"),
+    ],
+    "у идущего хода снова не видно веса его картинки": [
+        ("aitheatre/show.py",
+         "    remember_picture_cost(summary, messages + extra)",
+         "    remember_picture_cost(summary)"),
+    ],
+    "к концу хода доля его картинки снова не считается": [
+        ("aitheatre/show.py",
+         "    remember_picture_cost(summary)",
+         "    pass"),
     ],
     "цена картинки снова не досчитывается у возвращённого хода": [
         ("aitheatre/show.py",

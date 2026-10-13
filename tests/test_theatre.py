@@ -9301,23 +9301,37 @@ class TestWhatTheModelGot(PicturesTest):
             gender="female"))
         return picture, place, self.session.history_from_posts()
 
-    def _turned(self, place: dict, history: list) -> dict:
-        """Отчёт о ходе — по той же истории, что собиралась бы к модели."""
+    def _turned(self, place: dict, history: list, spent=None, tokens_in=None) -> dict:
+        """Отчёт о ходе — по той же истории, что собиралась бы к модели.
+
+        spent и tokens_in — про облачный ход: цена берётся с ключа, а ввод считается
+        по запросам (см. _input_tokens_total). Оба нужны, чтобы проверить, что
+        у вернувшегося хода с ценой досчитывается и доля картинки в ней.
+        """
         messages = self.session._format_history(place["display_name"], history,
                                                 model=place["model"])
+        # Событие хода едет в файл строкой и читается обратно оттуда же
+        # (см. step_markdown, _parse_steps): у запроса нужны и время, и числа
+        # вендора — без них строка пишется про запрос без чисел вовсе
+        steps = ([{"kind": "ask", "n": 1, "clock": "00:07",
+                   "tokens_in": int(tokens_in), "tokens_out": 900}]
+                 if tokens_in else [])
         return {"messages": [show._message_view(one) for one in messages],
-                "added": [], "removed": [], "steps": [],
+                "added": [], "removed": [], "steps": steps,
                 "budget": {"kind": "local", "window": 100},
-                "summary": {"seconds": 3}}
+                "summary": {"seconds": 3, "spent": spent,
+                            "asks": len(steps),
+                            "tokens_in_total": int(tokens_in or 0)}}
 
     def _through_the_dump(self, place: dict, history: list, pictures: list,
-                          shown: bool = False) -> tuple:
+                          shown: bool = False, spent=None, tokens_in=None) -> tuple:
         """Спектакль — в ДАМП и обратно: файл, разобранная запись и её номер.
 
         Пишется тем же, чем пишет живой ход: реплика модератора с приложенным,
         её поездка (см. dump_note_picture_travel) и запись хода целиком. shown —
         модель картинку уже видела: тогда она едет строкой о себе, а не сама
-        (см. show.images_already_shown_note).
+        (см. show.images_already_shown_note). spent и tokens_in — цена хода и ввод
+        по всем его запросам: по ним досчитывается доля картинки (см. _turned).
         """
         pictures = list(pictures)
         if shown:
@@ -9334,9 +9348,18 @@ class TestWhatTheModelGot(PicturesTest):
             for post in self.session.posts[:-1]:
                 show.save_dump_entry(post)
             show.dump_note_picture_travel([one["url"] for one in pictures])
+            turn = self._turned(place, history, spent, tokens_in)
             post = show.create_post(place["display_name"], place["model"],
                                     "Красный.", round_num=1, gender="female")
-            show.save_dump_entry(post, self._turned(place, history))
+            if turn["steps"]:
+                # Хронология едет в файл по событию за раз, а не хвостом записи
+                # (см. open_dump_turn, dump_step_sink): так же её пишет и живой ход
+                show.dump_write(show.dump_turn_header(post["id"], turn))
+                for step in turn["steps"]:
+                    show.dump_step_sink(step)
+                show.dump_write(show.dump_turn_tail(post, turn))
+            else:
+                show.save_dump_entry(post, turn)
             written = dump.read_text(encoding="utf-8")
             # А память о картинках в том запуске и осталась: приведённое
             # к обычному размеру живёт только в ней (см. _UPLOAD_MARKS),
@@ -9445,6 +9468,43 @@ class TestWhatTheModelGot(PicturesTest):
             {"spent": 1.89, "tokens_in_total": 14158}),
             "картинок в ходу не было — делить нечего")
 
+    def test_the_turn_in_progress_already_knows_what_its_picture_weighs(self):
+        """У идущего хода в сводке уже стоит вес картинки, а цена — к концу хода.
+
+        Отчёт собирается ДО запроса (см. build_turn_report), и цена хода к тому
+        мигу ещё неизвестна — она приходит разницей остатков на ключе и вписывается
+        в ту же сводку потом (см. refresh_turn_report, remember_picture_cost).
+        Без этого «🖼 …» не появилось бы у живого хода вовсе — только у вернувшегося
+        из ДАМПа, и зритель дочитал бы ход до конца, не узнав, во что обошлась
+        его картинка.
+        """
+        picture, place, _history = self._discussion()
+        _url, payload = show.post_image_pairs([picture])[0]
+        sent = [{"role": "user", "name": place["display_name"],
+                 "content": "Смотрите", "images": [payload]}]
+
+        turn = show.build_turn_report(place, 1, sent, [], {"window": 100})
+        summary = turn["summary"]
+
+        self.assertEqual(summary["picture_tokens"],
+                         show.sent_picture_tokens(picture["url"]),
+                         "вес картинки не попал в сводку идущего хода")
+        self.assertIsNone(summary["picture_money"],
+                          "цены хода ещё нет — и доли от неё быть не может")
+
+        show.refresh_turn_report(turn, [], 1,
+                                 {"steps": [{"kind": "ask", "n": 1,
+                                              "tokens_in": 14158}]},
+                                 spent=0.20, seconds=7.0)
+
+        self.assertEqual(turn["summary"]["asks"], 1)
+        self.assertEqual(turn["summary"]["picture_money"],
+                         show.picture_share_of_price(turn["summary"]),
+                         "к концу хода доля картинки в его цене не появилась")
+        self.assertIn("из цены хода",
+                      " · ".join(show.picture_cost_words(turn["summary"])),
+                      "в свёрнутой строке хода нет цены его картинки")
+
     def test_the_price_of_the_picture_comes_back_with_the_record(self):
         """У возвращённого хода цена его картинки встаёт на своё место.
 
@@ -9473,6 +9533,33 @@ class TestWhatTheModelGot(PicturesTest):
         # она та же свёрнутая строка, что в ленте (см. turn_heading)
         self.assertIn("токенов на картинку", show.turn_heading(post_id, turn),
                       "в шапке записи не видно, во что обошлась её картинка")
+
+    def test_the_price_of_the_picture_comes_back_with_the_price_of_the_turn(self):
+        """У возвращённого облачного хода видно и долю картинки в его цене.
+
+        Цена хода и весь его ввод берутся из записи (первое — из шапки, второе —
+        из шагов, см. restored_summary), и по ним доля считается тем же счётом,
+        что на ходу (см. picture_share_of_price): иначе у хода с картинкой
+        в ленте стоял бы только вес, а во что она обошлась — нигде.
+        """
+        picture, place, history = self._discussion()
+        show.post_image_pairs([picture])
+
+        _written, turn, post_id = self._through_the_dump(place, history, [picture],
+                                                         spent=0.20, tokens_in=14158)
+        summary = turn["summary"]
+
+        self.assertEqual(summary["spent"], 0.20, "цена хода не вернулась из записи")
+        self.assertEqual(summary["tokens_in_total"], 14158,
+                         "ввод хода не пересчитан по его же шагам")
+        self.assertEqual(summary["picture_money"],
+                         show.picture_share_of_price(summary),
+                         "доля картинки в цене хода не досчитана")
+
+        line = show.turn_heading(post_id, turn)
+        self.assertIn("💰 0,20 ₽", line, "в шапке записи не видно цены хода")
+        self.assertIn("из цены хода", line,
+                      "в шапке записи не видно, сколько из цены съела картинка")
 
     def test_a_picture_already_shown_comes_back_too(self):
         """Уже показанная картинка находится в записи по своему имени.

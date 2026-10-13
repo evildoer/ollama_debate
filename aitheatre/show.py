@@ -2466,22 +2466,20 @@ def _link_message_pictures(posts: list, turns: dict, by_words: dict,
         turn = (turns or {}).get(int(post.get("id") or 0)) or {}
         messages = turn.get("messages") or []
         for message in messages:
+            spoken, travelled = _pictures_spoken_of(message, by_words, by_name)
             # Уехавшая названа словом на поездку, и только она стоит денег:
             # показанная в запросе не была (см. turn_picture_cost). След берётся
             # по словам и тогда, когда картинки в записи уже есть: слово о поездке
             # пишется и на нынешнем ходу, а счёта при нём может и не оказаться
-            travelled = _travelled_spoken_of(message, by_words)
             if travelled:
                 message["travelled"] = travelled
             if message.get("pictures"):
                 continue
-            for one in _pictures_spoken_of(message, by_words, by_name):
-                message.setdefault("pictures", []).append(one)
+            message.setdefault("pictures", []).extend(spoken)
         summary = turn.get("summary")
         if summary is None:
             continue
-        summary.update(turn_picture_cost(messages))
-        summary["picture_money"] = picture_share_of_price(summary)
+        remember_picture_cost(summary, messages)
         # Тем же словарём, а не копией: сводка у реплики и у отчёта одна
         # и та же — иначе в ленте и в отчёте стояли бы разные числа
         post["turn"] = summary
@@ -2499,34 +2497,47 @@ def _travel_words(message: dict) -> list:
     return [word.strip() for word in told.group("words").split("; ") if word.strip()]
 
 
-def _travelled_spoken_of(message: dict, by_words: dict) -> list:
-    """Адреса картинок, о поездке которых говорит само сообщение."""
-    urls = []
-    for words in _travel_words(message):
-        one = by_words.get(words)
-        if one and one["url"] not in urls:
-            urls.append(one["url"])
-    return urls
-
-
-def _pictures_spoken_of(message: dict, by_words: dict, by_name: dict) -> list:
+def _pictures_spoken_of(message: dict, by_words: dict, by_name: dict) -> tuple:
     """Картинки, о которых говорит само сообщение: уехавшая и уже показанная.
 
     Обе названы словами, и слова эти — те же, что у картинки в ленте: о поездке
     говорит след «уехали вместе с ней» (см. message_note), о показанном —
-    строка в самом тексте (см. images_already_shown_note).
+    строка в самом тексте (см. images_already_shown_note). А рядом — адреса
+    тех из них, что вправду уехали: по одному взгляду на сообщение видно и что
+    показать, и что из этого стоило денег (см. turn_picture_cost).
     """
-    found = []
+    found, travelled = [], []
     for words in _travel_words(message):
         one = by_words.get(words)
-        if one:
-            found.append(dict(one))
+        if not one:
+            continue
+        found.append(dict(one))
+        if one["url"] not in travelled:
+            travelled.append(one["url"])
     for names in _SHOWN_IN_NOTE_RE.findall(str(message.get("content") or "")):
         for name in re.findall(r"«(.+?)»", names):
             one = by_name.get(name.strip())
             if one:
                 found.append(dict(one))
-    return found
+    return found, travelled
+
+
+def remember_picture_cost(summary: dict, messages: list = None) -> None:
+    """Вписать в сводку хода вес его картинок — и долю цены, что на них ушла.
+
+    Числа об одном и том же ходе складываются в трёх местах: ход начался
+    (см. build_turn_report), кончился с ценой (см. refresh_turn_report) или
+    вернулся из ДАМПа (см. _link_message_pictures). Поэтому вписываются они тут:
+    одним счётом и в одном порядке — иначе в ленте, в шапке записи и в отчёте
+    стояли бы разные числа об одном и том же.
+
+    messages — сообщения хода: их знает и начало хода, и возврат из ДАМПа.
+    Без них пересчитывается только доля: сообщения у идущего хода уже сосчитаны,
+    а цена стала известна как раз теперь (см. picture_share_of_price).
+    """
+    if messages is not None:
+        summary.update(turn_picture_cost(messages))
+    summary["picture_money"] = picture_share_of_price(summary)
 
 
 def _avatar_that_exists(url) -> str:
@@ -3570,11 +3581,6 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         # а не всегдашний (см. added_kinds)
         "added_kinds": added_kinds(extra),
         "search_rounds": int(search_count or 0),
-        # И картинки — своим числом: они стоят в запросе тысячи токенов, и по
-        # одной цене хода этого не видно (см. turn_picture_cost). Доля цены
-        # досчитывается к концу хода, когда цена уже известна
-        # (см. refresh_turn_report, picture_share_of_price)
-        **turn_picture_cost(messages + extra),
         "asks": sum(1 for step in steps if step.get("kind") == "ask"),
         # Заминки названы по отдельности, а не одним числом: отказ в поиске
         # сверх лимита — это ещё не беда (модель просто просила больше, чем ей
@@ -3583,6 +3589,10 @@ def build_turn_report(participant: dict, round_num: int, sent: list, added: list
         "search_refusals": _steps_count(steps, "refused"),
         "silences": _steps_count(steps, "silence"),
     }
+    # И картинки — своим числом: они стоят в запросе тысячи токенов, а по одной
+    # цене хода этого не видно (см. remember_picture_cost). Доля от цены к этому
+    # мигу ещё неизвестна: ход ведь только начинается
+    remember_picture_cost(summary, messages + extra)
     return {
         "summary": summary,
         "who": {
@@ -3732,8 +3742,9 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     # пяти поисках вход выглядит втрое больше первой истории (см. _input_tokens_total)
     summary["tokens_in_total"] = _input_tokens_total(steps)
     # А это — доля цены, пришедшаяся на картинки хода: считается она только
-    # теперь, когда цена уже известна (см. picture_share_of_price, build_turn_report)
-    summary["picture_money"] = picture_share_of_price(summary)
+    # теперь, когда цена уже известна, — и тем же счётом, что в начале хода
+    # (см. remember_picture_cost, build_turn_report)
+    remember_picture_cost(summary)
     turn["added"] = extra
 
 
