@@ -98,6 +98,21 @@ HTML_TEMPLATE = """
            в README */
         .post-attachments img { max-height: 220px; max-width: 100%; border: 1px solid #000000; cursor: pointer; }
         body.dark .post-attachments img { border-color: #3a3a3a; }
+        /* Картинка и подписи под ней — одним столбцом: подписи говорят про эту
+           картинку, а не про ленту (см. pictureBlockHtml) */
+        .picture-block { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+        /* Что это за картинка сама по себе — и ссылка на оригинал рядом:
+           по клику картинка разворачивается в том же окне, а ссылкой её
+           открывают в новом — там виден сам файл целиком */
+        .picture-own { font-size: 12px; color: #666666; }
+        .picture-own a { color: inherit; }
+        .picture-sent { font-size: 12px; color: #666666; font-style: italic; }
+        body.dark .picture-own, body.dark .picture-sent { color: #9a9a9a; }
+        /* Приложенное к реплике в записи хода: превью — того же размера,
+           что и картинки ленты, и с теми же подписями (см. promptPicturesHtml) */
+        .prompt-pictures { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; }
+        .prompt-pictures img { max-height: 220px; max-width: 100%; border: 1px solid #000000; cursor: pointer; }
+        body.dark .prompt-pictures img { border-color: #3a3a3a; }
         /* Приложенное к теме — та же рамка, что у картинки реплики, но меньше:
            это шапка, а не реплика, и во весь экран она бы её вытеснила */
         .topic-pictures { margin: 16px 0 0 0; }
@@ -128,6 +143,17 @@ HTML_TEMPLATE = """
         .post-text ul, .post-text ol { margin: 15px 0; padding-left: 30px; }
         .post-text li { margin-bottom: 10px; line-height: 1.7; }
         .post-text li::marker { font-weight: bold; }
+        /* Таблица из реплики: модели любят отвечать сводкой по столбцам, и это
+           должно читаться таблицей, а не строкой из труб (см. text._tables_to_markdown).
+           Ширина — по содержанию, а не на всю реплику: таблица в две колонки,
+           растянутая на весь экран, читается хуже, чем написана */
+        .post-text table { border-collapse: collapse; margin: 16px 0; font-size: 16px; line-height: 1.5; }
+        .post-text th, .post-text td { border: 1px solid #000000; padding: 6px 12px; text-align: left; vertical-align: top; }
+        .post-text th { background: #f2f2f2; font-weight: bold; }
+        .post-text tbody tr:nth-child(even) { background: #fafafa; }
+        body.dark .post-text th, body.dark .post-text td { border-color: #4a4a4a; }
+        body.dark .post-text th { background: #1e1e1e; }
+        body.dark .post-text tbody tr:nth-child(even) { background: #181818; }
         /* Черновик реплики: пост уже есть, а текст ещё пишется. Мигающий курсор
            в конце строки и говорит, что реплика не кончилась */
         .post.streaming .post-text::after { content: '▍'; margin-left: 2px; animation: streamCaret 1s steps(2, start) infinite; }
@@ -2587,6 +2613,32 @@ HTML_TEMPLATE = """
         // сколько есть (см. web.shown_balance). Остаток показывается и без цены:
         // у местного спектакля цена нулевая, а знать, чем располагаешь, всё равно
         // нужно, — и наоборот, при пустом ключе цены не будет, а остаток есть
+        //
+        // И картинки — своим числом: спектакль — это ещё и то, что модели видели,
+        // а по одной цене этого не видно (см. show.pictures_report). Счёт наш:
+        // вендор о цене картинки отдельно не говорит, поэтому так и называется
+        function picturesText(info) {
+            const data = info || {};
+            const pictures = Number(data.pictures || 0);
+            // Числа через тире, а не «3 картинки уехало»: падеж заголовка
+            // и числа не согласуются, а выдумывать второй счёт падежей
+            // ради одной строки — не за чем (см. pluralText)
+            const parts = [`🖼 уехало моделям картинок — ${tokensText(pictures)}`];
+            if (Number(data.trips || 0) > pictures) {
+                parts.push(`показов — ${tokensText(data.trips)}`);
+            }
+            // Ноль тут — не «ничего не стоили», а «счёта нет»: у картинки,
+            // вернувшейся из ДАМПа прошлого запуска, её данных уже нет.
+            // Так и говорим — числом вес не выдаём (см. show.pictures_report)
+            if (Number(data.tokens || 0)) {
+                parts.push(`наш счёт — ${tokensText(data.tokens)} токенов`);
+            }
+            if (Number(data.unknown || 0)) {
+                parts.push(`у ${tokensText(data.unknown)} вес неизвестен`);
+            }
+            return parts.join(' · ');
+        }
+
         function spentLine(data) {
             const spent = Number((data && data.spent) || 0);
             const left = (data && data.balance !== null && data.balance !== undefined)
@@ -2594,8 +2646,12 @@ HTML_TEMPLATE = """
             const parts = [];
             if (spent) parts.push(`💰 за спектакль ${moneyText(spent)}`);
             if (left !== null && !isNaN(left)) parts.push(`на ключе ${moneyText(left)}`);
-            if (!parts.length) return '';
-            return `<div style="font-size:12px;margin-top:6px;">${parts.join(' · ')}</div>`;
+            const pictures = (data && data.pictures) || {};
+            const lines = [];
+            if (parts.length) lines.push(parts.join(' · '));
+            if (Number(pictures.pictures || 0)) lines.push(picturesText(pictures));
+            if (!lines.length) return '';
+            return `<div style="font-size:12px;margin-top:6px;">${lines.join('<br>')}</div>`;
         }
 
         // Итог спектакля под занавесом — занавес это не режим, а конец спектакля,
@@ -2632,6 +2688,10 @@ HTML_TEMPLATE = """
                 lines.push('<div class="report-act">🗂 прежние слова есть у '
                     + `${pluralText(report.with_versions, 'реплики', 'реплик', 'реплик')}</div>`);
             }
+            // Картинок тут нет нарочно: их число — та же строка сайдбара
+            // (см. spentLine), а она стоит под занавесом сразу под этим итогом.
+            // Двумя строками об одном и том же итог читался бы как два разных
+            // счёта картинок — и один из них непонятно чей.
             // Цена — по актам: у реплики человека хода на счёте нет вовсе, и «0 ₽»
             // было бы не числом, а выдумкой (см. show.show_report)
             acts.forEach(act => {
@@ -2718,6 +2778,9 @@ HTML_TEMPLATE = """
                 + `<span class="prompt-tokens">${Number(m.tokens || 0) ? tokensText(m.tokens) + ' токенов' : '0 токенов текста'}</span>`
                 + `<span class="prompt-num">${i + 1}/${messages.length}</span></div>`
                 + (m.note ? `<div class="prompt-note">${escapeHtml(m.note)}</div>` : '')
+                // Сама картинка — над текстом, как и в ленте: ею реплика
+                // и приложена, и по ней модель отвечала (см. promptPicturesHtml)
+                + promptPicturesHtml(m.pictures)
                 + (m.content ? `<pre class="prompt-text">${escapeHtml(m.content)}</pre>` : '')
                 + `</div>`).join('');
         }
@@ -3132,15 +3195,48 @@ HTML_TEMPLATE = """
                 + '</div>';
         }
 
+        // Картинки, уехавшие сообщением в записи хода: их видно превью, и по ним
+        // же видно, какою они уехали, — с возможностью открыть оригинал. Раньше
+        // тут была только строка «к этой реплике приложено картинок: 1» — по ней
+        // не видно ни самой картинки, ни что она из себя представляет
+        // (см. show.message_pictures)
+        function promptPicturesHtml(pictures) {
+            if (!pictures || !pictures.length) return '';
+            return '<div class="prompt-pictures">'
+                + pictures.map(pictureBlockHtml).join('') + '</div>';
+        }
+
         // Приложенное к реплике — прямо над текстом: без этого непонятно, о чём
         // реплика, к которой приложена картинка. По клику она разворачивается
         // целиком — как и любой другой портрет (см. showAvatarFull)
+        //
+        // Под ней — сначала о ней самой: вид, стороны и вес файла («jpeg
+        // 1920×2560 · 2,7 Мб»). Это есть сразу, без ожидания чьего-то хода:
+        // про свою же картинку хочется знать сразу (см. show.attachment_view).
+        // Тут же и ссылка на оригинал — новым окном: так видно сам файл целиком,
+        // а не приведённое к обычному размеру (см. pictures.prepare)
+        //
+        // И только если она вправду куда-то уехала — следом слова о поездке,
+        // с именем места: «уехало моделям (Харита): jpeg 1536×2048 · 740,2 Кб».
+        // Раньше тут стояло безымянное «уехало модели» — оно и читалось как
+        // «что-то куда-то уехало» (см. show.sent_picture_words)
+        function pictureBlockHtml(one) {
+            return '<span class="picture-block">'
+                + `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
+                + ` onclick="showAvatarFull('${one.url}', true)">`
+                + (one.own ? `<span class="picture-own">${escapeHtml(one.own)} · `
+                    + `<a href="${escapeHtml(one.url)}" target="_blank"`
+                    + ' rel="noopener" onclick="event.stopPropagation()">открыть оригинал</a>'
+                    + '</span>' : '')
+                + (one.sent ? `<span class="picture-sent">${escapeHtml(one.sent)}</span>` : '')
+                + '</span>';
+        }
+
         function postAttachmentsHtml(post) {
             const list = post.attachments || [];
             if (!list.length) return '';
-            return '<div class="post-attachments">' + list.map(one =>
-                `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
-                + ` onclick="showAvatarFull('${one.url}', true)">`).join('') + '</div>';
+            return '<div class="post-attachments">'
+                + list.map(pictureBlockHtml).join('') + '</div>';
         }
 
         // Текст реплики в ленте. У хода, оборванного смертью процесса, текста нет
@@ -3905,9 +4001,10 @@ HTML_TEMPLATE = """
                 + `<button class="chip-drop" onclick="dropTopicPicture(${index})"`
                 + ' title="Убрать картинку от темы">✕</button></span>').join('');
             const box = document.getElementById('topicPictures');
-            if (box) box.innerHTML = topicPictures.map(one =>
-                `<img src="${escapeHtml(one.url)}" title="${escapeHtml(one.name)}"`
-                + ` onclick="showAvatarFull('${one.url}', true)">`).join('');
+            // Под картинкой темы — те же слова, что под приложенной к реплике:
+            // модели она уезжает так же, и приведена к тому же размеру
+            // (см. pictureBlockHtml, show.topic_picture_view)
+            if (box) box.innerHTML = topicPictures.map(pictureBlockHtml).join('');
             // Шапка после этого решает сама, видно ли тему: она видна и когда
             // слов нет, а картинка есть (см. setTopicDisplay)
             const words = document.getElementById('topicText');
@@ -3920,10 +4017,16 @@ HTML_TEMPLATE = """
             // Своё приложение ещё в пути: перебить его старым списком — значит
             // показать его же, но без только что приложенной картинки
             if (topicSavePending) return;
-            const now = (list || []).map(one => `${one.name}|${one.url}`).join(',');
-            const had = topicPictures.map(one => `${one.name}|${one.url}`).join(',');
+            // И слова о картинке — часть того же списка: они появляются, когда
+            // картинка вправду уехала, и без них подпись под ней так и не
+            // обновилась бы
+            const words = one => `${one.name}|${one.url}|${one.own || ''}|${one.sent || ''}`;
+            const now = (list || []).map(words).join(',');
+            const had = topicPictures.map(words).join(',');
             if (now === had) return;
-            topicPictures = (list || []).map(one => ({name: one.name, url: one.url}));
+            topicPictures = (list || []).map(one => ({name: one.name, url: one.url,
+                                                      own: one.own || '',
+                                                      sent: one.sent || ''}));
             renderTopicPictures();
         }
 

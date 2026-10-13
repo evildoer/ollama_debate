@@ -70,8 +70,171 @@ def _restore_math(rendered: str, stashed: list) -> str:
     return rendered
 
 
+# ============================================================
+# ТАБЛИЦЫ: МОДЕЛИ ПИШУТ ИХ ТРУБАМИ
+# ============================================================
+# Сводный ответ модели часто идёт таблицей — «| Участник | Оценка | Вердикт |»,
+# — и это ровно та разметка, до которой markdown сам не доходит: без
+# выравнивающей строки, с разъехавшимися по числу столбцов трубами или склеенная
+# в одну строку через <br>, она так и уезжает в ленту трубами. Здесь такие
+# таблицы приводятся к тому виду, какой markdown рисует (см. _table_lines),
+# а рисует их расширение tables — оно же разбирает разметку внутри клеток,
+# поэтому «**жирное**» в клетке остаётся жирным.
+#
+# Без библиотеки таблиц нет вовсе: рисовать их своими руками значило бы завести
+# второй разбор разметки, и он разошёлся бы с первым в первой же мелочи
+# (см. deps.MARKDOWN_AVAILABLE).
+
+# <br>, <br/> и <br /> — модели пишут и так, и так
+_BR_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+# Клетка выравнивающей строки: «---», «:---», «---:», «:---:»
+_DELIM_CELL_RE = re.compile(r"^:?-+:?$")
+
+
+def _row_cells(line: str) -> list:
+    """Клетки строки таблицы — пустой список, если строка на неё не похожа.
+
+    Строкой таблицы считается только строка в трубах с обеих сторон
+    («| A | B |»): так решается и обратное — строка прозы с одной трубой
+    («цена | скидка») таблицей не становится.
+    """
+    written = str(line or "").strip()
+    if len(written) < 2 or not written.startswith("|") or not written.endswith("|"):
+        return []
+    cells = [one.strip() for one in written[1:-1].split("|")]
+    return cells if len(cells) > 1 else []
+
+
+def _align_cells(line: str) -> list:
+    """Клетки выравнивающей строки — пустой список, если это не она.
+
+    Труба с обеих сторон ей не нужна: «--- | ---» модели пишут и без крайних.
+    """
+    written = str(line or "").strip()
+    if written.startswith("|"):
+        written = written[1:]
+    if written.endswith("|"):
+        written = written[:-1]
+    cells = [one.strip() for one in written.split("|")]
+    if len(cells) < 2 or not all(_DELIM_CELL_RE.match(one) for one in cells):
+        return []
+    return cells
+
+
+def _align_line(count: int, was: list = None) -> str:
+    """Выравнивающая строка на нужное число столбцов: «| --- | --- |».
+
+    Прежнее выравнивание сохраняется — «:---:» так и остаётся посередине, —
+    а разъехавшееся по числу столбцов досчитывается: без этого таблица
+    не рисуется вовсе.
+    """
+    was = list(was or [])
+    cells = [was[index] if index < len(was) and _DELIM_CELL_RE.match(was[index])
+             else "---" for index in range(count)]
+    return "| " + " | ".join(cells) + " |"
+
+
+def _row_parts(line: str) -> list:
+    """Строки таблицы из одной строки: модели пишут её через <br>.
+
+    Расходится по строкам только то, что целиком состоит из строк таблицы:
+    иначе обычное «первая<br>вторая» в реплике разъехалось бы по строкам
+    без всякой причины.
+    """
+    parts = [one.strip() for one in _BR_RE.split(str(line or "")) if one.strip()]
+    if len(parts) < 2:
+        return []
+    if not all(_row_cells(one) or _align_cells(one) for one in parts):
+        return []
+    return parts if any(_row_cells(one) for one in parts) else []
+
+
+def _table_block(lines: list, index: int):
+    """Таблица, начинающаяся со строки index: её строки — и что читать дальше.
+
+    Строки собираются подряд, пока похожи на строки таблицы: пустая строка или
+    обычный текст — конец таблицы. Одной строки мало: одиночная «| A | B |»
+    бывает просто строкой в трубах, а не таблицей.
+
+    Выравнивающая строка — вторая по счёту, если она вообще есть, — приводится
+    к числу столбцов первой строки (см. _align_line): именно из-за этого
+    расхождения таблица модели чаще всего и не рисуется.
+    """
+    header = _row_cells(lines[index])
+    if not header:
+        return None
+    block, cursor = [lines[index]], index + 1
+    while cursor < len(lines) and _row_cells(lines[cursor]):
+        block.append(lines[cursor])
+        cursor += 1
+    if len(block) < 2:
+        return None
+    align = _align_cells(block[1])
+    if align:
+        block[1] = _align_line(len(header), align)
+    else:
+        block.insert(1, _align_line(len(header)))
+    return block, cursor
+
+
+def _table_lines(lines: list) -> list:
+    """Строки текста — с таблицами, приведёнными к тому виду, какой markdown рисует.
+
+    Таблица ещё и отбивается пустой строкой от соседей: без этого markdown либо
+    не видит её вовсе, либо забирает себе в тело таблицы следующую за ней
+    реплику — и тогда последней строкой таблицы становится целый абзац.
+
+    Между «```» не трогается ничего: там пример разметки, а не разметка.
+    """
+    out, index, fenced = [], 0, False
+    while index < len(lines):
+        one = lines[index]
+        if one.strip().startswith("```"):
+            fenced = not fenced
+            out.append(one)
+            index += 1
+            continue
+        found = None if fenced else _table_block(lines, index)
+        if found is None:
+            out.append(lines[index])
+            index += 1
+            continue
+        block, index = found
+        if out and out[-1].strip():
+            out.append("")
+        out.extend(block)
+        if index < len(lines) and lines[index].strip():
+            out.append("")
+    return out
+
+
+def _tables_to_markdown(text: str) -> str:
+    """Таблицы в тексте — в том виде, какой markdown умеет нарисовать.
+
+    Сначала склеенная через <br> таблица расходится по строкам (см. _row_parts),
+    потом всякая таблица, и эта тоже, получает выравнивающую строку и пустые
+    строки вокруг себя (см. _table_lines). Внутри «```» не трогается ничего:
+    там пример разметки, а не разметка, и в таблицу он не превращается.
+    """
+    if not deps.MARKDOWN_AVAILABLE:
+        return text
+    lines, fenced = [], False
+    for one in str(text or "").split("\n"):
+        if one.strip().startswith("```"):
+            fenced = not fenced
+            lines.append(one)
+            continue
+        parts = [] if fenced else _row_parts(one)
+        lines.extend(parts or [one])
+    return "\n".join(_table_lines(lines))
+
+
 def markdown_to_html(text: str) -> str:
     text, stashed_math = _protect_math(text)
+    # Таблицы — до самой разметки: markdown не рисует ни склеенную через <br>,
+    # ни разъехавшуюся по столбцам, а после разметки строки реплики уже
+    # абзацами, и таблицу в них не собрать (см. _tables_to_markdown)
+    text = _tables_to_markdown(text)
     if not deps.MARKDOWN_AVAILABLE:
         text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
         text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
@@ -80,7 +243,7 @@ def markdown_to_html(text: str) -> str:
         text = text.replace('\n', '<br>')
         return _restore_math(text, stashed_math)
 
-    rendered = deps.markdown.markdown(text, extensions=['nl2br'])
+    rendered = deps.markdown.markdown(text, extensions=['nl2br', 'tables'])
     return _restore_math(rendered, stashed_math)
 
 def estimate_tokens(text: str) -> int:

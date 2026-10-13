@@ -362,6 +362,109 @@ class TestFormulas(unittest.TestCase):
         self.assertNotIn("<b>", html)
 
 
+# ---------------------------------------------------------------- таблицы
+
+class TestReplyTables(unittest.TestCase):
+    """Сводка модели по столбцам должна читаться таблицей, а не строкой из труб.
+
+    Модели отвечают так постоянно — «| Участник | Оценка | Вердикт |», — и почти
+    всегда в виде, до которого markdown сам не доходит: без выравнивающей строки,
+    с разъехавшимися по столбцам трубами или склеенная в одну строку через <br>
+    (см. text._tables_to_markdown). В ленте из этого обязана получиться таблица.
+    """
+
+    def test_the_squashed_table_from_the_question_becomes_a_table(self):
+        """Та самая, одной строкой через <br>: и столбцы, и жирное в клетках."""
+        html = text.markdown_to_html(
+            "| Участник | Оценка | Вердикт |<br>"
+            "|----------|--------|---------|<br>"
+            "| <strong>Роман</strong> | ⭐⭐⭐ (3/5) | Простой подход |<br>"
+            "| Евгения | ⭐⭐⭐⭐ (4/5) | Философия |")
+
+        self.assertIn("<table>", html, "таблица из одной строки так и осталась строкой")
+        self.assertIn("<th>Участник</th>", html)
+        self.assertIn("<strong>Роман</strong>", html, "жирное в клетке потерялось")
+        self.assertIn("<td>Философия</td>", html)
+        self.assertNotIn("|", html, "трубы остались в ленте")
+
+    def test_a_table_without_the_align_row_becomes_a_table(self):
+        """Без выравнивающей строки таблица тоже таблица: она досчитывается."""
+        html = text.markdown_to_html("| Кто | Сколько |\n| Роман | 3 |")
+
+        self.assertIn("<table>", html)
+        self.assertIn("<th>Кто</th>", html, "первая строка — шапка таблицы")
+        self.assertIn("<td>Роман</td>", html)
+
+    def test_the_align_row_is_recounted_by_the_header(self):
+        """Разъехавшиеся по столбцам трубы не губят таблицу: выравнивание пересчитано.
+
+        Именно на этом она чаше всего и не рисуется: в шапке три столбца,
+        в выравнивающей строке два — и markdown видит обычный текст.
+        """
+        html = text.markdown_to_html("| A | B | C |\n|---|---|\n| 1 | 2 | 3 |")
+
+        self.assertIn("<table>", html, "расхождение столбцов погасило таблицу")
+        self.assertEqual(html.count("<th>"), 3, "шапка потеряла столбец")
+
+    def test_the_alignment_of_columns_is_kept(self):
+        """Выравнивание, которое модель задала, остаётся при своих столбцах."""
+        html = text.markdown_to_html("| A | B |\n|:---|---:|\n| 1 | 2 |")
+
+        self.assertIn('style="text-align: left;"', html)
+        self.assertIn('style="text-align: right;"', html)
+
+    def test_the_table_does_not_swallow_the_reply_after_it(self):
+        """Реплика после таблицы остаётся репликой, а не последней строкой таблицы.
+
+        markdown тянет строки таблицей, пока они на строки похожи, и абзац,
+        прилипший к ней вплотную, уехал бы в тело таблицы (см. _table_lines).
+        """
+        html = text.markdown_to_html("| A | B |\n|---|---|\n| 1 | 2 |\nВот и всё.")
+
+        self.assertIn("<p>Вот и всё.</p>", html, "реплика уехала в таблицу")
+
+    def test_prose_with_a_pipe_stays_prose(self):
+        """Строка прозы с одной трубой — не таблица: «|» есть и в обычном тексте."""
+        html = text.markdown_to_html("Курс $5 | доставка\nНичего | тут")
+
+        self.assertNotIn("<table>", html)
+        self.assertIn("Курс $5 | доставка", html)
+
+    def test_a_single_row_in_pipes_is_not_a_table(self):
+        """Одна строка в трубах таблицей не становится: шапка без тела — не таблица."""
+        html = text.markdown_to_html("как-то так: | a | b |")
+
+        self.assertNotIn("<table>", html)
+        self.assertIn("| a | b |", html)
+
+    def test_an_example_inside_a_code_block_stays_an_example(self):
+        """В примере разметки (в «```») таблицу рисовать нечего."""
+        html = text.markdown_to_html("Пример:\n```\n| A | B |\n| 1 | 2 |\n```\nконец")
+
+        self.assertNotIn("<table>", html, "пример разметки превратили в таблицу")
+        self.assertIn("| A | B |", html)
+
+    def test_a_formula_in_a_cell_survives(self):
+        """Формула в клетке — тот же математический элемент, а не развалившаяся разметка."""
+        html = text.markdown_to_html("| Что | Как |\n|---|---|\n| предел | $x^2$ |")
+
+        self.assertIn("<table>", html)
+        self.assertIn('<span class="math"', html, "формула в клетке рассыпалась")
+
+    def test_without_the_library_no_tables_are_invented(self):
+        """Без библиотеки разметки труб не трогают: выдуманных строк она не пишет.
+
+        Досчитанная выравнивающая строка без markdown осталась бы в ленте
+        открытым текстом — «--- | ---» посреди реплики.
+        """
+        reply = "| A | B |\n| 1 | 2 |"
+        with mock.patch.object(deps, "MARKDOWN_AVAILABLE", False):
+            html = text.markdown_to_html(reply)
+
+        self.assertNotIn("--- |", html, "в реплику уехала выравнивающая строка")
+        self.assertIn("| A | B |", html)
+
+
 # ---------------------------------------------------------------- аватары
 
 class TestAvatarNames(unittest.TestCase):
@@ -2716,6 +2819,64 @@ class TestTurnReport(unittest.TestCase):
         self.assertNotIn("images", post["turn"],
                          "в сводку реплики попали картинки")
 
+    def test_the_dump_says_what_the_picture_arrived_as(self):
+        """Картинка уехала — и в ДАМПе видно, какою: рядом с приложенным.
+
+        Строка о приложенном пишется тогда, когда реплика сказана, а уехать
+        картинка может только позже — и уже приведённой к обычному размеру
+        (см. dump_note_picture_travel, pictures.prepare). Поэтому её досчитывает
+        сам ход, когда картинки вправду уехали.
+        """
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+        for name, value in (("UPLOAD_DIR", folder), ("DUMP_FILE", dump)):
+            patcher = mock.patch.object(settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        picture, error = show.save_upload("значок.png",
+                                          cloud._solid_picture(8, (200, 30, 30)))
+        self.assertEqual(error, "", "картинка обязана приниматься")
+        self.addCleanup(show._dump_reset)
+        show.start_dump(self.session.topic)
+        self.session.add_post("Живой", "human", "Смотрите, что нашёл.", 1,
+                              attachments=[picture])
+
+        with mock.patch.object(ollama_api, "takes_images", return_value=True):
+            self._turn()
+        written = dump.read_text(encoding="utf-8")
+
+        self.assertIn("**Уехало модели:**", written,
+                      "в ДАМПе не сказано, какою картинка уехала модели")
+        self.assertIn("приложено 8×8", written,
+                      "не с чем сравнить: приложенная сторона не названа")
+
+    def test_the_dump_says_nothing_about_a_picture_that_stayed_behind(self):
+        """Слепой модели картинка не уезжает — и файл про это не врёт.
+
+        Строка «уехало» — не про то, что приложили, а про то, что получила
+        модель: у слепой она не получила ничего (см. commit_shown_pictures).
+        """
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+        for name, value in (("UPLOAD_DIR", folder), ("DUMP_FILE", dump)):
+            patcher = mock.patch.object(settings, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        picture, error = show.save_upload("значок.png",
+                                          cloud._solid_picture(8, (200, 30, 30)))
+        self.assertEqual(error, "")
+        self.addCleanup(show._dump_reset)
+        show.start_dump(self.session.topic)
+        self.session.add_post("Живой", "human", "Смотрите.", 1,
+                              attachments=[picture])
+
+        with mock.patch.object(ollama_api, "takes_images", return_value=False):
+            self._turn()
+        written = dump.read_text(encoding="utf-8")
+
+        self.assertNotIn("**Уехало модели:**", written,
+                         "картинка записана уехавшей, а модель её не видела")
+
     def test_the_price_of_a_turn_comes_from_the_balance_not_from_tariffs(self):
         """Цена хода — разница остатков на ключе: тарифов мы не знаем, счёт знает шлюз.
 
@@ -4011,6 +4172,7 @@ class TestStatusPriceAndLongTexts(unittest.TestCase):
         body = self.page[start:self.page.index("function postTurnHtml(", start)]
         self.assertIn("clampLongTexts(body)", body,
                       "свёртку нечем включить: простыни останутся простынями")
+
 
 
 # ---------------------------------------------------------------- посты
@@ -8813,6 +8975,274 @@ class TestWhoReadsPictures(CloudVisionTest):
         self.assertNotIn("fake-awake-model", ollama_api._VISION_FACTS)
 
 
+class TestWhatTheModelGot(PicturesTest):
+    """Какою картинка уехала модели — об этом говорят и лента, и ДАМП.
+
+    Файл на диске остаётся режиссёрским, а модель получает приведённый
+    к обычному размеру (см. pictures.prepare) — значит, по самой картинке в ленте
+    этого не видно вовсе, и «приложил значок 8×8, а что получила модель?»
+    оставалось без ответа. Поэтому рядом с приложенной и стоят слова о том,
+    что уехало: в ленте подписью под картинкой (см. show.post_view), в ДАМПе —
+    строкой за строкой о приложенном (см. dump_note_picture_travel), а в ходе
+    реплики — в самом сообщении, которое уехало (см. message_note).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.session = make_session()
+        strip_session_patch(self, self.session)
+
+    @staticmethod
+    def tiny() -> str:
+        """Картинка мельче обычного: вендор такую не берёт — её и увеличивают."""
+        return cloud._solid_picture(8, (200, 30, 30))
+
+    def attach_tiny(self) -> dict:
+        """Мелкая картинка в том виде, в каком её отдаёт /api/upload."""
+        attachment, error = show.save_upload("значок.png", self.tiny())
+        self.assertEqual(error, "", "картинка обязана приниматься")
+        return attachment
+
+    def show_to(self, url: str, place: dict) -> None:
+        """Отметить картинку уехавшей этому месту — как это делает удачный ход.
+
+        Показанной картинка становится только тогда, когда ход вправду доехал
+        (см. commit_shown_pictures): про «собирались отправить» лента молчит.
+        """
+        self.session.images_shown.setdefault(place["model"], set()).add(url)
+
+    def test_the_feed_says_what_the_picture_itself_is(self):
+        """Под приложенной сразу видно, что это за картинка: вид, стороны и вес.
+
+        Не после чьего-то хода, а с первого же показа: про свою же картинку
+        хочется знать сразу (см. show.own_picture_words).
+        """
+        picture = self.attach_tiny()
+
+        shown = show.post_view({"display_name": "Иван",
+                                "attachments": [picture]})["attachments"][0]
+
+        self.assertEqual(shown["url"], picture["url"])
+        self.assertIn("png 8×8", shown["own"], "в ленте не сказано, что за картинка")
+        self.assertNotIn("sent", shown,
+                         "о поездке говорят только тогда, когда она состоялась")
+
+    def test_the_feed_says_who_the_picture_went_to(self):
+        """Уехавшая картинка называется и сторонами с весом, и именем места.
+
+        Без имени читалось как «что-то куда-то уехало»: у реплики человека
+        никакой модели рядом не видно (см. show.sent_picture_words).
+        """
+        picture = self.attach_tiny()
+        place = plain_participant(self.session)
+
+        show.post_image_pairs([picture])          # отправка
+        self.show_to(picture["url"], place)
+        told = show.post_view({"display_name": "Иван",
+                               "attachments": [picture]})["attachments"][0]["sent"]
+
+        self.assertIn("64×64", told, "в ленте не сказано, какою картинка уехала")
+        self.assertIn("приложено 8×8", told,
+                      "не с чем сравнить: приложенная сторона не названа")
+        self.assertIn(place["display_name"], told,
+                      "не сказано, какой модели уехало")
+
+    def test_a_picture_prepared_but_never_delivered_is_not_told_as_sent(self):
+        """Картинку собрали в дорогу, а ход сорвался — уехавшей она не считается.
+
+        Показанной картинка становится только после удачного хода (см.
+        commit_shown_pictures), поэтому в ленте она остаётся своей, без слов
+        о поездке, которой не было.
+        """
+        picture = self.attach_tiny()
+
+        show.post_image_pairs([picture])          # отправка сорвалась
+        shown = show.post_view({"display_name": "Иван",
+                                "attachments": [picture]})["attachments"][0]
+
+        self.assertNotIn("sent", shown,
+                         "о неудавшейся поездке говорят как о состоявшейся")
+
+    def test_the_dump_writes_it_next_to_the_attached(self):
+        """В ДАМПе — тут же за строкой о приложенном и только один раз.
+
+        Приложенное пишется в файл тогда, когда реплика сказана, а уехать оно
+        может только позже (см. dump_note_picture_travel) — поэтому строка
+        дописывается потом, но встаёт рядом с приложенным.
+        """
+        picture = self.attach_tiny()
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Тема")
+            self.addCleanup(show._dump_reset)
+            show.session.add_post("Живой", "human", "Смотрите.", 1,
+                                  attachments=[picture])
+            show.post_image_pairs([picture])
+            show.dump_note_picture_travel([picture["url"]])
+            first = dump.read_text(encoding="utf-8")
+            show.dump_note_picture_travel([picture["url"]])   # тот же ход ещё раз
+            second = dump.read_text(encoding="utf-8")
+
+        lines = [one for one in first.splitlines() if one.strip()]
+        attached = next(index for index, one in enumerate(lines)
+                        if one.startswith("**Приложено:**"))
+        self.assertTrue(lines[attached + 1].startswith("**Уехало модели:**"),
+                        "строка о том, что уехало, встала не рядом с приложенным")
+        self.assertIn("64×64", lines[attached + 1])
+        self.assertIn("приложено 8×8", lines[attached + 1])
+        self.assertEqual(first, second, "та же картинка расписана в файле дважды")
+
+    def test_the_play_comes_back_with_the_attached_picture(self):
+        """Строка о том, что уехало, возврату спектакля не мешает: картинка — при нём.
+
+        Её читают глазами, а приложенное ищут по своим строкам (см.
+        _attachments_from): дописанное рядом не должно отнимать у адреса
+        его строку.
+        """
+        picture = self.attach_tiny()
+        folder = Path(tempfile.mkdtemp())
+        dump = folder / "damp.md"
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("Тема")
+            self.addCleanup(show._dump_reset)
+            show.session.add_post("Живой", "human", "Смотрите.", 1,
+                                  attachments=[picture])
+            show.post_image_pairs([picture])
+            show.dump_note_picture_travel([picture["url"]])
+            written = dump.read_text(encoding="utf-8")
+
+        play = show.parse_dump(written, store=False)
+
+        self.assertEqual([one["url"] for one in play["posts"][0]["attachments"]],
+                         [picture["url"]], "приложенное не вернулось из записи")
+
+    def test_the_turn_report_names_the_place_when_it_is_read_later(self):
+        """Отчёт читают и после хода: слова о картинке в нём — нынешние.
+
+        Запись складывается в тот миг, когда картинка только собирается уехать,
+        и имён в ней тогда нет; «собирались отправить» в отчёте о том, что было,
+        читалось бы как неправда (см. show.turn_report, message_pictures_now).
+        """
+        picture = self.attach_tiny()
+        place = plain_participant(self.session)
+        pairs = show.post_image_pairs([picture])
+        self.session.turn_log[7] = {
+            "messages": [show._message_view(
+                {"role": "user", "content": "Смотрите",
+                 "images": [payload for _url, payload in pairs]})]}
+
+        before = self.session.turn_report(7)["messages"][0]["pictures"][0]
+        self.assertNotIn("sent", before, "уехавшим ход назван до того, как он был")
+
+        self.show_to(picture["url"], place)
+        after = self.session.turn_report(7)["messages"][0]["pictures"][0]
+
+        self.assertIn("64×64", after["sent"], "в отчёте не сказано, какою уехала")
+        self.assertIn(place["display_name"], after["sent"],
+                      "в отчёте не сказано, кому уехала")
+
+    def test_the_pictures_that_went_are_counted(self):
+        """Счёт картинок: показы по моделям, а вес — по длине уехавших данных.
+
+        Одна картинка двум моделям — это два показа, и по одному числу этого
+        не видно (см. show.pictures_report). Вес — наш счёт и по каждому
+        показу: в запросе каждой модели картинка лежала своей строкой, и место
+        там занимала такое же (см. sent_picture_tokens).
+        """
+        picture = self.attach_tiny()
+        _url, payload = show.post_image_pairs([picture])[0]
+        self.session.images_shown = {"модель-а": {picture["url"]},
+                                     "модель-б": {picture["url"]}}
+
+        told = show.pictures_report()
+
+        self.assertEqual(told["pictures"], 1, "картинка одна")
+        self.assertEqual(told["trips"], 2, "двум моделям — два показа")
+        self.assertEqual(told["tokens"], 2 * text.estimate_tokens(payload),
+                         "вес уехавшей картинки считается её же данными — по каждому показу")
+        self.assertEqual(told["unknown"], 0)
+
+    def test_a_picture_whose_weight_is_unknown_is_not_counted_as_zero(self):
+        """Картинка из прежнего запуска — без нашего счёта, и об этом сказано.
+
+        Данных её в памяти уже нет, и «0 токенов» тут — не число, а выдумка
+        (см. show.pictures_report).
+        """
+        self.session.images_shown = {"модель-а": {"/uploads/прежняя.png"}}
+
+        told = show.pictures_report()
+
+        self.assertEqual(told["pictures"], 1)
+        self.assertEqual(told["tokens"], 0)
+        self.assertEqual(told["unknown"], 1, "о неизвестном весе надо сказать")
+
+    def test_the_turn_report_carries_the_picture_itself(self):
+        """У сообщения в записи хода — сама картинка, а не только след о ней.
+
+        Раньше там было одно «уехали вместе с ней»: ни превью, ни оригинала,
+        и по отчёту не видно, на что модель смотрела (см. show.message_pictures).
+        """
+        picture = self.attach_tiny()
+        place = plain_participant(self.session)
+        pairs = show.post_image_pairs([picture])
+
+        shown = show._message_view({"role": "user", "content": "Смотрите",
+                                    "images": [payload for _url, payload in pairs]})
+
+        self.assertEqual(len(shown["pictures"]), 1, "картинка хода потерялась")
+        self.assertEqual(shown["pictures"][0]["url"], picture["url"])
+        self.assertEqual(shown["pictures"][0]["name"], "значок.png")
+        self.assertIn("png 8×8", shown["pictures"][0]["own"],
+                      "в отчёте не видно, что это за картинка")
+        self.assertNotIn("sent", shown["pictures"][0], "ход на нём не состоялся")
+
+        self.show_to(picture["url"], place)
+        sent = show._message_view({"role": "user", "content": "Смотрите",
+                                   "images": [payload for _url, payload in pairs]})
+        self.assertIn("64×64", sent["pictures"][0]["sent"])
+        self.assertIn(place["display_name"], sent["pictures"][0]["sent"])
+
+    def test_the_turn_report_says_what_the_picture_arrived_as(self):
+        """Ход реплики: у самого сообщения сказано, какою картинку получила модель."""
+        picture = self.attach_tiny()
+        sent = show.post_images([picture])
+
+        words = show.sent_pictures_words(sent)
+
+        self.assertIn("png 64×64", words, "в отчёте не сказано, во что привели картинку")
+        note = show.message_note({"role": "user", "content": "смотри",
+                                  "images": sent})
+        self.assertIn("уехали вместе с ней", note)
+        self.assertIn("png 64×64", note)
+
+    def test_what_is_not_a_picture_is_not_printed_as_one(self):
+        """Мусор в поле images подписью не дополняется: о нём сказать нечего."""
+        self.assertEqual(show.sent_pictures_words(["вовсе не картинка"]), "")
+        note = show.message_note({"role": "user", "content": "слова",
+                                  "images": ["вовсе не картинка"]})
+        self.assertEqual(note, "к этой реплике приложено картинок: 1 — уехали вместе с ней")
+
+    def test_the_topic_picture_is_told_the_same_way(self):
+        """Картинка темы уезжает и описывается теми же словами, что приложенная."""
+        picture = self.attach_tiny()
+        place = plain_participant(self.session)
+
+        bare = show.topic_picture_view({**picture, "since": 0})
+        self.assertIn("png 8×8", bare["own"],
+                      "о картинке темы не сказано, что она из себя представляет")
+        self.assertNotIn("sent", bare, "о поездке молчат, пока её не было")
+
+        show.post_image_pairs([picture])
+        self.show_to(picture["url"], place)
+        view = show.topic_picture_view({**picture, "since": 0})
+
+        self.assertIn("64×64", view["sent"])
+        self.assertIn("приложено 8×8", view["sent"])
+        self.assertIn(place["display_name"], view["sent"],
+                      "не сказано, какой модели уехало")
+
+
 class TestVisionCheckedAtTheStart(CloudVisionTest):
     """Проверка зрения идёт сама, а её ответ помнится.
 
@@ -10135,6 +10565,113 @@ class TestPageScript(unittest.TestCase):
             "textNeedsClamp(240, 0, 16)")        # высота строки неизвестна — не гадаем
         self.assertEqual(out, [False, True, True, False])
 
+    def test_the_lane_shows_what_the_picture_is_and_where_to_open_it(self):
+        """Под картинкой в ленте — что она из себя представляет и ссылка на оригинал.
+
+        Слова считает сервер (см. show.attachment_view), а показывает их страница —
+        и уедет в браузер такой, какою написана (см. postAttachmentsHtml).
+        Ссылка ведёт новым окном: клик по самой картинке разворачивает её тут же,
+        а новым окном открывают сам файл целиком.
+        """
+        picture = ("{attachments: [{name: 'значок.png', url: '/uploads/a.png',"
+                   " own: 'png 8×8 · 74 Б', sent: '🖼 уехало моделям (Харита):"
+                   " png 64×64 · 180 Б (приложено 8×8 · 74 Б)'}]}")
+        out = self._run_page(
+            ("escapeHtml", "pictureBlockHtml", "postAttachmentsHtml"),
+            f"postAttachmentsHtml({picture})",
+            "postAttachmentsHtml({attachments: [{name: 'значок.png',"
+            " url: '/uploads/a.png'}]})")
+
+        self.assertIn("png 8×8", out[0], "не сказано, что это за картинка сама по себе")
+        self.assertIn("png 64×64", out[0], "в ленте не сказано, какою картинка уехала")
+        self.assertIn("Харита", out[0], "не сказано, какой модели уехало")
+        self.assertIn("/uploads/a.png", out[0], "подпись потеряла свою картинку")
+        self.assertIn('target="_blank"', out[0],
+                      "оригинал не открыть новым окном")
+        self.assertIn('href="/uploads/a.png"', out[0], "ссылка ведёт не на оригинал")
+        self.assertNotIn("picture-sent", out[1],
+                         "слова о поездке появились у картинки, которую не отправляли")
+        self.assertNotIn("picture-own", out[1],
+                         "подпись нарисована там, где сервер её не присылал")
+
+    def test_the_turn_report_shows_the_picture_to_the_reader(self):
+        """Картинка хода рисуется превью, с подписью и ссылкой на оригинал.
+
+        В записи хода картинка едет адресом и словами о ней (см.
+        show.message_pictures), а показывает её страница — и уедет в браузер
+        такой, какою написана (см. promptPicturesHtml).
+        """
+        out = self._run_page(
+            ("escapeHtml", "tokensText", "pictureBlockHtml", "promptPicturesHtml",
+             "promptMessagesHtml"),
+            "promptMessagesHtml([{role: 'user', name: 'живой', tokens: 10,"
+            " content: 'Смотрите', note: 'приложено картинок: 1',"
+            " pictures: [{name: 'значок.png', url: '/uploads/a.png',"
+            " own: 'png 8×8 · 74 Б',"
+            " sent: '🖼 уехало моделям (Харита): png 64×64 · 180 Б'}]}])",
+            "promptMessagesHtml([{role: 'user', name: 'живой', tokens: 10,"
+            " content: 'Без картинки'}])",
+            constants=("ROLE_WORDS",))
+
+        self.assertIn("/uploads/a.png", out[0], "картинки хода в отчёте нет")
+        self.assertIn("png 8×8", out[0], "не сказано, что это за картинка")
+        self.assertIn("png 64×64", out[0], "не сказано, какою она уехала")
+        self.assertIn("Харита", out[0], "не сказано, какой модели уехало")
+        self.assertIn('target="_blank"', out[0],
+                      "оригинал из отчёта не открыть новым окном")
+        self.assertNotIn("prompt-pictures", out[1],
+                         "картинки нарисованы у сообщения, которого не было")
+
+    def test_the_pictures_are_counted_in_the_status_and_under_the_curtain(self):
+        """Сколько картинок уехало и во что обошлось — и на ходу, и в итоге.
+
+        Счёт наш: вендор о цене картинки отдельно не говорит, и выдать его
+        число за своё значило бы соврать (см. show.sent_picture_tokens).
+        Проверяется настоящим node: это та же строка, что уедет в браузер
+        (см. page.picturesText, spentLine).
+        """
+        out = self._run_page(
+            ("tokensText", "moneyText", "pluralForm", "pluralText",
+             "picturesText"),
+            "picturesText({pictures: 2, trips: 3, tokens: 1200})",
+            "picturesText({pictures: 1, trips: 1, tokens: 0})",
+            "picturesText({pictures: 4, trips: 4, tokens: 900, unknown: 1})")
+
+        self.assertIn("уехало моделям картинок — 2", out[0])
+        self.assertIn("показов — 3", out[0],
+                      "одна картинка двум моделям — это два показа, и это видно")
+        self.assertIn("наш счёт — 1\u00a0200 токенов", out[0])
+        self.assertNotIn("показов", out[1],
+                         "когда показов столько же, сколько картинок, второе число ни о чём")
+        self.assertNotIn("наш счёт", out[1],
+                         "пустой счёт — не «ноль токенов», а «нечего сказать»")
+        self.assertIn("у 1 вес неизвестен", out[2],
+                      "о картинке без нашего счёта молчат, а не считают её нулём")
+        self.assertIn("picturesText(pictures)", page.HTML_TEMPLATE,
+                      "в блоке «Статус» картинок нет")
+        # Строка картинок одна на всю страницу: она стоит в строке цены, а та
+        # показывается и на ходу, и под занавесом (см. spentLine). Второй раз
+        # в самом итоге она читалась бы как другой счёт
+        self.assertEqual(page.HTML_TEMPLATE.count("picturesText("), 2,
+                         "строк картинок должно быть две: сама и её вызов")
+
+    def test_the_price_and_the_pictures_share_the_status_line(self):
+        """Картинки видны в блоке «Статус» и без цены: это не одна и та же плата.
+
+        У местного спектакля цена нулевая, а картинки всё равно уезжали —
+        и знать о них надо там же, где о цене (см. page.spentLine).
+        """
+        spent = self._run_page(
+            ("tokensText", "moneyText", "pluralForm", "pluralText",
+             "picturesText", "spentLine"),
+            "spentLine({spent: 1.5, pictures: {pictures: 2, trips: 2, tokens: 1200}})",
+            "spentLine({pictures: {pictures: 2, trips: 2, tokens: 1200}})")
+
+        self.assertIn("картинок — 2", spent[0])
+        self.assertIn("за спектакль", spent[0], "цена и картинки — обе в одной строке")
+        self.assertIn("картинок — 2", spent[1],
+                      "без цены одни картинки — не повод молчать")
+
     def test_the_show_price_is_named_or_silent_when_there_is_nothing_to_pay(self):
         """Строка цены для сайдбара: с копейками, а на нуле — пустая.
 
@@ -10228,6 +10765,7 @@ class TestPageScript(unittest.TestCase):
         script += "\n" + "\n".join(self._function(name) for name in (
             "escapeHtml", "tokensText", "durationText", "stepClock", "turnAskText",
             "promptMessagesHtml", "promptRemovedHtml", "thinkingBlockHtml",
+            "promptPicturesHtml", "pictureBlockHtml",
             "addedPurpose", "turnBlock", "turnAnswerHtml", "turnBodyHtml"))
         script += f"\nconsole.log(turnBodyHtml({payload}));"
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False,
@@ -10510,7 +11048,7 @@ class TestPageScript(unittest.TestCase):
         """
         out = self._run_page(
             ("escapeHtml", "avatarHtml", "modelReadsImages", "visionMark",
-             "postAttachmentsHtml"),
+             "pictureBlockHtml", "postAttachmentsHtml"),
             "(() => {"
             " visionModels = ['llava:latest', 'cloud:google/gemini-2.0-flash'];"
             " return [visionMark(null, 'llava'), visionMark(null, 'qwen3'),"

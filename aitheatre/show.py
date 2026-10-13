@@ -698,13 +698,192 @@ def post_view(post: dict) -> dict:
     и в новых, и в уже сказанных. У реплик того, кого в составе больше нет,
     остаётся лицо, с которым он говорил: это и есть та единственная память
     о портрете, ради которой его стоит хранить в посте.
+
+    И у каждого приложенного — свои слова (см. attachment_view): что это за
+    картинка сама по себе и какою она уехала тем, кому уехала. Файл на диске
+    остаётся режиссёрским, а модель получает приведённый к обычному размеру, —
+    и по этой записи видно, кому что досталось, не выпрашивая это у сервера
+    отдельно на каждую отрисовку ленты.
     """
     url, emoji = participant_face(post.get("display_name"))
-    if not url and not emoji:
+    attachments = attachment_views(post.get("attachments"))
+    if not url and not emoji and not attachments:
         return post
     view = dict(post)
-    view["avatar_url"] = _avatar_that_exists(url) or None
-    view["avatar_emoji"] = emoji or post.get("avatar_emoji") or "📣"
+    if attachments:
+        view["attachments"] = attachments
+    if url or emoji:
+        view["avatar_url"] = _avatar_that_exists(url) or None
+        view["avatar_emoji"] = emoji or post.get("avatar_emoji") or "📣"
+    return view
+
+
+def attachment_views(attachments: list) -> list:
+    """Приложенное к реплике — для страницы: имя, адрес и свои слова.
+
+    Пустой список — приложенного нет вовсе. Тем же счётом живут и приложенное
+    к теме (см. topic_picture_view), и картинки в записи хода (см.
+    message_pictures): одна картинка — одни и те же слова о ней.
+    """
+    out = []
+    for one in attachments or []:
+        view = attachment_view(one)
+        if view:
+            out.append(view)
+    return out
+
+
+def attachment_view(one: dict) -> dict:
+    """Приложенная картинка для страницы — или пусто, если адреса в ней нет.
+
+    own — что это за картинка сама по себе: «jpeg 1920×2560 · 2,7 Мб». Есть
+    всегда (вид и стороны читаются только из заголовка файла, см.
+    pictures.picture_marks), и читается это сразу: про свою же картинку
+    хочется знать не только после того, как её кто-то получил.
+
+    sent — какою она уехала моделям и кому именно: появляется, когда она
+    вправду уехала (см. picture_travellers, travelled_picture_words).
+    """
+    url = str((one or {}).get("url") or "").strip()
+    if not url:
+        return {}
+    view = {"url": url,
+            "name": str((one or {}).get("name") or "").strip()
+                    or url.rsplit("/", 1)[-1]}
+    own = own_picture_words(url)
+    if own:
+        view["own"] = own
+    sent = sent_picture_words(url)
+    if sent:
+        view["sent"] = sent
+    return view
+
+
+def own_picture_words(url: str) -> str:
+    """Что это за картинка сама по себе: «jpeg 1920×2560 · 2,7 Мб» (пусто — не прочитать).
+
+    Читается из заголовка файла и помнится по имени файла и весу (см.
+    _ATTACHED_MARKS): лента спрашивает об этом на каждой отрисовке, а картинка
+    при этом не перечитывается.
+    """
+    key = _picture_key(url)
+    if key is None:
+        return ""
+    marks = _ATTACHED_MARKS.get(key)
+    if marks is None:
+        try:
+            raw = (settings.UPLOAD_DIR / key[0]).read_bytes()
+        except OSError:
+            return ""
+        marks = {**pictures.picture_marks(raw), "bytes": len(raw)}
+        if not marks.get("kind"):
+            return ""
+        _ATTACHED_MARKS[key] = marks
+    return pictures.marks_words(marks)
+
+
+def picture_travellers(url: str) -> list:
+    """Кому из состава картинка уехала — именами мест, в порядке состава.
+
+    Читается там же, где решается «показывать ли её ещё раз» (см. images_shown):
+    показанной картинка становится после удачного хода, поэтому это и есть
+    «кому она вправду уехала», а не «кому её собирались отправить». Один
+    и тот же файл дважды одному месту не считается — это множество.
+    """
+    shown = getattr(session, "images_shown", None) or {}
+    who = []
+    for place in getattr(session, "runtime_participants", None) or []:
+        name = str(place.get("display_name") or "")
+        model = str(place.get("model") or "")
+        if name and model and url in shown.get(model, set()):
+            who.append(name)
+    return who
+
+
+def sent_picture_words(url: str) -> str:
+    """Какою картинка уехала моделям — и кому именно: «🖼 уехало моделям (Харита): …».
+
+    Пусто — никому не уехала, и говорить тут не о чем. «Кому» берётся у состава
+    (см. picture_travellers): слова без имени модели и читались как «что-то куда-то
+    уехало» (см. page.postAttachmentsHtml).
+    """
+    who = picture_travellers(url)
+    if not who:
+        return ""
+    words = travelled_picture_words(url)
+    return (f"🖼 уехало моделям ({', '.join(who)}): {words}" if words
+            else f"🖼 уехало моделям ({', '.join(who)})")
+
+
+def sent_picture_tokens(url: str):
+    """Наш счёт веса уехавшей картинки в запросе (None — картинка не уезжала).
+
+    Вендор о цене картинки отдельно не говорит: в его числах она уже слита
+    с текстом запроса. А длина её данных в том же запросе видна — по ней
+    и считаем тем же счётом, каким приложение меряет историю (см.
+    text.estimate_tokens), чтобы число сходилось с тем, чем резали.
+    """
+    key = _picture_key(url)
+    marks = _UPLOAD_MARKS.get(key) if key else None
+    if not marks:
+        return None
+    return marks.get("tokens")
+
+
+def pictures_report() -> dict:
+    """Сколько картинок уехало моделям и во что это обошлось.
+
+    Считается по тому же следу, по которому решается «показывать ли её ещё раз»
+    (см. images_shown): картинка, уехавшая двум моделям, — это два показа,
+    а сама она одна. Показанным считается только то, что доехало вместе
+    с удачным ходом, — иначе счёт был бы про намерения, а не про отправки.
+
+    Токены — наш счёт (см. sent_picture_tokens) и по каждому показу: одна
+    и та же картинка, уехавшая двум моделям, оплачена дважды — в запросе
+    каждой она лежала своей строкой, и место там занимала такое же. А у картинки,
+    вернувшейся из ДАМПа прошлого запуска, счёта может и не быть — про такие
+    говорится отдельно, а не «ноль».
+    """
+    shown = getattr(session, "images_shown", None) or {}
+    urls, trips, tokens, unknown = set(), 0, 0, 0
+    for places in shown.values():
+        for url in places:
+            trips += 1
+            urls.add(url)
+            cost = sent_picture_tokens(url)
+            if cost is None:
+                unknown += 1
+            else:
+                tokens += int(cost or 0)
+    return {"pictures": len(urls), "trips": trips,
+            "tokens": tokens, "unknown": unknown}
+
+
+def travelled_picture_words(url: str) -> str:
+    """Какою картинка уехала модели: «png 64×64 · 169 Б (приложено 8×8 · 75 Б)».
+
+    Пусто — картинка ещё никуда не уезжала, и сказать о ней нечего. Известно это
+    с той самой отправки: картинка приводится к обычному размеру один раз на файл
+    (см. post_image_pairs), и другой раз за неё никто не платит.
+    """
+    key = _picture_key(url)
+    marks = _UPLOAD_MARKS.get(key) if key else None
+    if not marks:
+        return ""
+    return pictures.travel_words(marks.get("sent"), marks.get("attached"))
+
+
+def topic_picture_view(one: dict) -> dict:
+    """Картинка к теме — для страницы: имя, адрес и свои слова.
+
+    Тем же счётом, что у приложенного к реплике (см. attachment_view): картинка
+    темы уезжает моделям так же, и во что её привели — видно там же.
+    """
+    view = dict(one or {})
+    marked = attachment_view(view)
+    for key in ("own", "sent"):
+        if marked.get(key):
+            view[key] = marked[key]
     return view
 
 
@@ -735,9 +914,10 @@ def version_view(post: dict) -> dict:
         "model_used": post.get("model_used") or "",
         "why": "изменена" if human else "переиграна",
         # Копией, а не ссылкой: список версий — летопись, и приложенное в ней
-        # живёт своей жизнью, даже когда у реплики оно уже другое
-        "attachments": [dict(one) for one in post.get("attachments") or []
-                        if str((one or {}).get("url") or "").strip()],
+        # живёт своей жизнью, даже когда у реплики оно уже другое. А слова
+        # о картинке — те же, что у реплики в ленте (см. attachment_views):
+        # версия и сама картинка — одно и то же
+        "attachments": attachment_views(post.get("attachments")),
     }
 
 
@@ -905,6 +1085,10 @@ def attachment_lines(post: dict) -> list:
     видна и после перезапуска театра. А сами данные лежат тут же, следующей
     строкой (см. attachment_section, picture_data_lines): без них картинка
     жила бы только в папке своего экземпляра.
+
+    Строка о том, какою картинка уехала модели, встаёт тут же, следом
+    (см. dump_note_picture_travel): приложенное пишется в файл тогда, когда
+    реплика сказана, а уехать оно может только позже.
     """
     out = []
     for one in post.get("attachments") or []:
@@ -1167,17 +1351,13 @@ def dump_step_sink(step: dict, piece: str = None) -> None:
     dump_write(step_markdown(step) + "\n")
 
 
-def _dump_replace_line(prefix: str, new_text: str) -> None:
-    """Переписать в ДАМПе строку, начинающуюся с `prefix`.
+def _dump_rewrite(change) -> None:
+    """Переписать ДАМП по строкам: change(строки) — строки или None (писать нечего).
 
-    Живое письмо и правка тут не спорят. Строка появляется в файле в тот миг,
-    когда событие случилось, — тогда у неё нет ни времени окончания, ни чисел
-    вендора: ждать с записью нельзя, иначе у оборванного хода не осталось бы
-    следа. А показывать устаревшее — врать: «1 токенов» у мыслей, текст
-    которых на семьсот токенов, читается как ошибка. Поэтому, когда итог
-    известен, файл переписывает ту же строку. Метка у каждой строки своя
-    (у события — время начала, у записи о ходе — номер реплики), по ней
-    строка и находится.
+    Открытый на дописывание файл на это время закрывается, а после открывается
+    снова: файл переписывается целиком, и дописывать в тот же миг нельзя. Всё это
+    на одном месте потому, что правка в файле не одна (см. _dump_replace_line,
+    dump_note_picture_travel), а закрытие и переоткрытие — то же самое.
     """
     path = Path(settings.DUMP_FILE)
     was_open = _DUMP.get("handle") is not None
@@ -1193,19 +1373,95 @@ def _dump_replace_line(prefix: str, new_text: str) -> None:
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     except Exception:
         lines = []
-    for index, line in enumerate(lines):
-        if not line.startswith(prefix):
-            continue
-        lines[index] = new_text + "\n"
+    written = change(lines)
+    if written is not None:
         temp = path.with_name(path.name + ".fix")
         try:
-            temp.write_text("".join(lines), encoding="utf-8")
+            temp.write_text("".join(written), encoding="utf-8")
             temp.replace(path)
         except Exception as e:
             print(f"  ⚠️  Не исправляется строка в {path.name}: {e}")
-        break
     if was_open:
         dump_reopen()
+
+
+def _dump_replace_line(prefix: str, new_text: str) -> None:
+    """Переписать в ДАМПе строку, начинающуюся с `prefix`.
+
+    Живое письмо и правка тут не спорят. Строка появляется в файле в тот миг,
+    когда событие случилось, — тогда у неё нет ни времени окончания, ни чисел
+    вендора: ждать с записью нельзя, иначе у оборванного хода не осталось бы
+    следа. А показывать устаревшее — врать: «1 токенов» у мыслей, текст
+    которых на семьсот токенов, читается как ошибка. Поэтому, когда итог
+    известен, файл переписывает ту же строку. Метка у каждой строки своя
+    (у события — время начала, у записи о ходе — номер реплики), по ней
+    строка и находится.
+    """
+    def change(lines):
+        for index, line in enumerate(lines):
+            if line.startswith(prefix):
+                lines[index] = new_text + "\n"
+                return lines
+        return None
+    _dump_rewrite(change)
+
+
+def _attached_picture_url(line: str) -> str:
+    """Адрес картинки из строки о приложенном — или пусто, если строка не о ней.
+
+    Таких строк в записи две: приложенное к реплике (см. attachment_lines)
+    и картинка к теме (см. topic_picture_line). Адрес у обеих — последнее слово
+    перед « ·», по нему строка и находится: у приложенного к реплике адрес
+    последний, у картинки к теме за ним идёт счёт реплик.
+    """
+    written = str(line or "").strip()
+    if not (written.startswith("**Приложено:** ")
+            or written.startswith("**Картинка к теме:** ")):
+        return ""
+    return written.rsplit("→", 1)[-1].strip().split(" ")[0].strip()
+
+
+def dump_note_picture_travel(urls) -> None:
+    """Дописать в ДАМП, какою картинка уехала модели, — рядом с приложенной.
+
+    Приложенное пишется в файл тогда, когда реплика сказана, а уехать оно может
+    только позже: приведённого к обычному размеру в тот миг ещё нет (см.
+    pictures.prepare, post_image_pairs). Поэтому строка о том, что уехало,
+    досчитывается тогда, когда картинка вправду уехала, — тут же за строкой
+    о приложенном, потому что читают их вместе.
+
+    Зовётся это только про те картинки, что и вправду уехали (см.
+    commit_shown_pictures): про оставшуюся в стороне молчит и файл. Одну
+    картинку могут приложить к нескольким репликам — строка встанет к каждой.
+    """
+    marks = {str(url or ""): picture_travel_line(url) for url in urls or []}
+    marks = {url: line for url, line in marks.items() if url and line}
+    if not marks:
+        return
+
+    def change(lines):
+        out, added = [], False
+        for index, line in enumerate(lines):
+            out.append(line)
+            told = marks.get(_attached_picture_url(line))
+            if not told:
+                continue
+            # Уже сказано — второй раз не пишем: файл дописывается, и один и тот
+            # же ход попадает в правку не раз (например, после перезапуска театра)
+            following = lines[index + 1] if index + 1 < len(lines) else ""
+            if following.strip() == told:
+                continue
+            out.append(told + "\n")
+            added = True
+        return out if added else None
+
+    _dump_rewrite(change)
+
+
+def picture_travel_line(url: str) -> str:
+    """Строка о том, какою картинка уехала модели (пустая — ещё не уезжала)."""
+    words = travelled_picture_words(url)
+    return f"**Уехало модели:** {words}" if words else ""
 
 
 def dump_fix_step(step: dict) -> None:
@@ -2367,6 +2623,14 @@ def load_play_from_dump(mode: str = None) -> int:
     session.running = False
     session.waiting_for_human = False
     session.restored = True
+    # А кто приложенное уже видел — там же, где и на ходу: по самой ленте
+    # (см. restore_shown_pictures). Это не только про «не показывать дважды»:
+    # по тому же следу видно, кому картинка уехала, и сколько их было всего
+    # (см. picture_travellers, pictures_report) — а вернувшемуся спектаклю
+    # сказать об этом нечем, и он показывал бы ноль уехавших картинок
+    # История тут же — из самих реплик: conversation_history заведётся позже
+    # (см. start_show), а след о показанном надо достать сейчас
+    session.restore_shown_pictures(session.history_from_posts())
     # Лица участников, которых в составе уже нет, остаются в самих репликах,
     # а те, кто есть, берутся из пульта: имя то же — лицо то же (см. post_view)
     if not session.topic and play.get("topic"):
@@ -2694,12 +2958,40 @@ def message_fields(msg: dict) -> list:
             found.append(f"`{key}` = {len(calls)} вызов(ов): {_calls_summary(calls)}")
         elif key == "images":
             # Считаются сами картинки, а не их данные: в записи и в отчёте
-            # нужен след «уехала картинка», а не мегабайты base64 (см. _message_view)
+            # нужен след «уехала картинка», а не мегабайты base64 (см. _message_view).
+            # А рядом с числом — во что картинку привели перед отправкой
+            # (см. sent_pictures_words): по этой строке видно, что получила модель
             count = len(value) if isinstance(value, (list, tuple)) else int(value or 0)
-            found.append(f"`{key}` = {count} — приложено к этой реплике")
+            marks = sent_pictures_words(value)
+            found.append(f"`{key}` = {count} — приложено к этой реплике"
+                         + (f": {marks}" if marks else ""))
         else:
             found.append(f"`{key}` = {value}")
     return found
+
+
+def sent_pictures_words(images: list) -> str:
+    """Что именно уехало модели картинками: «png 64×64 · 169 Б; …».
+
+    В сообщении от картинки остались только её адрес-данные: приложенные
+    к реплике едут именно так (см. _format_history), а у Ollama это тот же адрес
+    без предисловия. По нему и видно, какою картинку получила модель, — не
+    режиссёрский файл, а приведённый к обычному размеру (см. pictures.travel_words).
+    Запоминается с первого же раза (см. _PAYLOAD_MARKS): считать заново на каждой
+    отрисовке отчёта тут делать нечего. А не картинка — о такой сказать нечего.
+    """
+    words = []
+    for one in (images if isinstance(images, (list, tuple)) else []):
+        if not isinstance(one, str):
+            continue
+        marks = _PAYLOAD_MARKS.get(one)
+        if marks is None:
+            marks = pictures.ready_marks(one)
+            if not marks.get("kind"):
+                continue
+            _PAYLOAD_MARKS[one] = marks
+        words.append(pictures.travel_words(marks))
+    return "; ".join(words)
 
 
 def message_note(msg: dict) -> str:
@@ -2722,11 +3014,15 @@ def message_note(msg: dict) -> str:
         return head + (f" — {'; '.join(fields)}" if fields else "")
     if filled:
         # Картинка — не текст, и сама она в записи не видна: по этой строке
-        # читающий знает, что реплика уехала модели вместе с приложенным
-        # (см. _format_history)
-        pictures = len(msg.get("images") or [])
-        return (f"к этой реплике приложено картинок: {pictures} — уехали вместе с ней"
-                if pictures else "")
+        # читающий знает, что реплика уехала модели вместе с приложенным —
+        # и каким именно: во что его привели перед отправкой (см. _format_history,
+        # sent_pictures_words)
+        pictures = msg.get("images") or []
+        if not pictures:
+            return ""
+        told = sent_pictures_words(pictures)
+        return (f"к этой реплике приложено картинок: {len(pictures)} — "
+                f"уехали вместе с ней" + (f": {told}" if told else ""))
     if not fields:
         return ("тела текста нет и других полей тоже — приложение отправило пустое "
                 "сообщение (это уже наша ошибка, а не хитрость протокола)")
@@ -2756,8 +3052,50 @@ def _message_view(msg: dict) -> dict:
         # не кладутся — они весят мегабайты, — а след «уехала картинка» нужен
         # и в отчёте хода, и в ДАМПе (см. message_note, _format_history)
         "images": len(msg.get("images") or []),
+        # А рядом со следом — и сама картинка, одним адресом: модель отвечала
+        # по ней, и без неё от «уехала картинка» остаётся одно слово (см.
+        # message_pictures, page.promptMessagesHtml)
+        "pictures": message_pictures(msg.get("images")),
         "note": message_note(msg),
     }
+
+
+def message_pictures(images: list) -> list:
+    """Картинки, уехавшие этим сообщением, — для записи хода и для страницы.
+
+    В самом сообщении от картинки остался только её адрес-данные (см.
+    _format_history), а отчёт о ходе нужен людям: по этой картинке модель
+    и отвечала, и она же там показана превью, с возможностью открыть
+    оригинал (см. page.promptMessagesHtml). Находится картинка по тому же
+    адресу данных (см. _PAYLOAD_FILES) — чужая (из прежнего запуска, где
+    адреса в памяти уже нет) остаётся без картинки, но со своими словами.
+    """
+    out = []
+    for one in (images if isinstance(images, (list, tuple)) else []):
+        told = _PAYLOAD_FILES.get(one) if isinstance(one, str) else None
+        if not told:
+            continue
+        view = attachment_view(told)
+        if view:
+            out.append(view)
+    return out
+
+
+def message_pictures_now(message: dict) -> list:
+    """Картинки сообщения — словами на сейчас: «кому уехало» узнаётся позже.
+
+    Запись хода складывается в тот миг, когда картинка только собирается уехать
+    (см. build_turn_report, commit_shown_pictures), и показа — с именами тех, кому
+    она досталась, — там тогда ещё нет. А читают отчёт потом: «собирались
+    отправить» вместо «уехало Харите» — это неправда в отчёте о том, что было
+    (см. turn_report, attachment_view).
+    """
+    out = []
+    for one in message.get("pictures") or []:
+        fresh = attachment_view(one)
+        if fresh:
+            out.append(fresh)
+    return out
 
 
 def build_turn_report(participant: dict, round_num: int, sent: list, added: list,
@@ -3056,6 +3394,27 @@ def create_post(display_name: str, model_used: str, content: str, round_num: int
 # поэтому base64 держим в памяти — файл на диске уже никуда не денется
 _UPLOAD_IMAGES = {}
 
+# Что уехало модели, а что было приложено: ключ тот же, что у картинок выше,
+# и счёт тут же. Лента и ДАМП говорят, какою картинка уехала (см.
+# travelled_picture_words), а сама она одна — и меняется она только отправкой.
+# Тут же и наш счёт её веса в токенах (см. pictures_report): вендор о цене
+# картинки отдельно не говорит, а длина её данных в запросе видна
+_UPLOAD_MARKS = {}
+
+# Что это за картинка сама по себе — вид, стороны и вес файла на диске, ключ тот
+# же. В ленте про неё спрашивают на каждой отрисовке (см. own_picture_words),
+# а читается это один раз на файл
+_ATTACHED_MARKS = {}
+
+# То же по самому адресу данных: сообщение в отчёте о ходе хранит картинку
+# именно так, и по нему её оттуда и достают — и слова о ней, и сама картинка
+# для показа (см. _message_view, message_pictures)
+_PAYLOAD_FILES = {}
+
+# То же по самому адресу данных: сообщение в отчёте о ходе хранит картинку
+# именно так, и по нему её оттуда и достают (см. sent_pictures_words)
+_PAYLOAD_MARKS = {}
+
 # Про кого и какую картинку уже сказано в консоли, что повторно она не уехала:
 # без этого одна и та же строка повторялась бы на каждом ходу до конца
 # спектакля (см. _format_history)
@@ -3207,31 +3566,46 @@ def set_topic(text: str) -> str:
     return session.topic or ""
 
 
+def _picture_key(url: str):
+    """Ключ приложенного в памяти: имя файла и его вес (см. _UPLOAD_IMAGES).
+
+    По имени в одиночку нельзя: файл приложенной картинки не переписывается
+    никогда, но папку приложенных чистят, и чужой файл с тем же именем не должен
+    получить себе чужую память.
+    """
+    file = str(url or "").rstrip("/").split("/")[-1]
+    if not file or file != Path(file).name:
+        return None
+    try:
+        return (file, (settings.UPLOAD_DIR / file).stat().st_size)
+    except OSError:
+        return None
+
+
 def post_image_pairs(attachments: list) -> list:
     """Картинки поста для модели — парами «адрес файла + его содержимое».
 
     Адрес нужен рядом с картинкой затем, чтобы помнить, кому она уже показана:
     повторно за неё платить нечем (см. _format_history), а у самих картинок
     в запросе имени нет — только base64.
+
+    Тут же и запоминается, какою картинка уехала: лента и ДАМП говорят об этом
+    рядом с самой картинкой (см. _UPLOAD_MARKS, travelled_picture_words).
+    Картинка читается с диска один раз на ключ, а не на каждый ход.
     """
     images = []
     for item in attachments or []:
         url = str((item or {}).get("url") or "")
-        file = url.rstrip("/").split("/")[-1]
-        if not file or file != Path(file).name:
+        key = _picture_key(url)
+        if key is None:
             continue
-        path = settings.UPLOAD_DIR / file
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        key = (file, stat.st_size)
         if key not in _UPLOAD_IMAGES:
-            kind = image_kind(path.read_bytes())
+            raw = (settings.UPLOAD_DIR / key[0]).read_bytes()
+            kind = image_kind(raw)
             if not kind:
                 continue
             payload = (f"data:{kind};base64,"
-                       + base64.b64encode(path.read_bytes()).decode("ascii"))
+                       + base64.b64encode(raw).decode("ascii"))
             # Приведение к обычному размеру — здесь, на отправке, а не при
             # приёме: файл на диске и в ДАМПе остаётся таким, каким его принёс
             # режиссёр, а модели уезжает то, что она точно примет (см.
@@ -3239,10 +3613,21 @@ def post_image_pairs(attachments: list) -> list:
             # поэтому говорится тут ровно один раз — что именно сделано
             # с картинкой и сколько весило прежнее
             payload, note = pictures.prepare(payload)
+            name = str((item or {}).get("name") or key[0])
             if note:
-                name = str((item or {}).get("name") or file)
                 print(f"  🖼  «{name}»: {note}")
             _UPLOAD_IMAGES[key] = payload
+            # И рядом с тем, что уехало, — то, что было приложено: другое
+            # рядом с приложенным и читают в ленте (см. pictures.travel_words)
+            sent = pictures.ready_marks(payload)
+            _UPLOAD_MARKS[key] = {"sent": sent,
+                                  "attached": {**pictures.picture_marks(raw),
+                                               "bytes": len(raw)},
+                                  "tokens": text.estimate_tokens(payload)}
+            _PAYLOAD_MARKS[payload] = sent
+            # И по адресу данных: по нему картинка находится в записи хода,
+            # где от самой картинки остался только он (см. message_pictures)
+            _PAYLOAD_FILES[payload] = {"url": url, "name": name}
         images.append((url, _UPLOAD_IMAGES[key]))
     return images
 
@@ -4375,6 +4760,10 @@ class DebateSession:
             # по актам полный, а не «по тем ходам, где успели посчитать»
             "priced": sum(act["priced"] for act in acts.values()),
             "spent": round(float(self.spent or 0.0), 2),
+            # И картинки: спектакль — это ещё и то, что модели видели. Числа
+            # те же, что в сайдбаре (см. pictures_report): итог и под занавесом,
+            # и на ходу считается одним и тем же счётом
+            "pictures": pictures_report(),
         }
 
     def new_show(self):
@@ -4499,6 +4888,12 @@ class DebateSession:
             return None
         view = {key: value for key, value in payload.items() if key != "sink"}
         view["steps"] = [_step_view(step) for step in (payload.get("steps") or [])]
+        # А слова о картинках — нынешние, а не те, что были в тот миг: запись
+        # сделана тогда, когда картинка только собиралась уехать, и «кому уехало»
+        # в неё тогда ещё не попало (см. commit_shown_pictures, message_pictures)
+        view["messages"] = [{**one,
+                             "pictures": message_pictures_now(one)}
+                            for one in (payload.get("messages") or [])]
         return view
 
     def current_participant_role(self) -> str:
@@ -4827,6 +5222,9 @@ class DebateSession:
         dropped = cloud.take_pictures_dropped(model)
         if sending and not dropped and ollama_api.takes_images(model):
             self.images_shown.setdefault(model, set()).update(sending)
+            # И в ДАМП: картинка уехала — вот какою (см. dump_note_picture_travel).
+            # И только про уехавшее: то, что осталось в стороне, файл не поминает
+            dump_note_picture_travel(sending)
 
     def forget_shown_pictures(self) -> None:
         """Всё приложенное — снова невиданное: и в памяти, и в показанном.

@@ -93,10 +93,15 @@ def status_payload(last_post_count: int = 0, with_posts: bool = True) -> dict:
         "topic": show.session.topic,
         # Приложенное к теме: списком, а не одной картинкой — режиссёр прикладывает
         # сколько нужно, а порядок задаёт показ (см. show.topic_picture_message)
-        "topic_attachments": [dict(one) for one in show.session.topic_attachments],
+        "topic_attachments": [show.topic_picture_view(one)
+                              for one in show.session.topic_attachments],
         "new_posts": ([show.post_view(p) for p in show.session.posts[max(0, last_post_count):]]
                       if with_posts else []),
         "total_posts": len(show.session.posts),
+        # Сколько картинок уехало моделям и во что это обошлось: видно и на ходу,
+        # и под занавесом — там же, где цена спектакля (см. page.spentLine,
+        # show.pictures_report)
+        "pictures": show.pictures_report(),
         # Пришли ли вместе с состоянием сами реплики. Нужно странице: в рассылке
         # по сокету их нет, и по счётчику она не должна решить, что уже всё
         # видела — иначе пост, пришедший событием, был бы потерян
@@ -485,7 +490,8 @@ def participants():
         "topic": show.session.topic,
         # Приложенное к теме — при загрузке страницы: пульт должен показать
         # прежнюю картинку, а не пустое место (см. show.load_theatre_settings)
-        "topic_attachments": [dict(one) for one in show.session.topic_attachments],
+        "topic_attachments": [show.topic_picture_view(one)
+                              for one in show.session.topic_attachments],
         # Сразу сообщаем интерфейсу, если нужных моделей нет в Ollama
         "models_status": models_status_payload(models),
         # И если они не влезают в видеопамять при текущем num_ctx
@@ -619,7 +625,7 @@ def start():
     # как новый спектакль с чистого листа
     return jsonify({"success": True, "session_id": show.session.session_id,
                     "topic": show.session.topic,
-                    "topic_attachments": [dict(one) for one
+                    "topic_attachments": [show.topic_picture_view(one) for one
                                           in show.session.topic_attachments],
                     "resumed": show.session.resumed,
                     **saved_payload(),
@@ -642,7 +648,7 @@ def reset():
     # а тему оставляет — поле в пульте должно остаться заполненным
     return jsonify({"success": True, "participants": cast_payload(),
                     "topic": show.session.topic,
-                    "topic_attachments": [dict(one) for one
+                    "topic_attachments": [show.topic_picture_view(one) for one
                                           in show.session.topic_attachments],
                     **saved_payload()})
 
@@ -868,7 +874,7 @@ def moderator_topic():
     show.save_theatre_settings("тема")
     print(f"🎬 Режиссёр сменил тему: {new_topic}")
     return jsonify({"success": True, "topic": new_topic,
-                    "topic_attachments": [dict(one) for one
+                    "topic_attachments": [show.topic_picture_view(one) for one
                                           in show.session.topic_attachments],
                     **saved_payload()})
 
@@ -890,7 +896,8 @@ def moderator_topic_attachments():
     show.save_theatre_settings("картинка к теме")
     print(f"🎬 К теме приложено картинок: {len(taken)}")
     return jsonify({"success": True,
-                    "topic_attachments": [dict(one) for one in taken],
+                    "topic_attachments": [show.topic_picture_view(one)
+                                          for one in taken],
                     **saved_payload()})
 
 @app.route('/api/moderator/finish', methods=['POST'])

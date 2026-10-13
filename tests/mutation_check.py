@@ -92,6 +92,38 @@ BUGS = {
          "return MATH_SEGMENT_RE.sub(stash, text), stashed",
          "return text, stashed"),
     ],
+    "таблица модели снова уезжает в ленту трубами": [
+        ("aitheatre/text.py",
+         "    text = _tables_to_markdown(text)",
+         "    pass"),
+    ],
+    "склеенная через <br> таблица снова остаётся одной строкой": [
+        ("aitheatre/text.py",
+         "        parts = [] if fenced else _row_parts(one)",
+         "        parts = []"),
+    ],
+    "таблицу без выравнивающей строки снова оставляют текстом": [
+        ("aitheatre/text.py",
+         "    else:\n        block.insert(1, _align_line(len(header)))",
+         "    else:\n        return None"),
+    ],
+    "разъехавшиеся по столбцам трубы снова гасят таблицу": [
+        ("aitheatre/text.py",
+         "        block[1] = _align_line(len(header), align)",
+         '        block[1] = "|".join(align)'),
+    ],
+    "таблица снова съедает реплику за собой": [
+        ("aitheatre/text.py",
+         "        out.extend(block)\n"
+         "        if index < len(lines) and lines[index].strip():\n"
+         '            out.append("")',
+         "        out.extend(block)"),
+    ],
+    "пример разметки в «```» снова превращается в таблицу": [
+        ("aitheatre/text.py",
+         "        found = None if fenced else _table_block(lines, index)",
+         "        found = _table_block(lines, index)"),
+    ],
     "судью снова закрепили за одним характером": [
         ("aitheatre/show.py",
          "        character = draw_character()",
@@ -1590,7 +1622,8 @@ BUGS = {
          '        "topic": show.session.topic,\n'
          '        # Приложенное к теме: списком, а не одной картинкой — режиссёр прикладывает\n'
          '        # сколько нужно, а порядок задаёт показ (см. show.topic_picture_message)\n'
-         '        "topic_attachments": [dict(one) for one in show.session.topic_attachments],',
+         '        "topic_attachments": [show.topic_picture_view(one)\n'
+         '                              for one in show.session.topic_attachments],',
          '        "topic": show.session.topic,\n'
          '        "topic_attachments": [],'),
     ],
@@ -2114,11 +2147,93 @@ BUGS = {
          '        "images": len(msg.get("images") or []),',
          '        "images": 0,'),
     ],
-    "в реплике без слов снова не видно, что с ней уехала картинка": [
+    "в реплике с картинкой снова не видно, что она уехала": [
         ("aitheatre/show.py",
-         '        return (f"к этой реплике приложено картинок: {pictures} — уехали вместе с ней"\n'
-         '                if pictures else "")',
+         '        told = sent_pictures_words(pictures)\n'
+         '        return (f"к этой реплике приложено картинок: {len(pictures)} — "\n'
+         '                f"уехали вместе с ней" + (f": {told}" if told else ""))',
          '        return ""'),
+    ],
+    "под картинкой в ленте снова не видно, какою она уехала": [
+        ("aitheatre/show.py",
+         '    sent = sent_picture_words(url)\n    if sent:\n        view["sent"] = sent',
+         '    sent = sent_picture_words(url)\n    if False:\n        view["sent"] = sent'),
+    ],
+    "у приложенной снова не видно, что это за картинка": [
+        ("aitheatre/show.py",
+         '    own = own_picture_words(url)\n    if own:\n        view["own"] = own',
+         '    own = own_picture_words(url)\n    if False:\n        view["own"] = own'),
+    ],
+    "в ленте снова не видно, какой модели уехала картинка": [
+        ("aitheatre/show.py",
+         "    return (f\"🖼 уехало моделям ({', '.join(who)}): {words}\" if words\n"
+         "            else f\"🖼 уехало моделям ({', '.join(who)})\")",
+         "    return (f\"🖼 уехало моделям: {words}\" if words\n"
+         "            else \"🖼 уехало моделям\")")
+    ],
+    "показанной картинка снова считается до удачного хода": [
+        ("aitheatre/show.py",
+         '    shown = getattr(session, "images_shown", None) or {}\n    who = []',
+         '    shown = getattr(session, "images_pending", None) or {}\n    who = []'),
+    ],
+    "запись хода снова говорит о картинке тогдашними словами": [
+        ("aitheatre/show.py",
+         '                             "pictures": message_pictures_now(one)}',
+         '                             "pictures": one.get("pictures") or []}'),
+    ],
+    "вес уехавшей картинки снова не считается": [
+        ("aitheatre/show.py",
+         '    return marks.get("tokens")',
+         '    return None'),
+    ],
+    "в отчёте о ходе картинка снова остаётся одним следом": [
+        ("aitheatre/show.py",
+         '        told = _PAYLOAD_FILES.get(one) if isinstance(one, str) else None',
+         '        told = None if isinstance(one, str) else None'),
+    ],
+    "картинка хода снова не рисуется на странице": [
+        ("aitheatre/page.py",
+         '                + promptPicturesHtml(m.pictures)',
+         '                + promptPicturesHtml([])'),
+    ],
+    "оригинал приложенной снова не открыть новым окном": [
+        ("aitheatre/page.py",
+         "                + (one.own ? `<span class=\"picture-own\">${escapeHtml(one.own)} · `\n"
+         "                    + `<a href=\"${escapeHtml(one.url)}\" target=\"_blank\"`\n"
+         "                    + ' rel=\"noopener\" onclick=\"event.stopPropagation()\">открыть оригинал</a>'\n"
+         "                    + '</span>' : '')",
+         "                + (one.own ? `<span class=\"picture-own\">${escapeHtml(one.own)}`\n"
+         "                    + '</span>' : '')"),
+    ],
+    "картинок снова не видно в блоке «Статус»": [
+        ("aitheatre/page.py",
+         '            if (Number(pictures.pictures || 0)) lines.push(picturesText(pictures));',
+         '            if (false) lines.push(picturesText(pictures));'),
+    ],
+    "картинка темы снова уезжает без слов о том, какою": [
+        ("aitheatre/show.py",
+         '    for key in ("own", "sent"):\n        if marked.get(key):\n            view[key] = marked[key]',
+         '    for key in ():\n        if marked.get(key):\n            view[key] = marked[key]'),
+    ],
+    "в отчёте о ходе картинка снова уезжает без размера и веса": [
+        ("aitheatre/show.py",
+         '        return (f"к этой реплике приложено картинок: {len(pictures)} — "\n'
+         '                f"уехали вместе с ней" + (f": {told}" if told else ""))',
+         '        return (f"к этой реплике приложено картинок: {len(pictures)} — "\n'
+         '                f"уехали вместе с ней")'),
+    ],
+    "строка о том, что уехало, снова не доезжает до ДАМПа": [
+        ("aitheatre/show.py",
+         "            dump_note_picture_travel(sending)",
+         "            pass"),
+    ],
+    "картинку, которую модель не увидела, снова записывают уехавшей": [
+        ("aitheatre/show.py",
+         "        dropped = cloud.take_pictures_dropped(model)\n"
+         "        if sending and not dropped and ollama_api.takes_images(model):",
+         "        dropped = cloud.take_pictures_dropped(model)\n"
+         "        dump_note_picture_travel(sending or [])\n"
+         "        if sending and not dropped and ollama_api.takes_images(model):"),
     ],
     "продолженный спектакль снова пишет ту же картинку в ДАМП": [
         ("aitheatre/show.py",
@@ -2131,8 +2246,7 @@ BUGS = {
     ],
     "приложенное к прежней версии снова теряется": [
         ("aitheatre/show.py",
-         '        "attachments": [dict(one) for one in post.get("attachments") or []\n'
-         '                        if str((one or {}).get("url") or "").strip()],',
+         '        "attachments": attachment_views(post.get("attachments")),',
          '        "attachments": [],'),
     ],
     "вернуть прежние слова снова можно без приложенного к ним": [

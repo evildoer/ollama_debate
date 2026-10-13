@@ -180,6 +180,67 @@ def _webp_size(raw: bytes) -> tuple:
 
 
 # ============================================================
+# ЧТО ИМЕННО УЕХАЛО МОДЕЛИ — СЛОВАМИ
+# ============================================================
+# Файл на диске и в ДАМПе остаётся режиссёрским, а модель получает приведённый
+# к обычному размеру (см. prepare). По ленте этого не видно: там картинка одна
+# и та же, а уехало другое — и узнать, во что её превратили, надо оттуда же,
+# откуда видно саму картинку (см. show.travelled_picture_words).
+
+# Как вид картинки называется словами: «image/png» — это протокол, а такое
+# читают глазами (см. marks_words)
+KIND_WORDS = {"image/png": "png", "image/jpeg": "jpeg",
+              "image/gif": "gif", "image/webp": "webp"}
+
+
+def ready_marks(data_url: str) -> dict:
+    """Вид, стороны и вес того, что лежит в этом адресе данных, — как оно уедет.
+
+    Отдельно от picture_marks: там картинка сама по себе, а здесь — в том виде,
+    в каком её получит модель (адрес данных с base64 внутри; у Ollama это голый
+    base64, см. ollama_api.bare_images). Разбирается только заголовок, а не
+    пиксели: подпись в ленте не стоит того, чтобы платить за неё разбором
+    целой картинки.
+    """
+    written = str(data_url or "")
+    _head, marker, body = written.partition(";base64,")
+    if not marker:
+        body = written
+    try:
+        raw = base64.b64decode(body, validate=True)
+    except Exception:
+        return {"kind": "", "width": 0, "height": 0, "bytes": len(body)}
+    return {**picture_marks(raw), "bytes": len(raw)}
+
+
+def marks_words(marks: dict, kind: bool = True) -> str:
+    """Картинка словами: «png 64×64 · 169 Б» — вид, стороны и вес (см. human_bytes).
+
+    Вид можно и не называть (kind=False): рядом с той же картинкой он уже сказан.
+    """
+    marks = marks or {}
+    size = (f"{int(marks.get('width'))}×{int(marks.get('height'))}"
+            if marks.get("width") and marks.get("height") else "размер не прочитан")
+    head = f"{KIND_WORDS.get(str(marks.get('kind') or ''), '')} " if kind else ""
+    return f"{head}{size} · {human_bytes(marks.get('bytes'))}"
+
+
+def travel_words(sent: dict, attached: dict = None) -> str:
+    """Уехавшая картинка словами — а рядом приложенная, если она другая.
+
+    Сравниваются стороны и вес, а не сам файл: пересобранная в тот же размер
+    картинка — это другая картинка, и сказать о ней надо (см. prepare).
+    """
+    words = marks_words(sent)
+    sent, attached = sent or {}, attached or {}
+    same = all(sent.get(key) == attached.get(key)
+               for key in ("width", "height", "bytes"))
+    if not attached or same:
+        return words
+    return f"{words} (приложено {marks_words(attached, kind=False)})"
+
+
+# ============================================================
 # PNG СВОИМИ РУКАМИ: РАЗОБРАТЬ, ПЕРЕСОБРАТЬ, ИЗМЕНИТЬ РАЗМЕР
 # ============================================================
 
