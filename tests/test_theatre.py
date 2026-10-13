@@ -9561,6 +9561,91 @@ class TestWhatTheModelGot(PicturesTest):
         self.assertIn("из цены хода", line,
                       "в шапке записи не видно, сколько из цены съела картинка")
 
+    def test_the_turn_knows_its_picture_did_not_travel(self):
+        """Ход сам знает, что ушёл без картинки: это говорит commit_shown_pictures.
+
+        В тот же миг, когда решается «считается ли картинка показанной», видно
+        и обратное — шлюз не согласился с приложенным (см. cloud._eased_body).
+        Спросить об этом больше некого: отметка об ушедшем без приложения
+        одноразовая и здесь же тратится (см. cloud.take_pictures_dropped),
+        а счёту хода знать это надо (см. refresh_turn_report).
+        """
+        self.addCleanup(cloud._PICTURES_DROPPED.clear)
+        picture, place, _history = self._discussion()
+        model = place["model"]
+
+        self.session.images_pending[model] = {picture["url"]}
+        with mock.patch.object(ollama_api, "takes_images", return_value=True):
+            self.assertFalse(self.session.commit_shown_pictures(model),
+                             "обычный ход назван ушедшим без приложения")
+
+            self.session.images_pending[model] = {picture["url"]}
+            cloud.mark_pictures_dropped(model)
+            self.assertTrue(self.session.commit_shown_pictures(model),
+                            "ход остался без картинки, а счёт об этом не узнал")
+
+    def test_a_picture_the_gateway_refused_is_not_charged_to_the_turn(self):
+        """За картинку, до модели не доехавшую, ход не платит.
+
+        Шлюз бывает не согласен с приложенным, и та же реплика уходит без него
+        (см. cloud._eased_body). В числах вендора такой картинки нет вовсе, и наш
+        счёт не должен быть больше вендорского: иначе в ленте стояла бы плата
+        за то, чего в запросе не было (см. remember_picture_cost).
+        И сказать об этом надо прямо: пустое место прочиталось бы как «картинка
+        ничего не стоила» — а это разные вещи (см. picture_cost_words).
+        """
+        picture, place, _history = self._discussion()
+        _url, payload = show.post_image_pairs([picture])[0]
+        sent = [{"role": "user", "name": place["display_name"],
+                 "content": "Смотрите", "images": [payload]}]
+        turn = show.build_turn_report(place, 1, sent, [], {"window": 100})
+        self.assertTrue(turn["summary"]["picture_tokens"],
+                        "идущий ход не знает веса своей картинки — проверять нечего")
+
+        show.refresh_turn_report(turn, [], 1,
+                                 {"steps": [{"kind": "ask", "n": 1,
+                                              "tokens_in": 14158}]},
+                                 spent=0.20, seconds=7.0, pictures_dropped=True)
+        summary = turn["summary"]
+
+        self.assertEqual(summary["picture_tokens"], 0,
+                         "в счёт хода вернулся вес картинки, до модели не доехавшей")
+        self.assertEqual(summary["picture_unknown"], 0)
+        self.assertIsNone(summary["picture_money"],
+                          "на неотправленную картинку пришлась доля цены хода")
+        self.assertEqual(show.picture_cost_words(summary),
+                         ["🖼 картинка до модели не дошла — в счёт не пошла"],
+                         "в свёрнутой строке молчат о том, что картинка не уехала")
+
+    def test_the_record_does_not_charge_for_the_picture_it_never_sent(self):
+        """Вернувшийся из ДАМПа ход помнит отказ: пересчёт по записи его не теряет.
+
+        У возвращённого хода вес картинки досчитывается по самим сообщениям
+        (см. _link_message_pictures) — и если запись говорит «картинка до модели
+        не дошла», счёт по ней не берут: иначе у хода появилась бы плата, которой
+        он не платил (см. remember_picture_cost). А сообщение то же самое —
+        и уехавшую картинку оно по-прежнему стоит своих токенов.
+        """
+        picture, _place, _history = self._discussion()
+        _url, payload = show.post_image_pairs([picture])[0]
+        messages = [show._message_view({"role": "user", "content": "Смотрите",
+                                        "images": [payload]})]
+
+        plain = {}
+        show.remember_picture_cost(plain, messages)
+        self.assertTrue(plain["picture_tokens"],
+                        "уехавшая картинка перестала стоить своих токенов")
+
+        dropped = {"picture_dropped": True}
+        show.remember_picture_cost(dropped, messages)
+
+        self.assertEqual(dropped["picture_tokens"], 0,
+                         "в пересчитанной записи картинка снова в счёте")
+        self.assertEqual(dropped["picture_unknown"], 0)
+        self.assertIsNone(dropped["picture_money"])
+        self.assertEqual(show.picture_cost_words(dropped),
+                         ["🖼 картинка до модели не дошла — в счёт не пошла"])
+
     def test_a_picture_already_shown_comes_back_too(self):
         """Уже показанная картинка находится в записи по своему имени.
 
@@ -10868,7 +10953,9 @@ class TestPageScript(unittest.TestCase):
             " picture_tokens: 1200, picture_money: 0.002})",
             "turnSummaryParts({asks: 1, tokens: 10, picture_tokens: 4200})",
             "turnSummaryParts({asks: 1, tokens: 10, picture_unknown: 1})",
-            "turnSummaryParts({asks: 1, tokens: 10})")
+            "turnSummaryParts({asks: 1, tokens: 10})",
+            "turnSummaryParts({asks: 1, tokens: 10, spent: 1.89,"
+            " picture_tokens: 4200, picture_money: 0.56, picture_dropped: true})")
         line = [" · ".join(one) for one in out]
 
         self.assertIn("4\u00a0200 токенов на картинку", line[0])
@@ -10886,6 +10973,13 @@ class TestPageScript(unittest.TestCase):
                          "картинка без счёта — не «ноль токенов»")
         self.assertNotIn("картинк", line[4],
                          "у реплики без картинок нет и разговора о них")
+        # Картинка до модели не дошла: в счёте её нет, но молчать об этом нельзя
+        self.assertIn("не дошла", line[5],
+                      "на странице не видно, что картинка хода не уехала")
+        self.assertNotIn("токенов на картинку", line[5],
+                         "неуехавшая картинка снова считается в цене хода")
+        self.assertNotIn("из цены хода", line[5],
+                         "на неотправленную картинку пришлась доля цены хода")
 
     def test_the_reply_section_of_a_cut_turn_says_what_happened(self):
         """Раздел «чем ход кончился» у оборванного хода не пустует.

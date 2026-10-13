@@ -965,6 +965,12 @@ def picture_cost_words(summary: dict) -> list:
     так и говорим, а не показываем ноль вместо него.
     """
     summary = summary or {}
+    # Картинка хода до модели не доехала: шлюз не принял приложенное, и реплика
+    # ушла без него (см. commit_shown_pictures). Считать её не за что — за неё
+    # не платили, — но и молчать нельзя: пустое место прочиталось бы как
+    # «картинка ничего не стоила», а это разные вещи (см. remember_picture_cost)
+    if summary.get("picture_dropped"):
+        return ["🖼 картинка до модели не дошла — в счёт не пошла"]
     tokens = int(summary.get("picture_tokens") or 0)
     if tokens:
         parts = [f"🖼 {numbers_word(tokens)} токенов на картинку"]
@@ -2522,7 +2528,8 @@ def _pictures_spoken_of(message: dict, by_words: dict, by_name: dict) -> tuple:
     return found, travelled
 
 
-def remember_picture_cost(summary: dict, messages: list = None) -> None:
+def remember_picture_cost(summary: dict, messages: list = None,
+                          dropped: bool = None) -> None:
     """Вписать в сводку хода вес его картинок — и долю цены, что на них ушла.
 
     Числа об одном и том же ходе складываются в трёх местах: ход начался
@@ -2534,9 +2541,24 @@ def remember_picture_cost(summary: dict, messages: list = None) -> None:
     messages — сообщения хода: их знает и начало хода, и возврат из ДАМПа.
     Без них пересчитывается только доля: сообщения у идущего хода уже сосчитаны,
     а цена стала известна как раз теперь (см. picture_share_of_price).
+
+    dropped — уехала ли картинка хода к модели: шлюз бывает не согласен
+    с приложенным, и реплика уходит без него (см. commit_shown_pictures).
+    За такую не плачено — её нет в числах вендора, — и считать её нашим счётом
+    значило бы выставить ход дороже, чем он вышел. О том, что картинка была
+    и не дошла, говорит отдельное слово, а не ноль (см. picture_cost_words).
+
+    Признак не трогается, если о нём не спросили (dropped=None): у хода
+    из ДАМПа он уже записан в сводке, и пересчёт по записи не должен его терять.
     """
     if messages is not None:
         summary.update(turn_picture_cost(messages))
+    if dropped is not None:
+        summary["picture_dropped"] = bool(dropped)
+    if summary.get("picture_dropped"):
+        # Ни веса, ни неизвестного счёта: до модели картинка не доехала
+        summary["picture_tokens"] = 0
+        summary["picture_unknown"] = 0
     summary["picture_money"] = picture_share_of_price(summary)
 
 
@@ -3702,7 +3724,7 @@ def _as_number(value, fallback: int) -> int:
 
 def refresh_turn_report(turn: dict, added: list, search_count: int,
                         journal: dict = None, spent: float = None,
-                        seconds: float = None) -> None:
+                        seconds: float = None, pictures_dropped: bool = None) -> None:
     """Дописать в отчёт то, что стало известно только к концу хода.
 
     Отчёт собирается до запроса к модели (см. build_turn_report), а к концу надо
@@ -3743,8 +3765,10 @@ def refresh_turn_report(turn: dict, added: list, search_count: int,
     summary["tokens_in_total"] = _input_tokens_total(steps)
     # А это — доля цены, пришедшаяся на картинки хода: считается она только
     # теперь, когда цена уже известна, — и тем же счётом, что в начале хода
-    # (см. remember_picture_cost, build_turn_report)
-    remember_picture_cost(summary)
+    # (см. remember_picture_cost, build_turn_report). И тут же видно, уехала ли
+    # картинка вовсе: шлюз бывает не согласен с приложенным, и тогда её в счёте
+    # хода быть не должно (см. commit_shown_pictures)
+    remember_picture_cost(summary, dropped=pictures_dropped)
     turn["added"] = extra
 
 
@@ -5657,8 +5681,12 @@ class DebateSession:
         if sending:
             self.images_pending[model] = sending
 
-    def commit_shown_pictures(self, model: str) -> None:
+    def commit_shown_pictures(self, model: str) -> bool:
         """Ход состоялся — его картинки считаются показанными этой модели.
+
+        Возвращает, остался ли ход без приложения: за картинку, которой модель
+        не видела, платить нечем, и счёт хода обязан об этом знать (см.
+        remember_picture_cost, refresh_turn_report).
 
         И только той, кто их правда читает: незрячей модели приложенное
         не уезжает вовсе (см. ollama_api.messages_for), и строка «уже показана»
@@ -5676,6 +5704,7 @@ class DebateSession:
             # И в ДАМП: картинка уехала — вот какою (см. dump_note_picture_travel).
             # И только про уехавшее: то, что осталось в стороне, файл не поминает
             dump_note_picture_travel(sending)
+        return bool(dropped)
 
     def forget_shown_pictures(self) -> None:
         """Всё приложенное — снова невиданное: и в памяти, и в показанном.
@@ -6206,8 +6235,10 @@ class DebateSession:
         # Ход дошёл до ответа — приложенное к нему считается показанным этой
         # модели: второй раз за ту же картинку платить нечем (см.
         # commit_shown_pictures). При ошибке сюда не дойдёт, и картинка
-        # поедет заново — это и нужно: модель её так и не увидела
-        self.commit_shown_pictures(participant.get("model", ""))
+        # поедет заново — это и нужно: модель её так и не увидела.
+        # И тут же узнаётся, уехала ли она вообще: за непринятую шлюзом не платят,
+        # и в счёте хода её быть не должно (см. refresh_turn_report)
+        pictures_dropped = self.commit_shown_pictures(participant.get("model", ""))
 
         # Размышления, не попавшие в хронологию шагами (модель без потока, шлюз,
         # отдавший размышления одним куском): мысли оплачены, и это единственный
@@ -6224,7 +6255,8 @@ class DebateSession:
         # раз просил поиск. Шаги при этом уже в отчёте — журнал у них общий
         spent = self._note_money(journal, money_before, money_error) if cloud_turn else None
         refresh_turn_report(turn, messages[len(sent):], search_count, journal, spent,
-                            seconds=max(0.0, time.time() - started))
+                            seconds=max(0.0, time.time() - started),
+                            pictures_dropped=pictures_dropped)
 
         post = self.add_post(
             display_name=participant["display_name"],

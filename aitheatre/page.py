@@ -2653,6 +2653,11 @@ HTML_TEMPLATE = """
         // Счёта нет — так и говорим: ноль вместо него был бы выдумкой
         function pictureCostText(info) {
             const data = info || {};
+            // Картинка хода до модели не доехала: шлюз не принял приложенное,
+            // и реплика ушла без него (см. show.commit_shown_pictures). Считать
+            // её не за что — за неё не платили, — но и молчать нельзя: пустое
+            // место прочиталось бы как «картинка ничего не стоила»
+            if (data.picture_dropped) return '🖼 картинка до модели не дошла — в счёт не пошла';
             const tokens = Number(data.picture_tokens || 0);
             if (tokens) {
                 const parts = [`🖼 ${tokensText(tokens)} токенов на картинку`];

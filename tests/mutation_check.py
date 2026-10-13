@@ -2318,13 +2318,43 @@ BUGS = {
     ],
     "к концу хода доля его картинки снова не считается": [
         ("aitheatre/show.py",
-         "    remember_picture_cost(summary)",
+         "    remember_picture_cost(summary, dropped=pictures_dropped)",
          "    pass"),
     ],
     "цена картинки снова не досчитывается у возвращённого хода": [
         ("aitheatre/show.py",
          "        summary.update(turn_picture_cost(messages))",
          "        summary.update({})"),
+    ],
+    "счёт хода снова не знает, что картинку шлюз не принял": [
+        ("aitheatre/show.py",
+         "        return bool(dropped)",
+         "        return False"),
+    ],
+    "отказанная шлюзом картинка снова входит в счёт хода": [
+        ("aitheatre/show.py",
+         "    remember_picture_cost(summary, dropped=pictures_dropped)",
+         "    remember_picture_cost(summary)"),
+    ],
+    "в пересчитанной записи неуехавшая картинка снова в счёте": [
+        ("aitheatre/show.py",
+         "    if summary.get(\"picture_dropped\"):\n"
+         "        # Ни веса, ни неизвестного счёта: до модели картинка не доехала\n"
+         "        summary[\"picture_tokens\"] = 0",
+         "    if False:\n"
+         "        summary[\"picture_tokens\"] = 0"),
+    ],
+    "в свёрнутой строке снова молчат о том, что картинка не уехала": [
+        ("aitheatre/show.py",
+         '    if summary.get("picture_dropped"):\n'
+         '        return ["🖼 картинка до модели не дошла — в счёт не пошла"]',
+         '    if False:\n'
+         '        return []'),
+    ],
+    "на странице о неотправленной картинке снова молчат": [
+        ("aitheatre/page.py",
+         "            if (data.picture_dropped) return '🖼 картинка до модели не дошла — в счёт не пошла';",
+         "            if (false) return '';"),
     ],
     "крохотная картинка снова показывается сама собой": [
         ("aitheatre/page.py",
