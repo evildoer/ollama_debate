@@ -98,6 +98,12 @@ HTML_TEMPLATE = """
            в README */
         .post-attachments img { max-height: 220px; max-width: 100%; border: 1px solid #000000; cursor: pointer; }
         body.dark .post-attachments img { border-color: #3a3a3a; }
+        /* Мелкая картинка показывается крупнее себя: у восьмипиксельной её
+           просто не видно, а приложенное надо видеть глазом — иначе о том,
+           что к реплике что-то приложено, говорит только подпись под ней.
+           По росту её подтягивает эта граница, а ширину она берёт свою:
+           стороны от этого не разъезжаются */
+        .post-attachments img, .prompt-pictures img { min-height: 64px; width: auto; }
         /* Картинка и подписи под ней — одним столбцом: подписи говорят про эту
            картинку, а не про ленту (см. pictureBlockHtml) */
         .picture-block { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }

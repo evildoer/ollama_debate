@@ -913,11 +913,17 @@ def travelled_picture_words(url: str) -> str:
     Пусто — картинка ещё никуда не уезжала, и сказать о ней нечего. Известно это
     с той самой отправки: картинка приводится к обычному размеру один раз на файл
     (см. post_image_pairs), и другой раз за неё никто не платит.
+
+    У вернувшегося из ДАМПа спектакля отправки в этом запуске не было, и слова
+    о ней помнит сама запись (см. _remember_travel_words): говорить «в которой
+    уехала» надо то же, что говорили на ходу, а не молчать.
     """
     key = _picture_key(url)
     marks = _UPLOAD_MARKS.get(key) if key else None
     if not marks:
         return ""
+    if marks.get("words"):
+        return str(marks["words"])
     return pictures.travel_words(marks.get("sent"), marks.get("attached"))
 
 
@@ -1793,6 +1799,16 @@ _CUT_LINE_RE = re.compile(
     rf"^- (?P<speaker>.*?) · (?P<tokens>{_GROUPED}) токенов · (?P<preview>.*)$")
 _MESSAGE_RE = re.compile(
     r"^- №(?P<index>\d+)/(?P<total>\d+) · (?P<role>[^·]*) · (?P<rest>.*)$")
+# А это — слова о том, какою картинка уехала моделям, рядом с приложенным
+# (см. dump_note_picture_travel, picture_travel_line)
+_TRAVEL_RE = re.compile(r"^\*\*Уехало модели:\*\* (?P<words>.+)$")
+# Слова о картинке в самом сообщении: уехавшая названа следом за «уехали
+# вместе с ней» (см. message_note), а уже показанная — по имени в строке
+# о себе (см. images_already_shown_note). По ним картинка и находится
+# в записи, писанной прежней версией театра (см. _pictures_spoken_of)
+_TRAVELLED_IN_NOTE_RE = re.compile(r"уехали вместе с ней: (?P<words>.+)$")
+_SHOWN_IN_NOTE_RE = re.compile(
+    r"К реплике приложена картинка (?P<names>.+?) — она уже показана")
 _AVATAR_RE = re.compile(r"^\*\*Аватар:\*\* (?P<path>\S+)$")
 # Приложенное к реплике: имя файла и его адрес в папке экземпляра (см. attachment_lines)
 _ATTACH_RE = re.compile(r"^\*\*Приложено:\*\* (?P<name>.+?) → (?P<url>\S+)$")
@@ -2185,6 +2201,169 @@ def _attachments_from(lines: list, pictures: dict = None, store: bool = False) -
     return upload_files(found)
 
 
+def _remember_travel_words(lines: list) -> None:
+    """Вспомнить по записи, какою картинка уехала моделям, — вместе со словами.
+
+    Поездка эта была в прежнем запуске: приведённое к обычному размеру живёт
+    только в памяти того процесса (см. _UPLOAD_MARKS), а слова о ней остались
+    в записи (см. dump_note_picture_travel) — строкой сразу за строкой
+    о приложенном. По ним возвращённый спектакль и говорит о ней то же самое.
+    """
+    url = ""
+    for line in lines or []:
+        attached = _ATTACH_RE.match(line)
+        if attached:
+            url = attached.group("url").strip()
+            continue
+        told = _TRAVEL_RE.match(line)
+        if told and url:
+            key = _picture_key(url)
+            if key:
+                _UPLOAD_MARKS.setdefault(key, {})["words"] = told.group("words").strip()
+            url = ""
+
+
+def picture_sent_words(url: str) -> str:
+    """Слова о том, какою картинка уехала, — без приложенной рядом (пусто — не уезжала).
+
+    Тем же счётом, что у сообщения («уехали вместе с ней: png 64×64 · 180 Б»,
+    см. message_note): там приложенного рядом нет, и сравнивать привязку
+    с ним не с чем — поэтому поездка берётся в одиночку.
+    """
+    key = _picture_key(url)
+    marks = _UPLOAD_MARKS.get(key) if key else None
+    words = str((marks or {}).get("words") or "")
+    if not words and marks:
+        words = pictures.travel_words(marks.get("sent"), marks.get("attached"))
+    return words.split(" (приложено", 1)[0].strip()
+
+
+def attached_pictures(posts: list) -> dict:
+    """Картинки спектакля по адресам: адрес → имя. Один файл — одна запись.
+
+    Из этого словаря собираются и остальные: и слова о поездке, и имена
+    (см. _picture_of_sent_words, _pictures_of_names). Собирается по репликам,
+    а не по строкам записи: одна и та же картинка, приложенная к двум репликам,
+    — это одна картинка, и знать о ней надо одно.
+    """
+    found = {}
+    for post in posts or []:
+        for one in post.get("attachments") or []:
+            url = str((one or {}).get("url") or "")
+            name = str((one or {}).get("name") or "").strip()
+            if url and url not in found:
+                found[url] = name or url.rstrip("/").split("/")[-1]
+    return found
+
+
+def same_picture(first: str, second: str) -> bool:
+    """Одна и та же картинка под двумя адресами — или разные.
+
+    Адрес — это файл, а файлов одной и той же картинки может быть несколько:
+    одну и ту же картинку прикладывают дважды, и она ложится в папку второй
+    раз. По имени и по словам о ней такие две не различить (см.
+    _picture_of_sent_words, _pictures_of_names), а по содержимому — можно.
+    Не прочиталось — считаем разными: это безопаснее (показать чужую картинку
+    хуже, чем не показать никакой).
+    """
+    first_digest = picture_digest(first)
+    return bool(first_digest) and first_digest == picture_digest(second)
+
+
+def picture_digest(url: str) -> str:
+    """Отпечаток содержимого картинки (пусто — прочитать нечего).
+
+    Читается ровно там, где картинку надо сравнить с другой, — на возврате
+    спектакля из ДАМПа (см. _link_message_pictures), а не на каждой отрисовке.
+    """
+    path = _upload_path(url)
+    if path is None:
+        return ""
+    try:
+        return hashlib.sha1(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _pictures_keyed(posts: list, key_of) -> dict:
+    """Картинки спектакля по примете: слова о поездке или имя → картинка.
+
+    Расхождение приметы у разных картинок — это уже не привязка: связать
+    по ней нечего, и такой приметы в словаре не остаётся. А если картинки
+    под ней — одна и та же (то же содержимое, см. same_picture), то примета
+    верная, и картинка берётся первая: они неразличимы.
+    """
+    found, apart = {}, set()
+    for url, name in attached_pictures(posts).items():
+        mark = key_of(url)
+        if not mark:
+            continue
+        if mark in found and not same_picture(found[mark]["url"], url):
+            apart.add(mark)
+        found.setdefault(mark, {"url": url, "name": name})
+    return {mark: one for mark, one in found.items() if mark not in apart}
+
+
+def _picture_of_sent_words(posts: list) -> dict:
+    """Картинки спектакля по словам о поездке: «png 64×64 · 180 Б» → картинка.
+
+    В записи уехавшее названо одними словами (см. message_note), а сама
+    картинка лежит в том же файле и связана с репликой, а не с сообщением.
+    Одна и та же картинка, приложенная к двум репликам, — это одна запись
+    словаря, а разошедшиеся слова — уже не привязка: связать по ним нечего
+    (см. _pictures_keyed).
+    """
+    return _pictures_keyed(posts, picture_sent_words)
+
+
+def _pictures_of_names(posts: list) -> dict:
+    """Картинки спектакля по именам: «квадратик.png» → картинка.
+
+    Одним именем могут зваться разные картинки (имя даёт режиссёр), и тогда
+    по нему не связывается ничего: показать не ту картинку хуже, чем никакой.
+    """
+    return _pictures_keyed(posts, attached_pictures(posts).get)
+
+
+def _link_message_pictures(turns: dict, by_words: dict, by_name: dict) -> None:
+    """Привязать к сообщениям записей те картинки, о которых сказано словами.
+
+    Записи пишут о приложенном к сообщению одними словами — во что картинку
+    привели и как её звали (см. message_note, images_already_shown_note), —
+    а сама картинка лежит в том же файле, связанная с репликой. Привязка
+    восстанавливается по этим словам, и тогда в записи видно само изображение.
+    Не нашлось — привязки не будет: показать чужую картинку хуже, чем никакой.
+    """
+    for turn in (turns or {}).values():
+        for message in turn.get("messages") or []:
+            if message.get("pictures"):
+                continue
+            for one in _pictures_spoken_of(message, by_words, by_name):
+                message.setdefault("pictures", []).append(one)
+
+
+def _pictures_spoken_of(message: dict, by_words: dict, by_name: dict) -> list:
+    """Картинки, о которых говорит само сообщение: уехавшая и уже показанная.
+
+    Обе названы словами, и слова эти — те же, что у картинки в ленте: о поездке
+    говорит след «уехали вместе с ней» (см. message_note), о показанном —
+    строка в самом тексте (см. images_already_shown_note).
+    """
+    found = []
+    told = _TRAVELLED_IN_NOTE_RE.search(str(message.get("note") or ""))
+    if told:
+        for words in told.group("words").split("; "):
+            one = by_words.get(words.strip())
+            if one:
+                found.append(dict(one))
+    for names in _SHOWN_IN_NOTE_RE.findall(str(message.get("content") or "")):
+        for name in re.findall(r"«(.+?)»", names):
+            one = by_name.get(name.strip())
+            if one:
+                found.append(dict(one))
+    return found
+
+
 def _avatar_that_exists(url) -> str:
     """Адрес портрета, если сам файл ещё на месте (пустая строка — нет его).
 
@@ -2394,6 +2573,9 @@ def _add_record(current: tuple, body: list, posts: list, turns: dict,
     и блока «прежние слова» у неё тогда тоже нет.
     """
     post_id, rest = current
+    # О поездке картинок — по этой же записи, до разбора реплики: слова о ней
+    # стоят её же строками (см. _remember_travel_words)
+    _remember_travel_words(body)
     record = _parse_record(post_id, rest, body, faces, pictures, store)
     if versions:
         record["post"]["versions"] = list(versions)
@@ -2525,6 +2707,13 @@ def parse_dump(written: str, tolerant: bool = False, store: bool = False) -> dic
                     versions=versions.pop(current[0], None))
     if not posts:
         return None
+    # А теперь — картинки к сообщениям, о которых сказано одними словами:
+    # записи прежних версий иначе остались бы без них, а в них говорится
+    # «уехали вместе с ней» и «приложена картинка «…»» — и ни одной
+    # (см. _link_message_pictures). Делается это после разбора всех реплик:
+    # слова о поездке у картинки известны только из всего спектакля
+    _link_message_pictures(turns, _picture_of_sent_words(posts),
+                           _pictures_of_names(posts))
     return {
         "format": version,
         "topic": topic,
@@ -3103,27 +3292,36 @@ def _message_view(msg: dict) -> dict:
         # А рядом со следом — и сама картинка, одним адресом: модель отвечала
         # по ней, и без неё от «уехала картинка» остаётся одно слово (см.
         # message_pictures, page.promptMessagesHtml)
-        "pictures": message_pictures(msg.get("images")),
+        "pictures": message_pictures(msg),
         "note": message_note(msg),
     }
 
 
-def message_pictures(images: list) -> list:
-    """Картинки, уехавшие этим сообщением, — для записи хода и для страницы.
+def message_pictures(message: dict) -> list:
+    """Картинки этого сообщения — для записи хода и для страницы.
 
-    В самом сообщении от картинки остался только её адрес-данные (см.
+    В самом сообщении от уехавшей картинки остался только её адрес-данные (см.
     _format_history), а отчёт о ходе нужен людям: по этой картинке модель
     и отвечала, и она же там показана превью, с возможностью открыть
     оригинал (см. page.promptMessagesHtml). Находится картинка по тому же
     адресу данных (см. _PAYLOAD_FILES) — чужая (из прежнего запуска, где
     адреса в памяти уже нет) остаётся без картинки, но со своими словами.
+
+    И уже показанная — тоже: ехать второй раз ей нечем, и в запросе вместо неё
+    стоит строка о себе (см. shown_pictures, images_already_shown_note), но
+    показать есть чем: по этой строке видно, о какой картинке речь, и её саму
+    надо видеть, а не только слова о ней (см. _format_history).
     """
     out = []
-    for one in (images if isinstance(images, (list, tuple)) else []):
+    for one in (message.get("images") or []):
         told = _PAYLOAD_FILES.get(one) if isinstance(one, str) else None
         if not told:
             continue
         view = attachment_view(told)
+        if view:
+            out.append(view)
+    for one in (message.get("shown_pictures") or []):
+        view = attachment_view(one)
         if view:
             out.append(view)
     return out
@@ -5171,6 +5369,13 @@ class DebateSession:
                     image_keys[id(messages[-1])] = [url for url, _payload in pairs]
             if stale and len(messages) > before:
                 messages[-1]["content"] += "\n\n" + images_already_shown_note(stale)
+                # И сама она — тут же: строкой о картинке без картинки читающий
+                # узнаёт о ней одни слова, а в записи хода её надо видеть (см.
+                # message_pictures). Ехать второй раз ей нечем, а показать есть
+                # чем: она и есть та самая, о которой говорит эта строка
+                messages[-1]["shown_pictures"] = [
+                    {"url": str((one or {}).get("url") or ""),
+                     "name": str((one or {}).get("name") or "")} for one in stale]
                 # В консоли — один раз на модель и картинку: иначе эта же
                 # строка повторялась бы на каждом ходу до конца спектакля
                 for one in stale:

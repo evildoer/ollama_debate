@@ -2237,6 +2237,62 @@ BUGS = {
          "            dump_note_picture_travel(sending)",
          "            pass"),
     ],
+    "в записи хода снова не видно уже показанной картинки": [
+        ("aitheatre/show.py",
+         '                messages[-1]["shown_pictures"] = [\n'
+         '                    {"url": str((one or {}).get("url") or ""),\n'
+         '                     "name": str((one or {}).get("name") or "")} for one in stale]',
+         '                messages[-1]["shown_pictures"] = []'),
+    ],
+    "уже показанная картинка снова не доезжает до записи хода": [
+        ("aitheatre/show.py",
+         '    for one in (message.get("shown_pictures") or []):\n'
+         '        view = attachment_view(one)\n'
+         '        if view:\n'
+         '            out.append(view)',
+         '    for one in ():\n'
+         '        view = attachment_view(one)\n'
+         '        if view:\n'
+         '            out.append(view)'),
+    ],
+    "прежняя запись хода снова остаётся без картинки": [
+        ("aitheatre/show.py",
+         '            for one in _pictures_spoken_of(message, by_words, by_name):\n'
+         '                message.setdefault("pictures", []).append(one)',
+         '            for one in ():\n'
+         '                message.setdefault("pictures", []).append(one)'),
+    ],
+    "картинка снова не связывается с сообщением по словам о поездке": [
+        ("aitheatre/show.py",
+         '    told = _TRAVELLED_IN_NOTE_RE.search(str(message.get("note") or ""))',
+         '    told = None'),
+    ],
+    "картинка снова не связывается с сообщением по своему имени": [
+        ("aitheatre/show.py",
+         '    for names in _SHOWN_IN_NOTE_RE.findall(str(message.get("content") or "")):',
+         '    for names in ():'),
+    ],
+    "одна и та же картинка снова считается разными картинками": [
+        ("aitheatre/show.py",
+         '    first_digest = picture_digest(first)\n'
+         '    return bool(first_digest) and first_digest == picture_digest(second)',
+         '    return False'),
+    ],
+    "слова о поездке картинки снова не возвращаются из ДАМПа": [
+        ("aitheatre/show.py",
+         '                _UPLOAD_MARKS.setdefault(key, {})["words"] = told.group("words").strip()',
+         '                pass'),
+    ],
+    "вернувшийся спектакль снова молчит о том, какою картинка уехала": [
+        ("aitheatre/show.py",
+         '    if marks.get("words"):\n        return str(marks["words"])',
+         '    if False:\n        return str(marks["words"])'),
+    ],
+    "крохотная картинка снова показывается сама собой": [
+        ("aitheatre/page.py",
+         "        .post-attachments img, .prompt-pictures img { min-height: 64px; width: auto; }",
+         "        .post-attachments img, .prompt-pictures img { min-height: 0; width: auto; }"),
+    ],
     "картинку, которую модель не увидела, снова записывают уехавшей": [
         ("aitheatre/show.py",
          "        dropped = cloud.take_pictures_dropped(model)\n"

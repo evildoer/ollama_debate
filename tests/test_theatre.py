@@ -9279,6 +9279,190 @@ class TestWhatTheModelGot(PicturesTest):
         self.assertIn(place["display_name"], view["sent"],
                       "не сказано, какой модели уехало")
 
+    # Картинка в записи хода — не одно «уехало 64×64»: по такому не видно
+    # ни самой картинки, ни на что смотрела модель. Едет она и в ленте, и в
+    # ДАМПе, и возвращается из него вместе с записью (см. show.message_pictures,
+    # message_line, _link_message_pictures)
+
+    def _discussion(self) -> tuple:
+        """Разговор вокруг картинки: указание модератора с ней и ответ участника.
+
+        Возвращает картинку, место говорящего и историю — ту самую, из которой
+        собирается запрос (см. history_from_posts).
+        """
+        picture = self.attach_tiny()
+        place = plain_participant(self.session)
+        self.session.posts.append(show.create_post(
+            "Ведущая", "human", "Вот картинка — назови одним словом её цвет.",
+            round_num=1, role="moderator", gender="female",
+            attachments=[picture]))
+        self.session.posts.append(show.create_post(
+            place["display_name"], place["model"], "Красный.", round_num=1,
+            gender="female"))
+        return picture, place, self.session.history_from_posts()
+
+    def _turned(self, place: dict, history: list) -> dict:
+        """Отчёт о ходе — по той же истории, что собиралась бы к модели."""
+        messages = self.session._format_history(place["display_name"], history,
+                                                model=place["model"])
+        return {"messages": [show._message_view(one) for one in messages],
+                "added": [], "removed": [], "steps": [],
+                "budget": {"kind": "local", "window": 100},
+                "summary": {"seconds": 3}}
+
+    def _through_the_dump(self, place: dict, history: list, pictures: list,
+                          shown: bool = False) -> tuple:
+        """Спектакль — в ДАМП и обратно: файл, разобранная запись и её номер.
+
+        Пишется тем же, чем пишет живой ход: реплика модератора с приложенным,
+        её поездка (см. dump_note_picture_travel) и запись хода целиком. shown —
+        модель картинку уже видела: тогда она едет строкой о себе, а не сама
+        (см. show.images_already_shown_note).
+        """
+        pictures = list(pictures)
+        if shown:
+            for picture in pictures:
+                self.show_to(picture["url"], place)
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        dump = Path(folder.name) / "damp.md"
+        self.addCleanup(show._dump_reset)
+        with mock.patch.object(settings, "DUMP_FILE", dump):
+            show.start_dump("О чём картинка")
+            # Все реплики, кроме той, чей ход записывается: приложенное к ним
+            # и поездка картинок лежат в их же записях
+            for post in self.session.posts[:-1]:
+                show.save_dump_entry(post)
+            show.dump_note_picture_travel([one["url"] for one in pictures])
+            post = show.create_post(place["display_name"], place["model"],
+                                    "Красный.", round_num=1, gender="female")
+            show.save_dump_entry(post, self._turned(place, history))
+            written = dump.read_text(encoding="utf-8")
+            # А память о картинках в том запуске и осталась: приведённое
+            # к обычному размеру живёт только в ней (см. _UPLOAD_MARKS),
+            # и после перезапуска слова о поездке берутся из одной записи
+            self.remembered = dict(show._UPLOAD_MARKS)
+            self.addCleanup(show._UPLOAD_MARKS.update, self.remembered)
+            show._UPLOAD_MARKS.clear()
+            back = show.parse_dump(written, store=True)
+        return written, back["turns"][post["id"]], post["id"]
+
+    def test_a_tiny_picture_is_shown_bigger_than_itself(self):
+        """Восьмипиксельную картинку иначе не видно: она и показывается крупнее себя.
+
+        Приложенное к реплике — это то, что принёс режиссёр, и увидеть его надо
+        глазом: о том, что к реплике что-то приложено, иначе говорит только
+        подпись под крохотным квадратиком (см. .post-attachments img).
+        """
+        css = page.HTML_TEMPLATE
+        found = re.search(
+            r"\.post-attachments img, \.prompt-pictures img \{ min-height: (\d+)px",
+            css)
+
+        self.assertTrue(found, "крохотная картинка снова показывается сама собой")
+        self.assertGreaterEqual(int(found.group(1)), 32,
+                                "высота, на которой картинку ещё не видно")
+
+    def test_the_picture_already_shown_is_still_shown(self):
+        """Уже показанная картинка остаётся видна в записи хода, а не одними словами.
+
+        Ехать второй раз ей нечем, и в запросе вместо неё стоит строка о себе
+        (см. show.images_already_shown_note): по ней видно, о какой картинке
+        речь, — и саму её надо видеть. «Приложена картинка «квадратик.png»»
+        без картинки читается как слова о том, чего не видно (см.
+        show.message_pictures).
+        """
+        picture, place, history = self._discussion()
+        show.post_image_pairs([picture])
+        self.show_to(picture["url"], place)
+
+        messages = self.session._format_history(place["display_name"], history,
+                                                model=place["model"])
+        view = show._message_view(messages[0])
+
+        self.assertIn("уже показана", view["content"], "строка о показе пропала")
+        self.assertEqual([one["url"] for one in view["pictures"]], [picture["url"]],
+                         "уже показанная картинка пропала из записи хода")
+
+    def test_the_record_keeps_the_picture_through_the_dump(self):
+        """Картинка записи хода переживает ДАМП и возвращается вместе с ней.
+
+        О приложенном к сообщению запись говорит одними словами (см.
+        show.message_note), а картинка лежит в том же файле и связана
+        с репликой: возвращённый спектакль находит её по этим словам — и в записи
+        видно то самое изображение, а не подпись о нём (см.
+        show._link_message_pictures). И сами слова о поездке возвращаются:
+        лента скажет о ней то же, что говорила на ходу (см.
+        _remember_travel_words).
+        """
+        picture, place, history = self._discussion()
+        show.post_image_pairs([picture])
+
+        _written, turn, _id = self._through_the_dump(place, history, [picture])
+        message = turn["messages"][0]
+
+        self.assertIn("уехали вместе с ней", message["note"],
+                      "запись говорит о картинке не словами о поездке")
+        self.assertEqual([one["url"] for one in message["pictures"]],
+                         [picture["url"]],
+                         "из ДАМПа запись хода вернулась без картинки")
+        self.assertEqual(message["pictures"][0]["name"], "значок.png",
+                         "возвращённая картинка потеряла своё имя")
+        self.assertIn("png 64×64", show.travelled_picture_words(picture["url"]),
+                      "ДАМП забыл, какою картинка уехала")
+        self.assertIn("приложено 8×8", show.travelled_picture_words(picture["url"]),
+                      "ДАМП забыл, что было приложено")
+
+    def test_a_picture_already_shown_comes_back_too(self):
+        """Уже показанная картинка находится в записи по своему имени.
+
+        В запросе её нет, и названа она строкой о себе — по имени (см.
+        show.images_already_shown_note), а не словами о поездке. По этому имени
+        картинка и возвращается в запись (см. show._pictures_of_names).
+        """
+        picture, place, history = self._discussion()
+        show.post_image_pairs([picture])
+
+        _written, turn, _id = self._through_the_dump(place, history, [picture],
+                                                     shown=True)
+        message = turn["messages"][0]
+
+        self.assertIn("уже показана", message["content"],
+                      "в записи нет строки о показе — искать её будет не по чем")
+        self.assertEqual([one["url"] for one in message["pictures"]],
+                         [picture["url"]],
+                         "уже показанная картинка не вернулась с записью")
+
+    def test_the_same_picture_under_two_addresses_is_still_shown(self):
+        """Одну и ту же картинку приложили дважды — она и находится по словам.
+
+        Файла у неё теперь два (имя файла даёт сервер, см. show.save_upload),
+        а имя и слова о ней — одни: по ним две такие неразличимы, и вязать
+        картинку с сообщением было бы нечем. А по содержимому это одна и та же
+        картинка (см. show.same_picture), и показать любую из них — показать ту
+        самую. Ровно так вышло с «квадратиком», приложенным к двум репликам.
+        """
+        first = self.attach_tiny()
+        second = self.attach_tiny()
+        place = plain_participant(self.session)
+        for picture in (first, second):
+            self.session.posts.append(show.create_post(
+                "Ведущая", "human", "Вот картинка — назови её цвет.", round_num=1,
+                role="moderator", gender="female", attachments=[picture]))
+        self.session.posts.append(show.create_post(
+            place["display_name"], place["model"], "Красный.", round_num=1,
+            gender="female"))
+        for picture in (first, second):
+            show.post_image_pairs([picture])
+
+        _written, turn, _id = self._through_the_dump(
+            place, self.session.history_from_posts(), [first, second])
+        message = turn["messages"][0]
+
+        self.assertEqual(len(message["pictures"]), 1,
+                         "одна и та же картинка показана в записи дважды")
+        self.assertEqual(message["pictures"][0]["name"], "значок.png")
+
 
 class TestVisionCheckedAtTheStart(CloudVisionTest):
     """Проверка зрения идёт сама, а её ответ помнится.
