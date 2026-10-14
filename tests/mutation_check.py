@@ -774,10 +774,10 @@ BUGS = {
          "            background: #1c1c1c; border-color: #5a5a5a; }",
          "            background: #ffffff; border-color: #000000; }"),
     ],
-    "выход из театра снова уехал из сайдбара в подвал страницы": [
+    "выход снова уехал из управления спектаклем в подвал страницы": [
         ("aitheatre/page.py",
-         '                <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button>',
-         '                <div class="footer"><button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button></div>'),
+         '                            <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выгрузить модели">🚪 Покинуть театр</button>',
+         '                <div class="footer">' + '                            <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выгрузить модели">🚪 Покинуть театр</button></div>'),
     ],
     "выход снова ищет кнопку в подвале страницы": [
         ("aitheatre/page.py",
@@ -791,17 +791,22 @@ BUGS = {
          "                    escapeHtml(one.name) +",
          "                    'шрифт' +"),
     ],
-    "управление снова перестало быть отдельным разделом колонки": [
+    "дизайн снова перестал быть отдельным разделом колонки": [
         ("aitheatre/page.py",
-         '            <div class="sidebar-section control-block">',
+         '            <div class="sidebar-section design-block">',
          '            <div class="sidebar-section">'),
     ],
-    "управление снова уезжает под прокрутку колонки": [
+    "перед «Дизайном» снова две линии с зазором": [
         ("aitheatre/page.py",
-         "        .control-block { position: sticky; bottom: 0; background: inherit;",
-         "        .control-block { position: static; bottom: 0; background: inherit;"),
+         '            <div class="sidebar-section flush-bottom">',
+         '            <div class="sidebar-section">'),
     ],
-    "состояние театра и управление снова уехали в правый сайдбар": [
+    "дизайн снова уезжает под прокрутку колонки": [
+        ("aitheatre/page.py",
+         "        .design-block { position: sticky; bottom: 0; background: inherit;",
+         "        .design-block { position: static; bottom: 0; background: inherit;"),
+    ],
+    "состояние театра и оформление снова уехали в правый сайдбар": [
         ("aitheatre/page.py",
          '        <div class="rail">',
          '        <div class="sidebar">'),

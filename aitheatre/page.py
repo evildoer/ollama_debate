@@ -231,19 +231,28 @@ HTML_TEMPLATE = """
         .btn-secondary { background: #ffffff; color: #000000; }
         .btn-secondary:hover { background: #f5f5f5; }
         .btn:disabled { opacity: 0.3; cursor: not-allowed; }
-        /* Всё управление театром — шрифт текста, шрифт заголовков, цвет ролей,
-           тёмная сцена и выход — стоит внизу ЛЕВОЙ КОЛОНКИ, а не в подвале
-           страницы: колонка приклеена к верху и видна всегда, поэтому смену
-           шрифта видно там же, где выбор, — а из подвала страницы на текст
-           не посмотришь, туда уходят и смотрят на пустоту. Блок прилипает к низу
-           колонки (position: sticky): статус и память видеокарты бывают длинными,
-           и управление иначе уезжало бы под них вместе с прокруткой */
-        .control-block { position: sticky; bottom: 0; background: inherit;
-                           border-top: 1px solid #000000; border-bottom: none;
-                           margin-bottom: 0; padding-bottom: 24px; }
+        /* Оформление театра — шрифт текста, шрифт заголовков, цвет ролей
+           и тёмная сцена — стоит внизу ЛЕВОЙ КОЛОНКИ, а не в подвале страницы:
+           колонка приклеена к верху и видна всегда, поэтому смену шрифта видно
+           там же, где выбор, — а из подвала страницы на текст не посмотришь, туда
+           уходят и смотрят на пустоту. Блок прилипает к низу колонки
+           (position: sticky): статус и память видеокарты бывают длинными, и выбор
+           иначе уезжал бы под них вместе с прокруткой.
+           Линию над собой блок рисует сам — иначе, когда он прилипнет и под ним
+           поедет текст, отделять его от текста было бы нечем. Поэтому у раздела,
+           который стоит перед ним, своей линии снизу нет (см. .flush-bottom):
+           две линии с зазором читались бы как случайность */
+        /* Отступы и линию снизу у него не переписываем: раздел как раздел
+           (см. .sidebar-section), своего у него только прилипание, воздух над
+           линией и сама линия сверху. Держать здесь border-bottom: none было бы
+           неправдой: правило .sidebar-section стоит ниже и всё равно победит */
+        .design-block { position: sticky; bottom: 0; background: inherit;
+                        padding-top: 20px; border-top: 1px solid #000000; }
+        .sidebar-section.flush-bottom { border-bottom: none; margin-bottom: 0;
+                                        padding-bottom: 0; }
         /* Кнопки и подписи в колонке стоят столбиком: колонка узкая,
            и в строку они не влезут */
-        .control-block .btn { display: block; width: 100%; margin: 0 0 10px 0;
+        .design-block .btn { display: block; width: 100%; margin: 0 0 10px 0;
                                 padding: 11px 12px; font-size: 14px; text-align: center; }
         .font-pick-label { display: block; font-family: var(--theatre-font); font-size: 13px;
                            letter-spacing: 2px; text-transform: uppercase; color: #000000;
@@ -715,17 +724,21 @@ HTML_TEMPLATE = """
                 <div id="statusPlaceholder" style="color:#666;font-size:13px;">Ожидание начала...</div>
             </div>
             <!-- Память видеокарты стоит рядом со статусом: оба отвечают на один
-                 вопрос — «можно ли играть дальше» -->
-            <div class="sidebar-section">
+                 вопрос — «можно ли играть дальше».
+                 Линии снизу у него нет: её рисует блок «Дизайн» ниже, а две линии
+                 с зазором выглядели бы случайными (см. .flush-bottom) -->
+            <div class="sidebar-section flush-bottom">
                 <div class="sidebar-title">Память GPU</div>
                 <div id="vramDisplay" style="color:#000000;font-size:13px;line-height:1.6;">—</div>
             </div>
-            <!-- Управление театром — здесь, внизу колонки, а не в подвале
+            <!-- Оформление театра — здесь, внизу колонки, а не в подвале
                  страницы: колонка видна всегда, и смена шрифта видна там же, где
-                 выбор (см. .control-block). Списки шрифтов заполняются
-                 из FONT_CHOICES, а строки в них нарисованы своими шрифтами -->
-            <div class="sidebar-section control-block">
-                <div class="sidebar-title">Управление</div>
+                 выбор (см. .design-block). Списки шрифтов заполняются
+                 из FONT_CHOICES, а строки в них нарисованы своими шрифтами.
+                 Сам спектакль здесь не управляется: «Начать», «Завершить»,
+                 «Новый» и выход — в пульте, в разделе 05 -->
+            <div class="sidebar-section design-block">
+                <div class="sidebar-title">Дизайн</div>
                 <label class="font-pick-label" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
                 <div class="font-pick-wrap">
                     <button type="button" class="font-pick-btn" id="fontPick" onclick="togglePick('font')" aria-haspopup="true" aria-expanded="false" aria-label="Строки списка набраны своими шрифтами" title="Шрифт текста: разверните список — каждая строка набрана своим шрифтом. Выбор помнится, как тема">Georgia</button>
@@ -738,7 +751,6 @@ HTML_TEMPLATE = """
                 </div>
                 <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                 <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
-                <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выйти">🚪 Покинуть театр</button>
             </div>
         </div>
         <div class="main-content">
@@ -880,7 +892,7 @@ HTML_TEMPLATE = """
 
                     <div class="panel-section">
                         <div class="panel-heading"><span class="num">05</span><span class="name">Управление спектаклем</span></div>
-                        <div class="panel-note">«Завершить» опускает занавес, но не закрывает театр и ничего не запрещает: сказанное можно доиграть, переиграть или поправить, а после — собрать новый состав и играть дальше. Занавес — это только признак, что спектакль кончился. Сервер останавливает «Покинуть театр».</div>
+                        <div class="panel-note">«Завершить» опускает занавес, но не закрывает театр и ничего не запрещает: сказанное можно доиграть, переиграть или поправить, а после — собрать новый состав и играть дальше. Занавес — это только признак, что спектакль кончился. Сервер останавливает «Покинуть театр» — он стоит здесь же, последним.</div>
                         <div style="display:flex;gap:15px;flex-wrap:wrap;">
                             <button class="btn btn-primary" id="startBtn" onclick="startDebate()">🎭 Начать спектакль</button>
                             <button class="btn btn-secondary" id="finishBtn" onclick="finishDebate()" style="display:none;">⏹ Завершить спектакль</button>
@@ -895,6 +907,10 @@ HTML_TEMPLATE = """
                                  и после возврата из ДАМПа (см. updatePanel) -->
                             <button class="btn btn-secondary" id="continueBtn" onclick="continueShow()" style="display:none;"
                                     title="Прежние реплики останутся в ленте и станут историей для моделей: акт и цена продолжатся, а ДАМП допишется">↩ Доиграть прежний</button>
+                            <!-- Выход стоит здесь, а не в колонке: он про спектакль,
+                                 а не про оформление — рядом с тем, что спектакль
+                                 начинает, заканчивает и переигрывает -->
+                            <button class="btn btn-secondary" id="leaveBtn" onclick="shutdownServer()" title="Остановить сервер и выгрузить модели">🚪 Покинуть театр</button>
                         </div>
 
                         <!-- Архив спектаклей: сохранение — это сам спектакль (пульт,

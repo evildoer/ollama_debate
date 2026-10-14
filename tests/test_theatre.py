@@ -4384,7 +4384,7 @@ class TestRoleMarks(unittest.TestCase):
         # Выбор стоит внизу ЛЕВОЙ КОЛОНКИ, а не в подвале страницы: колонка
         # приклеена к верху и видна всегда, поэтому смену шрифта видно там же,
         # где выбор, — а из подвала страницы на текст не посмотришь, туда уходят
-        # и смотрят на пустоту (см. .rail и .control-block)
+        # и смотрят на пустоту (см. .rail и .design-block)
         self.assertIn('<div class="rail">', self.page, "левая колонка пропала")
         self.assertLess(self.page.index('<div class="rail">'),
                         self.page.index('id="fontPick"'),
@@ -4392,10 +4392,10 @@ class TestRoleMarks(unittest.TestCase):
         self.assertLess(self.page.index('id="fontPick"'),
                         self.page.index('<div class="main-content">'),
                         "выбор шрифта стоит не в колонке перед лентой")
-        self.assertIn('<div class="sidebar-section control-block">', self.page,
-                      "управление перестало быть отдельным разделом колонки")
-        self.assertIn(".control-block { position: sticky; bottom: 0;", self.page,
-                      "управление уезжает под статус вместе с прокруткой")
+        self.assertIn('<div class="sidebar-section design-block">', self.page,
+                      "раздел «Дизайн» перестал быть отдельным разделом колонки")
+        self.assertIn(".design-block { position: sticky; bottom: 0;", self.page,
+                      "выбор шрифта уезжает под статус вместе с прокруткой")
         # Выбор ставит переменную на тело страницы, а берут её сразу все правила
         # (см. --theatre-font): подменять шрифт в каждом месте было бы правкой
         # в двадцати, и первая же новая кнопка осталась бы при прежнем
@@ -4431,38 +4431,41 @@ class TestRoleMarks(unittest.TestCase):
         self.assertNotIn("font-family: Georgia", self.page,
                          "где-то шрифт прописан прямо, а не взят из --theatre-font")
 
-    def test_the_status_and_the_controls_live_in_the_left_rail(self):
-        """Состояние театра и управление им — в левой колонке, а не в подвале.
+    def test_the_status_and_the_look_live_in_the_left_rail(self):
+        """Состояние театра и его оформление — в левой колонке, а не в подвале.
 
         Подвал страницы для этого не годится: в подвал уходят и смотрят
         на пустоту, а колонка приклеена к верху и видна всегда. В правом
         сайдбаре остаётся то, что читают во время спектакля (кто играет, о чём
-        договорились), — иначе управление уезжало бы под длинный список
-        участников. Кнопки стоят в своём разделе колонки (см. .control-block),
+        договорились), — иначе выбор шрифта уезжал бы под длинный список
+        участников. Кнопки стоят в своём разделе колонки (см. .design-block),
         ниже списков шрифтов и столбиком: колонка узкая, в строку они не влезут.
+        Сам спектакль при этом управляется не здесь: «Начать», «Завершить»,
+        «Новый» и выход — в пульте, в разделе 05 (см. соседнюю проверку).
         """
         self.assertNotIn('<div class="footer">', self.page, "подвал страницы вернулся")
         self.assertNotIn(".footer {", self.page, "оформление подвала осталось в стилях")
         self.assertNotIn("body.dark .footer", self.page,
                          "тёмная сцена снова помнит про подвал")
-        # Левая колонка: статус, память видеокарты и всё управление театром
+        # Левая колонка: статус, память видеокарты и оформление театра
         self.assertIn('<div class="rail">', self.page, "левая колонка пропала совсем")
         rail = self.page[self.page.index('<div class="rail">'):
                          self.page.index('<div class="main-content">')]
-        for section in ('>Статус<', 'Память GPU', 'control-block', 'id="fontPick"',
-                        'id="headPick"', 'id="rolesBtn"', 'id="themeBtn"', 'id="leaveBtn"'):
+        for section in ('>Статус<', 'Память GPU', '>Дизайн<', 'design-block', 'id="fontPick"',
+                        'id="headPick"', 'id="rolesBtn"', 'id="themeBtn"'):
             self.assertIn(section, rail, f"{section} снова не в левой колонке")
+        self.assertNotIn('id="leaveBtn"', rail,
+                         "выход снова уехал из управления спектаклем в колонку")
         self.assertLess(rail.index('id="fontPickList"'), rail.index('id="themeBtn"'),
-                        "кнопки управления стоят выше списков шрифтов")
+                        "кнопки раздела «Дизайн» стоят выше списков шрифтов")
         # …а в правом сайдбаре — только то, что читают
         sidebar = self.page[self.page.index('<div class="sidebar">'):
                             self.page.index('</div>\n    </div>')]
-        for gone in ('>Статус<', 'Память GPU', 'control-block', 'id="fontPick"',
+        for gone in ('>Статус<', 'Память GPU', 'design-block', 'id="fontPick"',
                      'id="leaveBtn"'):
             self.assertNotIn(gone, sidebar, f"{gone} снова остался в правом сайдбаре")
         self.assertIn('>Персонажи<', sidebar, "в правом сайдбаре пропали персонажи")
         # Колонка слева от ленты, приклеена к верху и отбита линией справа
-        self.assertIn("<div class=\"rail\">", self.page)
         self.assertLess(self.page.index('<div class="rail">'),
                         self.page.index('<div class="sidebar">'),
                         "колонка стоит справа от ленты, а не слева")
@@ -4470,8 +4473,17 @@ class TestRoleMarks(unittest.TestCase):
                       self.page, "левая колонка не приклеена к верху или потеряла линию")
         self.assertIn("body.dark .rail, body.dark .sidebar, body.dark .participant-card {",
                       self.page, "тёмная сцена не перекрашивает левую колонку")
-        self.assertIn(".control-block .btn { display: block; width: 100%;", self.page,
-                      "кнопки управления в колонке снова стоят в строку")
+        self.assertIn(".design-block .btn { display: block; width: 100%;", self.page,
+                      "кнопки раздела «Дизайн» в колонке снова стоят в строку")
+        # Линию над прилипающим блоком рисует он сам, а у раздела перед ним своей
+        # линии снизу нет: две линии с зазором (статус памяти — линия — зазор —
+        # линия — «Дизайн») читались бы как случайность
+        self.assertIn('<div class="sidebar-section flush-bottom">', self.page,
+                      "у раздела перед «Дизайном» снова своя линия снизу")
+        self.assertIn(".sidebar-section.flush-bottom { border-bottom: none; margin-bottom: 0;",
+                      self.page, "линия раздела перед «Дизайном» не убрана по-настоящему")
+        self.assertIn("padding-top: 20px; border-top: 1px solid #000000;", self.page,
+                      "«Дизайн» больше не отделён от того, что над ним")
         # В тёмной сцене список перекрашивается вместе с колонкой: иначе белые
         # строки и белый фон висели бы над тёмной страницей. Смотрим не на одни
         # селекторы, а на сам фон: селекторы могут остаться на месте, а цвет — нет
@@ -4484,7 +4496,18 @@ class TestRoleMarks(unittest.TestCase):
                       "тёмная сцена оставила фон списка шрифтов белым")
         self.assertIn("body.dark .font-pick-row:hover, body.dark .font-pick-row.current { background: #262626; }",
                       self.page, "в тёмной сцене выбранная строка списка не отличается от прочих")
-        # Выход ищется по имени своей кнопки: подвала, по которому его искали, нет
+        # Выход — в разделе 05 «Управление спектаклем», рядом с «Завершить»
+        # и «Новый»: он про спектакль, а не про оформление, и место ему там же,
+        # где остальное управление им. Ищется он при этом по своему имени:
+        # подвала, по которому его искали раньше, у страницы нет вовсе
+        self.assertIn('<span class="name">Управление спектаклем</span>', self.page)
+        self.assertLess(self.page.index('<span class="name">Управление спектаклем</span>'),
+                        self.page.index('id="leaveBtn"'),
+                        "выход снова уехал из управления спектаклем")
+        self.assertLess(self.page.index('id="startBtn"'), self.page.index('id="leaveBtn"'),
+                        "выход стоит выше кнопок спектакля")
+        self.assertLess(self.page.index('id="leaveBtn"'), self.page.index('id="saveName"'),
+                        "выход уехал из кнопок спектакля в архив")
         self.assertIn("const exitBtn = document.getElementById('leaveBtn');", self.page,
                       "выход снова ищет кнопку в подвале страницы, а подвала нет")
         self.assertNotIn("document.querySelector('.footer", self.page,
