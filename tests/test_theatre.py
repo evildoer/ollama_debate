@@ -4369,6 +4369,36 @@ class TestRoleMarks(unittest.TestCase):
         for name in self.FONTS:
             self.assertIn(f"{{name: '{name}', stack:", self.page,
                           f"в списке шрифтов текста нет {name}")
+        # Список по алфавиту: порядок подбора имён мешает искать глазами.
+        # Сортируется после объявления, поэтому порядок в файле — это группы
+        # для читающего код, а порядок в списке — для режиссёра
+        self.assertIn("FONT_CHOICES.sort((a, b) => a.name.localeCompare(b.name, 'en'));",
+                      self.page, "список шрифтов не отсортирован по алфавиту")
+        # Georgia — шрифт по умолчанию, но после сортировки она не нулевая:
+        # номер ищется по имени, и без выбора страница открывается на ней
+        self.assertIn("const GEORGIA_AT = FONT_CHOICES.findIndex(one => one.name === 'Georgia');",
+                      self.page, "шрифт по умолчанию берётся первым номером списка")
+        self.assertIn("if (!saved) return GEORGIA_AT;", self.page,
+                      "без записи страница открывается не на Georgia")
+        self.assertIn("return at < 0 ? GEORGIA_AT : at;", self.page,
+                      "чужое имя в записи снова сваливается в нулевой шрифт")
+        # Поиск по имени: набранное в открытом списке слово прыгает на строку,
+        # чьё имя им начинается, — как в родном <select>, только с живым
+        # предпросмотром (см. typeInPick). Буфер набора стирается через
+        # полсекунды молчания и при закрытии списка
+        self.assertIn("function typeInPick(what, letter) {", self.page,
+                      "набор по открытому списку никуда не ведёт")
+        self.assertIn("if (now - PICK_TYPE.at > 500) PICK_TYPE.buf = '';", self.page,
+                      "буфер набора не стирается — слова набираются вечно")
+        self.assertIn("PICK_TYPE.buf += letter.toLowerCase();", self.page,
+                      "буквы набора не копятся в слово")
+        self.assertIn("                if (FONT_CHOICES[Number(rows[at].dataset.at)]"
+                      ".name.toLowerCase().startsWith(PICK_TYPE.buf)) {", self.page,
+                      "поиск по списку не ищет по началу имени")
+        self.assertIn("start = rows.indexOf(marked) + 1;", self.page,
+                      "повтор той же буквы не переходит к следующему одноимённому")
+        self.assertIn("                PICK_TYPE.buf = '';", self.page,
+                      "закрытый список не стирает набранное слово")
         # Оба списка страницы заполняются из того же FONT_CHOICES (см. fillPicks):
         # перечень имён, написанный в разметке руками, разошёлся бы с правилами,
         # и в выборе стоял бы шрифт, которого у страницы уже нет

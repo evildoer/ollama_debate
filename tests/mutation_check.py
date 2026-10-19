@@ -853,6 +853,36 @@ BUGS = {
          "src: url('/static/fonts/ruslan-display.ttf') format('truetype');",
          "src: url('/static/fonts/ruslan-display.woff') format('truetype');"),
     ],
+    "список шрифтов снова не по алфавиту": [
+        ("aitheatre/page.py",
+         "        FONT_CHOICES.sort((a, b) => a.name.localeCompare(b.name, 'en'));\n", ""),
+    ],
+    "шрифт по умолчанию снова берётся первым номером списка": [
+        ("aitheatre/page.py",
+         "        const GEORGIA_AT = FONT_CHOICES.findIndex(one => one.name === 'Georgia');",
+         "        const GEORGIA_AT = 0;"),
+    ],
+    "поиск по списку не копит буквы в слово": [
+        ("aitheatre/page.py",
+         "            PICK_TYPE.buf += letter.toLowerCase();",
+         "            PICK_TYPE.buf = letter.toLowerCase();"),
+    ],
+    "поиск по списку снова ничего не ищет": [
+        ("aitheatre/page.py",
+         "                if (FONT_CHOICES[Number(rows[at].dataset.at)].name.toLowerCase().startsWith(PICK_TYPE.buf)) {",
+         "                if (false) {"),
+    ],
+    "повтор буквы снова не переходит к следующему одноимённому": [
+        ("aitheatre/page.py",
+         "                start = rows.indexOf(marked) + 1;",
+         "                start = 0;"),
+    ],
+    "закрытый список снова не стирает набранное слово": [
+        ("aitheatre/page.py",
+         "                list.hidden = true;\n"
+         "                PICK_TYPE.buf = '';",
+         "                list.hidden = true;"),
+    ],
     "дизайн снова перестал быть отдельным разделом колонки": [
         ("aitheatre/page.py",
          '            <div class="sidebar-section design-block">',

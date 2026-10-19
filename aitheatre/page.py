@@ -2812,10 +2812,21 @@ HTML_TEMPLATE = """
             {name: 'Ruslan Display', stack: "'Ruslan Display', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Elmono Pro', stack: "'Elmono Pro', Georgia, 'Times New Roman', Times, serif"},
         ];
-        const FONT_STATE = {font: 0, heads: 0};
+        // В списке — по алфавиту: порядок подбора имён им мешает, ищут глазами.
+        // Сортируется после объявления, а не руками в нём: порядок в файле —
+        // это группы для читающего код (рисованные, гротески, акцидентные),
+        // а порядок в списке — для режиссёра
+        FONT_CHOICES.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+        // Нулевым номером Georgia после сортировки уже не является, поэтому
+        // шрифт по умолчанию ищется по имени, а не берётся первым (см. atChoice)
+        const GEORGIA_AT = FONT_CHOICES.findIndex(one => one.name === 'Georgia');
+        const FONT_STATE = {font: GEORGIA_AT, heads: GEORGIA_AT};
         // Что показывает курсор при листании стрелками: это ПРЕДПРОСМОТР,
         // а не выбор (см. moveCursor). null — курсора нет, страница на выбранном
         const FONT_PREVIEW = {font: null, heads: null};
+        // Буфер набора по открытому списку: буквы складываются в слово,
+        // и список прыгает на имя, которое им начинается (см. typeInPick)
+        let PICK_TYPE = {buf: '', at: 0};
 
         // Оба списка страницы заполняются из того же FONT_CHOICES: второй перечень
         // имён, написанный в разметке руками, разошёлся бы с первым на первой правке,
@@ -2854,6 +2865,7 @@ HTML_TEMPLATE = """
                 const list = listOf(what);
                 if (!list || list.hidden) continue;
                 list.hidden = true;
+                PICK_TYPE.buf = '';
                 const btn = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
                 if (btn) btn.setAttribute('aria-expanded', 'false');
                 // Предпросмотр не выбор: закрытый без выбора список возвращает
@@ -2900,6 +2912,18 @@ HTML_TEMPLATE = """
             if (event.key === 'Escape') {
                 closePicks();
                 return;
+            }
+            // Печать в открытом списке — поиск по имени, как в родном <select>:
+            // набранное слово ищется по началу имени, и курсор прыгает на
+            // первое совпадение (см. typeInPick)
+            if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
+                for (const what of ['font', 'heads']) {
+                    const list = listOf(what);
+                    if (!list || list.hidden) continue;
+                    event.preventDefault();
+                    typeInPick(what, event.key);
+                    return;
+                }
             }
             // Стрелки листают открытый список, и страница показывает шрифт за
             // курсором — так нужный ищут глазами, а не перебором «выбрать —
@@ -2964,6 +2988,37 @@ HTML_TEMPLATE = """
             });
         }
 
+        // Набор по открытому списку — это поиск, а не выбор: буквы складываются
+        // в слово (полсекунды молчания его стирают, как в родных списках),
+        // и курсор прыгает на первую строку, чьё имя начинается с этого слова.
+        // Повтор одной и той же буквы ползёт дальше по одноимённым — печатаешь
+        // «rr» и переходишь с Russo One на Ruslan Display. Закрепляется найденное
+        // тем же Enter или щелчком, что и строчное листание (см. choose)
+        function typeInPick(what, letter) {
+            const now = Date.now();
+            if (now - PICK_TYPE.at > 500) PICK_TYPE.buf = '';
+            PICK_TYPE.at = now;
+            PICK_TYPE.buf += letter.toLowerCase();
+            const list = listOf(what);
+            if (!list) return;
+            const rows = Array.prototype.slice.call(list.querySelectorAll('.font-pick-row'));
+            if (!rows.length) return;
+            const marked = list.querySelector('.font-pick-row.cursor');
+            let start = 0;
+            if (PICK_TYPE.buf.length === 1 && marked &&
+                FONT_CHOICES[Number(marked.dataset.at)].name.toLowerCase().startsWith(PICK_TYPE.buf)) {
+                start = rows.indexOf(marked) + 1;
+            }
+            for (let i = 0; i < rows.length; i++) {
+                const at = (start + i) % rows.length;
+                if (FONT_CHOICES[Number(rows[at].dataset.at)].name.toLowerCase().startsWith(PICK_TYPE.buf)) {
+                    rows[at].focus({preventScroll: true});
+                    moveCursor(what, Number(rows[at].dataset.at));
+                    return;
+                }
+            }
+        }
+
         // В памяти страницы лежит ИМЯ выбранного шрифта, а не его номер в списке:
         // список со временем меняется, и номер в нём значил бы уже другое (см. atChoice)
         // Выбор закрывает список — выбранное тут же видно на странице, а курсор
@@ -3013,13 +3068,15 @@ HTML_TEMPLATE = """
         // Прежние записи читаются тоже: раньше в них лежали не имена шрифтов,
         // а имена классов («standard», «izis», «rubik»), а «text» значило
         // «заголовки идут за текстом» — теперь у заголовков своё имя, и оно
-        // и берётся вместо прежнего «как текст»
+        // и берётся вместо прежнего «как текст».
+        // Номер возвращается по имени, а не нулевой: список по алфавиту,
+        // и нулевым им давно не стоит Georgia (см. GEORGIA_AT)
         function atChoice(saved) {
-            if (!saved) return 0;
+            if (!saved) return GEORGIA_AT;
             const was = {standard: 'Georgia', izis: 'Izis', text: 'Georgia', rubik: 'Rubik'};
             const name = was[saved] || saved;
             const at = FONT_CHOICES.findIndex(one => one.name === name);
-            return at < 0 ? 0 : at;
+            return at < 0 ? GEORGIA_AT : at;
         }
 
         (function initFonts() {
