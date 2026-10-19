@@ -4327,15 +4327,19 @@ class TestRoleMarks(unittest.TestCase):
     # Georgia и Comic Sans MS — системные: своего файла рядом с проектом у них нет
     # и быть не может, поэтому нет и @font-face
     FONTS = ("Georgia", "Balsamiq Sans", "Comic Sans MS", "Izis", "Neucha", "Pangolin",
-             "Marmelad", "Comfortaa", "Nunito", "Rubik", "Golos Text", "Onest",
-             "Manrope", "Ruda", "Podkova", "Montserrat", "Noto Sans", "PT Sans",
-             "Fixel Display", "Russo One", "Kelly Slab", "Adigiana 2")
+             "Marmelad", "Adigiana 2", "Comic CAT", "ZarubkaType", "Comfortaa", "Nunito",
+             "Rubik", "Golos Text", "Onest", "Manrope", "Ruda", "Podkova", "Montserrat",
+             "Noto Sans", "PT Sans", "Fixel Display", "Russo One", "Kelly Slab",
+             "Web Serveroff", "CharakternyC", "Ruslan Display", "Elmono Pro")
     SYSTEM_FONTS = ("Georgia", "Comic Sans MS")
     # Izis и Adigiana 2 — чужие работы: у Izis freeware для личного пользования,
     # у Adigiana 2 в файле вместо автора стоит заглушка «© (your company)», то есть
-    # условий автор не назвал. Под лицензией проекта они не лежат, поэтому
-    # и текста лицензии рядом с ними нет (см. README)
-    FOREIGN_WORK = ("Izis", "Adigiana 2")
+    # условий автор не назвал. То же и у Comic CAT, ZarubkaType, Web Serveroff
+    # и Elmono Pro: условий в самих файлах нет, каталоги говорят о бесплатном
+    # или пожертвовательном использовании. Под лицензией проекта они не лежат,
+    # поэтому и текста лицензии рядом с ними нет (см. README)
+    FOREIGN_WORK = ("Izis", "Adigiana 2", "Comic CAT", "ZarubkaType",
+                    "Web Serveroff", "Elmono Pro")
 
     def test_the_font_chooser_is_wired_and_remembered(self):
         """Шрифт текста выбирается из списка, берётся из файла рядом и помнится.
@@ -4381,6 +4385,12 @@ class TestRoleMarks(unittest.TestCase):
                       self.page, "строки списка снова набраны системным шрифтом")
         self.assertIn('<span class="font-pick-sample">Когда ты зайдёшь</span>', self.page,
                       "рядом с именем шрифта нет образца строки")
+        # Сначала заголовки, потом текст: заголовок виден раньше и решает, как
+        # читается вся страница, поэтому и выбирается первым (см. разметку
+        # раздела «Дизайн»)
+        self.assertIn('id="headPick"', self.page)
+        self.assertLess(self.page.index('id="headPick"'), self.page.index('id="fontPick"'),
+                        "заголовки снова стоят после текста")
         # Выбор стоит внизу ЛЕВОЙ КОЛОНКИ, а не в подвале страницы: колонка
         # приклеена к верху и видна всегда, поэтому смену шрифта видно там же,
         # где выбор, — а из подвала страницы на текст не посмотришь, туда уходят
@@ -4417,8 +4427,41 @@ class TestRoleMarks(unittest.TestCase):
                       self.page, "список раскрывается не вверх — он стоит внизу сайдбара")
         self.assertIn("if (!(event.target.closest && event.target.closest('.font-pick-wrap'))) closePicks();",
                       self.page, "список шрифтов не закрывается щелчком мимо")
-        self.assertIn("if (event.key === 'Escape') closePicks();", self.page,
+        self.assertIn("if (event.key === 'Escape') {", self.page,
                       "список шрифтов не закрывается с клавиатуры")
+        # Список листается стрелками, и страница показывает шрифт за курсором:
+        # нужный ищут глазами, а не перебором «выбрать — посмотреть — открыть
+        # снова». Листание — предпросмотр, а не выбор: закрепляют Enter или
+        # щелчок, а закрытый без выбора список возвращает прежний шрифт
+        self.assertIn("if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;",
+                      self.page, "стрелки не листают список шрифтов")
+        self.assertIn("moveCursor(what, Number(rows[next].dataset.at));", self.page,
+                      "шаг стрелкой никуда не ведёт: курсор не двигается")
+        self.assertIn("function moveCursor(what, at) {", self.page,
+                      "нет функции листания списка")
+        # Строка листания показывает шрифт и НЕ закрепляет его: между
+        # предпросмотром и закреплённым выбором не должно быть подмены
+        self.assertIn("            FONT_PREVIEW[what] = at;\n"
+                      "            paintChoice(what, at);", self.page,
+                      "листание не показывает шрифт на странице — это не предпросмотр")
+        self.assertIn("one.classList.toggle('cursor', here);", self.page,
+                      "строка под курсором не отличается от прочих")
+        # Рамка — единственное, что отличает строку под курсором: фон у неё
+        # общий с наведённой и выбранной, и без рамки листание было бы
+        # незаметным. Смотрим на само правило, а не на селекторы в нём
+        self.assertIn(".font-pick-row.cursor { box-shadow: inset 0 0 0 1px #000000; }",
+                      self.page, "строка под курсором не отбита рамкой")
+        self.assertIn("body.dark .font-pick-row.cursor { box-shadow: inset 0 0 0 1px #e8e8e8; }",
+                      self.page, "в тёмной сцене рамка курсора не видна — чёрная на чёрном")
+        self.assertIn("                if (FONT_PREVIEW[what] !== null && FONT_PREVIEW[what] !== FONT_STATE[what]) {\n"
+                      "                    applyChoice(what);\n"
+                      "                }",
+                      self.page, "закрытый без выбора список оставляет предпросмотрный шрифт")
+        # Закрепляют выбор Enter или щелчок; курсор при закрытии гаснет
+        self.assertIn("            FONT_PREVIEW[what] = at;", self.page,
+                      "закреплённый выбор не догоняет курсор предпросмотра")
+        self.assertIn("list.querySelectorAll('.font-pick-row.cursor').forEach(one => one.classList.remove('cursor'));",
+                      self.page, "курсор предпросмотра переживает закрытие списка")
         self.assertIn("localStorage.setItem(what === 'font' ? 'theatreFont' : 'theatreHeads',",
                       self.page, "выбор шрифта нечем запомнить")
         self.assertIn("FONT_CHOICES[at].name);", self.page,
@@ -4494,7 +4537,7 @@ class TestRoleMarks(unittest.TestCase):
         dark = dark[:dark.index("}") + 1]
         self.assertIn("background: #1c1c1c;", dark,
                       "тёмная сцена оставила фон списка шрифтов белым")
-        self.assertIn("body.dark .font-pick-row:hover, body.dark .font-pick-row.current { background: #262626; }",
+        self.assertIn("body.dark .font-pick-row.current { background: #262626; }",
                       self.page, "в тёмной сцене выбранная строка списка не отличается от прочих")
         # Выход — в разделе 05 «Управление спектаклем», рядом с «Завершить»
         # и «Новый»: он про спектакль, а не про оформление, и место ему там же,

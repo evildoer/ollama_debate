@@ -791,6 +791,68 @@ BUGS = {
          "                    escapeHtml(one.name) +",
          "                    'шрифт' +"),
     ],
+    "список шрифтов снова не листается стрелками": [
+        ("aitheatre/page.py",
+         "            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;",
+         "            if (true) return;"),
+    ],
+    "шаг стрелкой снова не показывает шрифт на странице": [
+        ("aitheatre/page.py",
+         "            FONT_PREVIEW[what] = at;\n"
+         "            paintChoice(what, at);",
+         "            FONT_PREVIEW[what] = at;"),
+    ],
+    "листание снова закрепляет выбор без Enter и щелчка": [
+        ("aitheatre/page.py",
+         "            FONT_PREVIEW[what] = at;\n"
+         "            paintChoice(what, at);",
+         "            FONT_PREVIEW[what] = at;\n"
+         "            FONT_STATE[what] = at;\n"
+         "            paintChoice(what, at);"),
+    ],
+    "закрытый без выбора список снова оставляет предпросмотрный шрифт": [
+        ("aitheatre/page.py",
+         "                if (FONT_PREVIEW[what] !== null && FONT_PREVIEW[what] !== FONT_STATE[what]) {\n"
+         "                    applyChoice(what);\n"
+         "                }",
+         "                if (false) {\n"
+         "                    applyChoice(what);\n"
+         "                }"),
+    ],
+    "строка под курсором снова не отличается от прочих": [
+        ("aitheatre/page.py",
+         "        .font-pick-row.cursor { box-shadow: inset 0 0 0 1px #000000; }",
+         "        .font-pick-row.cursor { box-shadow: none; }"),
+    ],
+    "заголовки снова стоят после текста": [
+        ("aitheatre/page.py",
+         '                <label class="font-pick-label" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>\n'
+         '                <div class="font-pick-wrap">\n'
+         '                    <button type="button" class="font-pick-btn" id="headPick" onclick="togglePick(\'heads\')" aria-haspopup="true" aria-expanded="false" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится">Georgia</button>\n'
+         '                    <div class="font-pick-list" id="headPickList" aria-label="Шрифт заголовков" hidden></div>\n'
+         '                </div>\n',
+         ''),
+        ("aitheatre/page.py",
+         '                    <div class="font-pick-list" id="fontPickList" aria-label="Шрифт текста" hidden></div>\n'
+         '                </div>',
+         '                    <div class="font-pick-list" id="fontPickList" aria-label="Шрифт текста" hidden></div>\n'
+         '                </div>\n'
+         '                <label class="font-pick-label" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>\n'
+         '                <div class="font-pick-wrap">\n'
+         '                    <button type="button" class="font-pick-btn" id="headPick" onclick="togglePick(\'heads\')" aria-haspopup="true" aria-expanded="false" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится">Georgia</button>\n'
+         '                    <div class="font-pick-list" id="headPickList" aria-label="Шрифт заголовков" hidden></div>\n'
+         '                </div>'),
+    ],
+    "один из новых шрифтов снова выпал из списка": [
+        ("aitheatre/page.py",
+         "            {name: 'Ruslan Display', stack: \"'Ruslan Display', Georgia, 'Times New Roman', Times, serif\"},",
+         "            {name: 'Руслан', stack: \"'Ruslan Display', Georgia, 'Times New Roman', Times, serif\"},"),
+    ],
+    "файл одного из новых шрифтов снова не отдают": [
+        ("aitheatre/page.py",
+         "src: url('/static/fonts/ruslan-display.ttf') format('truetype');",
+         "src: url('/static/fonts/ruslan-display.woff') format('truetype');"),
+    ],
     "дизайн снова перестал быть отдельным разделом колонки": [
         ("aitheatre/page.py",
          '            <div class="sidebar-section design-block">',

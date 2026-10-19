@@ -75,6 +75,22 @@ HTML_TEMPLATE = """
             src: url('/static/fonts/adigiana-2.ttf') format('truetype');
             font-display: swap;
         }
+        /* Comic CAT — рисованный комиксный шрифт с кириллицей (автор Vitaly
+           Lazarenko). Чужая работа: условий автор в файле не назвал,
+           каталоги указывают бесплатное использование — лицензии рядом нет
+           (см. «Лицензию» в README) */
+        @font-face {
+            font-family: 'Comic CAT';
+            src: url('/static/fonts/comic-cat.ttf') format('truetype');
+            font-display: swap;
+        }
+        /* ZarubkaType — рисованная «зарубка» с кириллицей (автор Simon Shevkunov).
+           Чужая работа: freeware, условий в файле нет — лицензии рядом нет */
+        @font-face {
+            font-family: 'ZarubkaType';
+            src: url('/static/fonts/zarubkatype.ttf') format('truetype');
+            font-display: swap;
+        }
         /* Гротески с кириллицей — от мягкого Comfortaa до строгого Noto Sans */
         @font-face {
             font-family: 'Comfortaa';
@@ -171,6 +187,36 @@ HTML_TEMPLATE = """
         @font-face {
             font-family: 'Kelly Slab';
             src: url('/static/fonts/kelly-slab.ttf') format('truetype');
+            font-display: swap;
+        }
+        /* Web Serveroff — «печатная машинка» с кириллицей (автор Sergiy Tkachenko).
+           Чужая работа: CC BY по каталогам, в файле условий нет — лицензии
+           рядом нет, авторство указано здесь (см. «Лицензию» в README) */
+        @font-face {
+            font-family: 'Web Serveroff';
+            src: url('/static/fonts/web-serveroff.ttf') format('truetype');
+            font-display: swap;
+        }
+        /* CharakternyC — акцидентный «сочный» шрифт с кириллицей (автор gluk).
+           Под SIL Open Font License 1.1, текст лицензии лежит рядом */
+        @font-face {
+            font-family: 'CharakternyC';
+            src: url('/static/fonts/charakternyc.otf') format('opentype');
+            font-display: swap;
+        }
+        /* Ruslan Display — акцидентный кириллический шрифт «под старину»
+           (авторы Oleg Snarsky, Denis Masharov, Vladimir Rabdu). Под SIL Open
+           Font License 1.1, текст лицензии лежит рядом */
+        @font-face {
+            font-family: 'Ruslan Display';
+            src: url('/static/fonts/ruslan-display.ttf') format('truetype');
+            font-display: swap;
+        }
+        /* Elmono Pro — крупный акцидентный шрифт (автор zanfonts). Чужая работа:
+           donationware по каталогам, условий в файле нет — лицензии рядом нет */
+        @font-face {
+            font-family: 'Elmono Pro';
+            src: url('/static/fonts/elmono-pro-regular.ttf') format('truetype');
             font-display: swap;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -273,8 +319,11 @@ HTML_TEMPLATE = """
         .font-pick-row { display: block; width: 100%; padding: 7px 10px; text-align: left;
                          border: none; border-bottom: 1px solid #eeeeee; background: #ffffff;
                          color: #000000; font-size: 17px; line-height: 1.2; cursor: pointer; }
-        .font-pick-row:hover, .font-pick-row.current { background: #f0f0f0; }
+        .font-pick-row:hover, .font-pick-row.cursor, .font-pick-row.current { background: #f0f0f0; }
         .font-pick-row.current:after { content: ' ✓'; }
+        /* Строка под курсором листания стрелками отбита рамкой: фон у неё тот же,
+           что у наведённой и у выбранной, и без рамки непонятно, где курсор */
+        .font-pick-row.cursor { box-shadow: inset 0 0 0 1px #000000; }
         .font-pick-sample { display: block; font-size: 12px; color: #888888; margin-top: 2px; }
         .sidebar-section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #000000; }
         .sidebar-title { font-family: var(--theatre-head-font); font-size: 14px; font-weight: 700; color: #000000; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 15px; }
@@ -636,7 +685,9 @@ HTML_TEMPLATE = """
         body.dark .font-pick-label, body.dark .font-pick-btn, body.dark .font-pick-row { color: #e8e8e8; }
         body.dark .font-pick-btn, body.dark .font-pick-list, body.dark .font-pick-row {
             background: #1c1c1c; border-color: #5a5a5a; }
-        body.dark .font-pick-row:hover, body.dark .font-pick-row.current { background: #262626; }
+        body.dark .font-pick-row:hover, body.dark .font-pick-row.cursor,
+        body.dark .font-pick-row.current { background: #262626; }
+        body.dark .font-pick-row.cursor { box-shadow: inset 0 0 0 1px #e8e8e8; }
         body.dark .font-pick-sample { color: #7d7d7d; }
         body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
         body.dark .rail, body.dark .sidebar, body.dark .sidebar-section,
@@ -739,15 +790,18 @@ HTML_TEMPLATE = """
                  «Новый» и выход — в пульте, в разделе 05 -->
             <div class="sidebar-section design-block">
                 <div class="sidebar-title">Дизайн</div>
-                <label class="font-pick-label" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
-                <div class="font-pick-wrap">
-                    <button type="button" class="font-pick-btn" id="fontPick" onclick="togglePick('font')" aria-haspopup="true" aria-expanded="false" aria-label="Строки списка набраны своими шрифтами" title="Шрифт текста: разверните список — каждая строка набрана своим шрифтом. Выбор помнится, как тема">Georgia</button>
-                    <div class="font-pick-list" id="fontPickList" aria-label="Шрифт текста" hidden></div>
-                </div>
+                <!-- Сначала заголовки, потом текст: заголовок виден раньше и
+                     решает, как читается вся страница, поэтому и выбирается первым.
+                     Список шрифтов один на обе кнопки (см. FONT_CHOICES) -->
                 <label class="font-pick-label" for="headPick" title="Шрифт заголовков, имён участников и названий разделов — берётся жирным">🔠 Заголовки:</label>
                 <div class="font-pick-wrap">
                     <button type="button" class="font-pick-btn" id="headPick" onclick="togglePick('heads')" aria-haspopup="true" aria-expanded="false" title="Шрифт заголовков и значащих строк: тот же список, что и у текста, но жирным. Выбор помнится">Georgia</button>
                     <div class="font-pick-list" id="headPickList" aria-label="Шрифт заголовков" hidden></div>
+                </div>
+                <label class="font-pick-label" for="fontPick" title="Шрифт текста. Имена — те же, что в списке заголовков; выбор помнится">✒️ Текст:</label>
+                <div class="font-pick-wrap">
+                    <button type="button" class="font-pick-btn" id="fontPick" onclick="togglePick('font')" aria-haspopup="true" aria-expanded="false" aria-label="Строки списка набраны своими шрифтами" title="Шрифт текста: разверните список — каждая строка набрана своим шрифтом. Стрелки листают список, Enter закрепляет выбор">Georgia</button>
+                    <div class="font-pick-list" id="fontPickList" aria-label="Шрифт текста" hidden></div>
                 </div>
                 <button class="btn btn-secondary" id="rolesBtn" onclick="toggleRoleMarks()" title="Цветная полоса слева у реплик: участник — синяя, модератор — оранжевая, судья — сиреневая">🎨 Цвет ролей: вкл</button>
                 <button class="btn btn-secondary" id="themeBtn" onclick="toggleTheme()" title="Светлая и тёмная сцена">🌙 Тёмная сцена</button>
@@ -2737,6 +2791,8 @@ HTML_TEMPLATE = """
             {name: 'Pangolin', stack: "'Pangolin', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Marmelad', stack: "'Marmelad', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Adigiana 2', stack: "'Adigiana 2', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Comic CAT', stack: "'Comic CAT', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'ZarubkaType', stack: "'ZarubkaType', 'Balsamiq Sans', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Comfortaa', stack: "'Comfortaa', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Nunito', stack: "'Nunito', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Rubik', stack: "'Rubik', Georgia, 'Times New Roman', Times, serif"},
@@ -2751,8 +2807,15 @@ HTML_TEMPLATE = """
             {name: 'Fixel Display', stack: "'Fixel Display', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Russo One', stack: "'Russo One', Georgia, 'Times New Roman', Times, serif"},
             {name: 'Kelly Slab', stack: "'Kelly Slab', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Web Serveroff', stack: "'Web Serveroff', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'CharakternyC', stack: "'CharakternyC', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Ruslan Display', stack: "'Ruslan Display', Georgia, 'Times New Roman', Times, serif"},
+            {name: 'Elmono Pro', stack: "'Elmono Pro', Georgia, 'Times New Roman', Times, serif"},
         ];
         const FONT_STATE = {font: 0, heads: 0};
+        // Что показывает курсор при листании стрелками: это ПРЕДПРОСМОТР,
+        // а не выбор (см. moveCursor). null — курсора нет, страница на выбранном
+        const FONT_PREVIEW = {font: null, heads: null};
 
         // Оба списка страницы заполняются из того же FONT_CHOICES: второй перечень
         // имён, написанный в разметке руками, разошёлся бы с первым на первой правке,
@@ -2793,10 +2856,17 @@ HTML_TEMPLATE = """
                 list.hidden = true;
                 const btn = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
                 if (btn) btn.setAttribute('aria-expanded', 'false');
+                // Предпросмотр не выбор: закрытый без выбора список возвращает
+                // страницу к подтверждённому шрифту и гасит курсор
+                if (FONT_PREVIEW[what] !== null && FONT_PREVIEW[what] !== FONT_STATE[what]) {
+                    applyChoice(what);
+                }
+                FONT_PREVIEW[what] = null;
+                list.querySelectorAll('.font-pick-row.cursor').forEach(one => one.classList.remove('cursor'));
             }
         }
 
-        // Список открывается вверх (он внизу сайдбара) и открывается по одному:
+        // Список открывается вверх (он внизу колонки) и открывается по одному:
         // второй открытый список закрыл бы первый собой
         function togglePick(what) {
             const list = listOf(what);
@@ -2808,26 +2878,57 @@ HTML_TEMPLATE = """
             if (btn) btn.setAttribute('aria-expanded', wasHidden ? 'true' : 'false');
             if (wasHidden) {
                 const current = list.querySelector('.font-pick-row.current');
-                if (current) list.scrollTop = Math.max(0, current.offsetTop - 60);
+                if (current) {
+                    list.scrollTop = Math.max(0, current.offsetTop - 60);
+                    // Курсор встаёт на выбранном шрифте и берёт фокус: листать
+                    // список стрелками можно сразу, не дожидаясь первого нажатия,
+                    // а Enter на месте закрепляет то, что уже выбрано (см. moveCursor)
+                    current.classList.add('cursor');
+                    current.focus({preventScroll: true});
+                }
             }
         }
 
         // Щелчок мимо списка и Escape закрывают открытый список: иначе он висел бы
-        // над страницей до следующего выбора
+        // над страницей до следующего выбора. Закрытый при этом список без выбора
+        // возвращает прежний шрифт: листать стрелками — не выбирать, и страница
+        // не должна остаться на шрифте, который никто не подтвердил (см. moveCursor)
         document.addEventListener('click', event => {
             if (!(event.target.closest && event.target.closest('.font-pick-wrap'))) closePicks();
         });
         document.addEventListener('keydown', event => {
-            if (event.key === 'Escape') closePicks();
+            if (event.key === 'Escape') {
+                closePicks();
+                return;
+            }
+            // Стрелки листают открытый список, и страница показывает шрифт за
+            // курсором — так нужный ищут глазами, а не перебором «выбрать —
+            // посмотреть — открыть снова». Закрепляют выбор Enter или щелчок
+            // (строка списка — настоящая кнопка, см. choose)
+            if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+            for (const what of ['font', 'heads']) {
+                const list = listOf(what);
+                if (!list || list.hidden) continue;
+                event.preventDefault();
+                const rows = Array.prototype.slice.call(list.querySelectorAll('.font-pick-row'));
+                if (!rows.length) return;
+                const marked = list.querySelector('.font-pick-row.cursor');
+                let here = rows.indexOf(marked);
+                if (here < 0) here = rows.findIndex(one => Number(one.dataset.at) === FONT_STATE[what]);
+                const next = Math.min(rows.length - 1,
+                                      Math.max(0, (here < 0 ? 0 : here) + (event.key === 'ArrowDown' ? 1 : -1)));
+                rows[next].focus({preventScroll: true});
+                moveCursor(what, Number(rows[next].dataset.at));
+                return;
+            }
         });
 
         // Переменная ставится одна — на тело страницы, — а берут её сразу все
         // правила (см. --theatre-font): подменять шрифт в каждом месте было бы
         // правкой в двадцати, и первый же новый выбор остался бы при прежнем
-        // Кнопка и текущая строка при этом показывают выбранное: иначе список
-        // врал бы о том, что видно
-        function applyChoice(what) {
-            const chosen = FONT_CHOICES[FONT_STATE[what]];
+        // Кнопка при этом показывает выбранное: иначе список врал бы о том, что видно
+        function paintChoice(what, at) {
+            const chosen = FONT_CHOICES[at];
             document.body.style.setProperty(what === 'font' ? '--theatre-font' : '--theatre-head-font',
                                             chosen.stack);
             const btn = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
@@ -2835,17 +2936,41 @@ HTML_TEMPLATE = """
                 btn.textContent = chosen.name;
                 btn.style.fontFamily = chosen.stack;
             }
+        }
+
+        // Кнопка и текущая строка показывают ЗАКРЕПЛЁННОЕ: иначе список
+        // врал бы о том, какой шрифт у страницы (см. choose)
+        function applyChoice(what) {
+            paintChoice(what, FONT_STATE[what]);
             const list = listOf(what);
             if (list) list.querySelectorAll('.font-pick-row').forEach(one => {
                 one.classList.toggle('current', Number(one.dataset.at) === FONT_STATE[what]);
             });
         }
 
+        // Листание стрелками — это предпросмотр, а не выбор: страница показывает
+        // шрифт за курсором, но запоминается только то, на чём нажали Enter или
+        // щелкнули. Закрытый без выбора список гасит курсор и возвращает прежний
+        // шрифт (см. closePicks), поэтому листать можно сколько угодно
+        function moveCursor(what, at) {
+            FONT_PREVIEW[what] = at;
+            paintChoice(what, at);
+            const list = listOf(what);
+            if (list) list.querySelectorAll('.font-pick-row').forEach(one => {
+                const here = Number(one.dataset.at) === at;
+                one.classList.toggle('cursor', here);
+                // Курсор должен быть виден: список прокручивается сам, страница — нет
+                if (here && one.scrollIntoView) one.scrollIntoView({block: 'nearest'});
+            });
+        }
+
         // В памяти страницы лежит ИМЯ выбранного шрифта, а не его номер в списке:
         // список со временем меняется, и номер в нём значил бы уже другое (см. atChoice)
-        // Выбор же закрывает список — выбранное тут же видно на странице
+        // Выбор закрывает список — выбранное тут же видно на странице, а курсор
+        // предпросмотра догоняет его, чтобы закрытие ничего не откатывало (см. closePicks)
         function choose(what, at) {
             FONT_STATE[what] = at;
+            FONT_PREVIEW[what] = at;
             applyChoice(what);
             closePicks();
             try {
