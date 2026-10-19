@@ -316,6 +316,13 @@ HTML_TEMPLATE = """
                           max-height: 300px; overflow-y: auto; background: #ffffff;
                           border: 1px solid #000000; }
         .font-pick-list[hidden] { display: none; }
+        /* Строка набора вверху списка: видно, что именно печатаешь. Список
+           прокручивается сам, строка прилипает к его верху и не уезжает */
+        .font-pick-type { position: sticky; top: 0; z-index: 1; display: block;
+                          padding: 7px 10px; font-size: 13px; font-style: italic;
+                          color: #666666; background: #ffffff;
+                          border-bottom: 1px solid #000000; }
+        .font-pick-type[hidden] { display: none; }
         .font-pick-row { display: block; width: 100%; padding: 7px 10px; text-align: left;
                          border: none; border-bottom: 1px solid #eeeeee; background: #ffffff;
                          color: #000000; font-size: 17px; line-height: 1.2; cursor: pointer; }
@@ -688,6 +695,8 @@ HTML_TEMPLATE = """
         body.dark .font-pick-row:hover, body.dark .font-pick-row.cursor,
         body.dark .font-pick-row.current { background: #262626; }
         body.dark .font-pick-row.cursor { box-shadow: inset 0 0 0 1px #e8e8e8; }
+        body.dark .font-pick-type { color: #a3a3a3; background: #1c1c1c;
+                                    border-color: #5a5a5a; }
         body.dark .font-pick-sample { color: #7d7d7d; }
         body.dark .header-topic, body.dark .panel-section, body.dark .post, body.dark .header,
         body.dark .rail, body.dark .sidebar, body.dark .sidebar-section,
@@ -2838,7 +2847,10 @@ HTML_TEMPLATE = """
             for (const [what, id] of [['font', 'fontPick'], ['heads', 'headPick']]) {
                 const list = document.getElementById(id + 'List');
                 if (!list) continue;
-                list.innerHTML = FONT_CHOICES.map((one, at) =>
+                // Строка набора стоит первой в списке и прилипает к его верху:
+                // список прокручивается сам, а видно, что именно печатаешь
+                list.innerHTML = '<div class="font-pick-type" hidden></div>' +
+                    FONT_CHOICES.map((one, at) =>
                     '<button type="button" class="font-pick-row" data-at="' + at + '">' +
                     escapeHtml(one.name) +
                     '<span class="font-pick-sample">Когда ты зайдёшь</span></button>').join('');
@@ -2866,6 +2878,12 @@ HTML_TEMPLATE = """
                 if (!list || list.hidden) continue;
                 list.hidden = true;
                 PICK_TYPE.buf = '';
+                // Фильтр набора — не выбор: закрытый список показывает все строки
+                // и прячет строку набора, иначе следующее открытие началось бы
+                // с чужого сокращённого списка (см. filterPick)
+                list.querySelectorAll('.font-pick-row[hidden]').forEach(one => one.hidden = false);
+                const hint = list.querySelector('.font-pick-type');
+                if (hint) hint.hidden = true;
                 const btn = document.getElementById(what === 'font' ? 'fontPick' : 'headPick');
                 if (btn) btn.setAttribute('aria-expanded', 'false');
                 // Предпросмотр не выбор: закрытый без выбора список возвращает
@@ -2914,16 +2932,26 @@ HTML_TEMPLATE = """
                 return;
             }
             // Печать в открытом списке — поиск по имени, как в родном <select>:
-            // набранное слово ищется по началу имени, и курсор прыгает на
-            // первое совпадение (см. typeInPick)
-            if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) {
-                for (const what of ['font', 'heads']) {
-                    const list = listOf(what);
-                    if (!list || list.hidden) continue;
-                    event.preventDefault();
-                    typeInPick(what, event.key);
-                    return;
+            // набранное слово видно строкой в списке, список сокращается до
+            // совпадений по подстроке, а курсор стоит на первом из них
+            // (см. typeInPick). Backspace стирает последнюю букву — список
+            // растёт обратно той же дорогой
+            const openWhat = ['font', 'heads'].find(what => {
+                const list = listOf(what);
+                return list && !list.hidden;
+            });
+            if (openWhat && (event.key === 'Backspace' ||
+                             (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey))) {
+                event.preventDefault();
+                if (event.key === 'Backspace') {
+                    PICK_TYPE.buf = PICK_TYPE.buf.slice(0, -1);
+                    PICK_TYPE.at = Date.now();
+                    filterPick(openWhat);
+                    if (PICK_TYPE.buf) jumpToPick(openWhat, false);
+                } else {
+                    typeInPick(openWhat, event.key);
                 }
+                return;
             }
             // Стрелки листают открытый список, и страница показывает шрифт за
             // курсором — так нужный ищут глазами, а не перебором «выбрать —
@@ -2934,7 +2962,7 @@ HTML_TEMPLATE = """
                 const list = listOf(what);
                 if (!list || list.hidden) continue;
                 event.preventDefault();
-                const rows = Array.prototype.slice.call(list.querySelectorAll('.font-pick-row'));
+                const rows = Array.prototype.slice.call(list.querySelectorAll('.font-pick-row:not([hidden])'));
                 if (!rows.length) return;
                 const marked = list.querySelector('.font-pick-row.cursor');
                 let here = rows.indexOf(marked);
@@ -2988,35 +3016,64 @@ HTML_TEMPLATE = """
             });
         }
 
+        // Набранное слово видно прямо в списке, а список сокращается до строк,
+        // где оно встретилось: печатая, видно и то, что набираешь, и то,
+        // что осталось. Нашлось ноль — строка говорит об этом, а не молчит.
+        // Сбрасывается всё при закрытии списка (см. closePicks)
+        function filterPick(what) {
+            const list = listOf(what);
+            if (!list) return;
+            const buf = PICK_TYPE.buf;
+            let shown = 0;
+            list.querySelectorAll('.font-pick-row').forEach(one => {
+                const hit = !buf || FONT_CHOICES[Number(one.dataset.at)].name.toLowerCase().includes(buf);
+                one.hidden = !hit;
+                if (hit) shown++;
+            });
+            const hint = list.querySelector('.font-pick-type');
+            if (hint) {
+                hint.hidden = !buf;
+                hint.textContent = !buf ? ''
+                    : (shown ? 'Ищем: ' + buf : 'Ничего не найдено: «' + buf + '»');
+            }
+        }
+
+        // Курсор прыгает на первое из видимых, чьё имя содержит набранное слово;
+        // повтор одной и той же буквы ползёт дальше по найденным. Нашлось ноль —
+        // курсор гаснет, список безмолвствует строкой «Ничего не найдено»
+        function jumpToPick(what, repeat) {
+            const list = listOf(what);
+            if (!list) return;
+            const rows = Array.prototype.slice.call(list.querySelectorAll('.font-pick-row:not([hidden])'));
+            const marked = list.querySelector('.font-pick-row.cursor');
+            if (!rows.length) {
+                if (marked) marked.classList.remove('cursor');
+                return;
+            }
+            let start = 0;
+            if (repeat && marked && rows.indexOf(marked) >= 0) {
+                start = rows.indexOf(marked) + 1;
+            }
+            for (let i = 0; i < rows.length; i++) {
+                const at = (start + i) % rows.length;
+                rows[at].focus({preventScroll: true});
+                moveCursor(what, Number(rows[at].dataset.at));
+                return;
+            }
+        }
+
         // Набор по открытому списку — это поиск, а не выбор: буквы складываются
         // в слово (полсекунды молчания его стирают, как в родных списках),
-        // и курсор прыгает на первую строку, чьё имя начинается с этого слова.
-        // Повтор одной и той же буквы ползёт дальше по одноимённым — печатаешь
-        // «rr» и переходишь с Russo One на Ruslan Display. Закрепляется найденное
-        // тем же Enter или щелчком, что и строчное листание (см. choose)
+        // слово видно строкой в списке, и список сокращается до совпадений
+        // по подстроке (см. filterPick). Закрепляется найденное тем же Enter
+        // или щелчком, что и строчное листание (см. choose)
         function typeInPick(what, letter) {
             const now = Date.now();
             if (now - PICK_TYPE.at > 500) PICK_TYPE.buf = '';
             PICK_TYPE.at = now;
             PICK_TYPE.buf += letter.toLowerCase();
-            const list = listOf(what);
-            if (!list) return;
-            const rows = Array.prototype.slice.call(list.querySelectorAll('.font-pick-row'));
-            if (!rows.length) return;
-            const marked = list.querySelector('.font-pick-row.cursor');
-            let start = 0;
-            if (PICK_TYPE.buf.length === 1 && marked &&
-                FONT_CHOICES[Number(marked.dataset.at)].name.toLowerCase().startsWith(PICK_TYPE.buf)) {
-                start = rows.indexOf(marked) + 1;
-            }
-            for (let i = 0; i < rows.length; i++) {
-                const at = (start + i) % rows.length;
-                if (FONT_CHOICES[Number(rows[at].dataset.at)].name.toLowerCase().startsWith(PICK_TYPE.buf)) {
-                    rows[at].focus({preventScroll: true});
-                    moveCursor(what, Number(rows[at].dataset.at));
-                    return;
-                }
-            }
+            filterPick(what);
+            jumpToPick(what, PICK_TYPE.buf.length === 1);
         }
 
         // В памяти страницы лежит ИМЯ выбранного шрифта, а не его номер в списке:

@@ -869,8 +869,32 @@ BUGS = {
     ],
     "поиск по списку снова ничего не ищет": [
         ("aitheatre/page.py",
-         "                if (FONT_CHOICES[Number(rows[at].dataset.at)].name.toLowerCase().startsWith(PICK_TYPE.buf)) {",
-         "                if (false) {"),
+         "                const hit = !buf || FONT_CHOICES[Number(one.dataset.at)].name.toLowerCase().includes(buf);",
+         "                const hit = true;"),
+    ],
+    "список при наборе снова не прячет несовпавшие строки": [
+        ("aitheatre/page.py",
+         "                one.hidden = !hit;",
+         "                one.hidden = false;"),
+    ],
+    "набранное слово снова не видно в списке": [
+        ("aitheatre/page.py",
+         "                hint.textContent = !buf ? ''",
+         "                hint.textContent = null"),
+    ],
+    "пустой результат снова молчит": [
+        ("aitheatre/page.py",
+         ": 'Ничего не найдено: «' + buf + '»');",
+         ": 'Ищем: ' + buf);"),
+    ],
+    "Backspace снова не стирает букву": [
+        ("aitheatre/page.py",
+         "                    PICK_TYPE.buf = PICK_TYPE.buf.slice(0, -1);",
+         "                    PICK_TYPE.buf = PICK_TYPE.buf;"),
+    ],
+    "закрытый список снова оставляет строки спрятанными": [
+        ("aitheatre/page.py",
+         "                list.querySelectorAll('.font-pick-row[hidden]').forEach(one => one.hidden = false);\n", ""),
     ],
     "повтор буквы снова не переходит к следующему одноимённому": [
         ("aitheatre/page.py",

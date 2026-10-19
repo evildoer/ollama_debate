@@ -4392,19 +4392,45 @@ class TestRoleMarks(unittest.TestCase):
                       "буфер набора не стирается — слова набираются вечно")
         self.assertIn("PICK_TYPE.buf += letter.toLowerCase();", self.page,
                       "буквы набора не копятся в слово")
-        self.assertIn("                if (FONT_CHOICES[Number(rows[at].dataset.at)]"
-                      ".name.toLowerCase().startsWith(PICK_TYPE.buf)) {", self.page,
-                      "поиск по списку не ищет по началу имени")
+        # Набранное видно строкой в списке, а список сокращается до совпадений
+        # по ПОДСТРОКЕ: печатая, видно и что набираешь, и что осталось
+        self.assertIn("function filterPick(what) {", self.page,
+                      "набранное слово не показывается и не фильтрует список")
+        self.assertIn(".name.toLowerCase().includes(buf);", self.page,
+                      "список ищет не по подстроке — совпадения в середине имени пропадают")
+        self.assertIn("one.hidden = !hit;", self.page,
+                      "несовпавшие строки списка не прячутся")
+        self.assertIn("hint.textContent = !buf ? ''", self.page,
+                      "строка набора не показывает, что печатаешь")
+        self.assertIn(": 'Ничего не найдено: «' + buf + '»');", self.page,
+                      "пустой результат списка молчит вместо строки «Ничего не найдено»")
+        # Backspace стирает последнюю букву — список растёт обратно
+        self.assertIn("PICK_TYPE.buf = PICK_TYPE.buf.slice(0, -1);", self.page,
+                      "Backspace не стирает букву набора")
+        self.assertIn("                    filterPick(openWhat);", self.page,
+                      "стирание буквы не пересчитывает список")
+        # Стрелки и прыжок ходят только по видимым строкам: скрытые фильтром
+        # не должны получать курсор
+        self.assertIn("querySelectorAll('.font-pick-row:not([hidden])')", self.page,
+                      "курсор может встать на строку, спрятанную фильтром")
         self.assertIn("start = rows.indexOf(marked) + 1;", self.page,
-                      "повтор той же буквы не переходит к следующему одноимённому")
+                      "повтор той же буквы не переходит к следующему совпадению")
+        # Закрытый список сбирает фильтр: строки обратно все, строка набора
+        # спрятана — иначе следующее открытие началось бы с чужого сокращения
         self.assertIn("                PICK_TYPE.buf = '';", self.page,
                       "закрытый список не стирает набранное слово")
+        self.assertIn("list.querySelectorAll('.font-pick-row[hidden]').forEach(one => one.hidden = false);",
+                      self.page, "закрытый список оставляет строки спрятанными фильтром")
+        self.assertIn("                if (hint) hint.hidden = true;", self.page,
+                      "строка набора переживает закрытие списка")
         # Оба списка страницы заполняются из того же FONT_CHOICES (см. fillPicks):
         # перечень имён, написанный в разметке руками, разошёлся бы с правилами,
         # и в выборе стоял бы шрифт, которого у страницы уже нет
         self.assertIn("[['font', 'fontPick'], ['heads', 'headPick']]", self.page,
                       "списки текста и заголовков заполняются не общим перечнем")
-        self.assertIn("list.innerHTML = FONT_CHOICES.map((one, at) =>", self.page,
+        self.assertIn("list.innerHTML = '<div class=\"font-pick-type\" hidden></div>' +", self.page,
+                      "над строками списка нет строки набора — печать невидима")
+        self.assertIn("FONT_CHOICES.map((one, at) =>", self.page,
                       "в списке стоят имена не из FONT_CHOICES")
         self.assertIn("escapeHtml(one.name) +", self.page,
                       "в списке вместо имени шрифта что-то другое")
@@ -4455,7 +4481,14 @@ class TestRoleMarks(unittest.TestCase):
         self.assertIn("function togglePick(what) {", self.page, "список шрифтов нечем открыть")
         self.assertIn("        .font-pick-list { position: absolute; left: 0; right: 0; bottom: 100%;",
                       self.page, "список раскрывается не вверх — он стоит внизу сайдбара")
-        self.assertIn("if (!(event.target.closest && event.target.closest('.font-pick-wrap'))) closePicks();",
+        self.assertIn("        .font-pick-list[hidden] { display: none; }", self.page,
+                      "список шрифтов не скрывается атрибутом hidden")
+        # Строка набора прилипает к верху списка и видна в тёмной сцене
+        self.assertIn(".font-pick-type { position: sticky; top: 0;", self.page,
+                      "строка набора не прилипает к верху списка")
+        self.assertIn("body.dark .font-pick-type { color: #a3a3a3; background: #1c1c1c;",
+                      self.page, "в тёмной сцене строка набора не перекрашена")
+        self.assertIn("        if (!(event.target.closest && event.target.closest('.font-pick-wrap'))) closePicks();",
                       self.page, "список шрифтов не закрывается щелчком мимо")
         self.assertIn("if (event.key === 'Escape') {", self.page,
                       "список шрифтов не закрывается с клавиатуры")
